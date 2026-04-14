@@ -41,18 +41,44 @@ export const POLL_INTERVAL_MS = 60 * 1000;
 export const TOKEN_REFRESH_BUFFER_SECS = 300; // refresh 5 min before expiry
 export const OAUTH_CALLBACK_TIMEOUT_MS = 120_000; // 2 min
 
-// Platform paths (macOS — extend with process.platform checks if needed)
+// Platform-aware paths
 import * as path from 'path';
 import * as os from 'os';
 
-export const STATE_DB_PATH = path.join(
-    os.homedir(),
-    'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb'
-);
+const isMac     = process.platform === 'darwin';
+const isLinux   = process.platform === 'linux';
+const isWindows = process.platform === 'win32';
 
-export const LS_CERT_PATHS = [
-    '/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/dist/languageServer/cert.pem',
-];
+/** Path to Antigravity's local state SQLite DB (used for active-account detection) */
+export const STATE_DB_PATH = isMac
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
+    : isLinux
+        ? path.join(os.homedir(), '.config', 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
+        : isWindows
+            ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
+            : '';
+
+/** Ordered list of candidate cert paths for the local language server */
+export const LS_CERT_PATHS: string[] = isMac
+    ? [
+        '/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/dist/languageServer/cert.pem',
+    ]
+    : isLinux
+        ? [
+            '/opt/antigravity/resources/app/extensions/antigravity/dist/languageServer/cert.pem',
+            path.join(os.homedir(), '.local', 'share', 'antigravity', 'resources', 'app', 'extensions', 'antigravity', 'dist', 'languageServer', 'cert.pem'),
+        ]
+        : isWindows
+            ? [
+                path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'Antigravity', 'resources', 'app', 'extensions', 'antigravity', 'dist', 'languageServer', 'cert.pem'),
+            ]
+            : [];
 
 /** grep pattern to find the LS binary in `ps` output */
-export const LS_PROCESS_GREP = 'language_server_macos';
+export const LS_PROCESS_GREP = isMac
+    ? 'language_server_macos'
+    : isLinux
+        ? 'language_server_linux'
+        : isWindows
+            ? 'language_server_win'
+            : 'language_server';

@@ -7,12 +7,12 @@
 </p>
 
 <p align="center">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20only-lightgrey?logo=apple"/>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
   <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-green"/>
 </p>
 
-> **⚠️ macOS Only** — The extension currently relies on macOS-specific binary names (`language_server_macos`) and app paths (`/Applications/Antigravity.app/...`) to communicate with the local Antigravity server. Linux/Windows support requires platform detection updates in the source.
+> **🖥️ Platform Support** — macOS is fully tested. Linux and Windows support is included but not yet validated — paths are based on standard Antigravity installation locations.
 
 ---
 
