@@ -82,6 +82,11 @@ export function getScripts(): string {
             if (diff <= 0) return 'Reset';
             const h = Math.floor(diff / 3600000);
             const m = Math.floor((diff % 3600000) / 60000);
+            if (h >= 24) {
+                const d = Math.floor(h / 24);
+                const rh = h % 24;
+                return rh > 0 ? d + 'd ' + rh + 'h' : d + 'd';
+            }
             return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
         }
 
