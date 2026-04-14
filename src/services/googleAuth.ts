@@ -8,6 +8,7 @@ import {
 } from '../constants';
 import { getOAuthSuccessHtml } from '../templates/oauthSuccess';
 import { createLogger } from '../utils/logger';
+import { collectBody } from '../utils/http';
 
 const log = createLogger('GoogleAuth');
 
@@ -44,16 +45,15 @@ export class GoogleAuthService {
             const req = https.get(USERINFO_URL, {
                 headers: { Authorization: `Bearer ${accessToken}` },
                 timeout: 10000,
-            }, (res) => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
-                        resolve(JSON.parse(data));
+            }, async (res) => {
+                try {
+                    const { status, body } = await collectBody(res);
+                    if (status === 200) {
+                        resolve(JSON.parse(body));
                     } else {
-                        reject(new Error(`UserInfo failed: HTTP ${res.statusCode}`));
+                        reject(new Error(`UserInfo failed: HTTP ${status}`));
                     }
-                });
+                } catch (e) { reject(e); }
             });
             req.on('error', reject);
         });
@@ -157,16 +157,15 @@ export class GoogleAuthService {
                     'Content-Length': Buffer.byteLength(body),
                 },
                 timeout: 10000,
-            }, (res) => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
+            }, async (res) => {
+                try {
+                    const { status, body: data } = await collectBody(res);
+                    if (status === 200) {
                         resolve(JSON.parse(data));
                     } else {
-                        reject(new Error(`Token request failed: HTTP ${res.statusCode} — ${data.substring(0, 200)}`));
+                        reject(new Error(`Token request failed: HTTP ${status} — ${data.substring(0, 200)}`));
                     }
-                });
+                } catch (e) { reject(e); }
             });
             req.on('error', reject);
             req.write(body);

@@ -1,15 +1,7 @@
 import * as https from 'https';
-import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, IMPORTANT_MODELS, USER_AGENT } from '../constants';
-import { QuotaModel, HttpError } from '../types';
-
-export interface QuotaResult {
-    models: QuotaModel[];
-    tier: string | null;
-    tierName: string | null;
-    isForbidden: boolean;
-    isError: boolean;
-    errorMessage?: string;
-}
+import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, IMPORTANT_MODELS, USER_AGENT, DEFAULT_PROJECT_ID } from '../constants';
+import { QuotaModel, QuotaResult, HttpError } from '../types';
+import { collectBody } from '../utils/http';
 
 export class QuotaApiService {
 
@@ -46,7 +38,7 @@ export class QuotaApiService {
     // --- Private ---
 
     private async loadProjectInfo(accessToken: string): Promise<{ projectId: string; tier: string | null; tierName: string | null }> {
-        let projectId = 'bamboo-precept-lgxtn'; // fallback
+        let projectId = DEFAULT_PROJECT_ID;
         let tier: string | null = null;
         let tierName: string | null = null;
 
@@ -102,7 +94,6 @@ export class QuotaApiService {
         return new Promise((resolve, reject) => {
             const bodyStr = JSON.stringify(body);
             const parsed = new URL(endpoint);
-
             const req = https.request({
                 hostname: parsed.hostname,
                 path: parsed.pathname + parsed.search,
@@ -115,16 +106,15 @@ export class QuotaApiService {
                     'Accept': 'application/json',
                 },
                 timeout: 25000,
-            }, (res) => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => {
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            }, async (res) => {
+                try {
+                    const { status, body: data } = await collectBody(res);
+                    if (status >= 200 && status < 300) {
                         try { resolve(JSON.parse(data)); } catch { resolve(data); }
                     } else {
-                        reject(new HttpError(res.statusCode || 0, `HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
+                        reject(new HttpError(status, `HTTP ${status}: ${data.substring(0, 200)}`));
                     }
-                });
+                } catch (e) { reject(e); }
             });
             req.on('error', reject);
             req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });

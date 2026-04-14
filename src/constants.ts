@@ -36,10 +36,13 @@ export const ACCOUNTS_LIST_KEY = 'ag.trackedAccounts';
 // User-Agent for API requests
 export const USER_AGENT = 'Antigravity/4.1.29 Chrome/132.0.6834.160 Electron/39.2.3';
 
-// Polling & timeout
+/** Minimum UI refresh polling interval */
 export const POLL_INTERVAL_MS = 60 * 1000;
 export const TOKEN_REFRESH_BUFFER_SECS = 300; // refresh 5 min before expiry
 export const OAUTH_CALLBACK_TIMEOUT_MS = 120_000; // 2 min
+
+/** Fallback GCP project ID used when loadCodeAssist does not return one */
+export const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
 
 // Platform-aware paths
 import * as path from 'path';

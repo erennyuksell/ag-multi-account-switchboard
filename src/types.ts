@@ -83,6 +83,16 @@ export class HttpError extends Error {
     }
 }
 
+/** Fetched quota result returned by QuotaApiService */
+export interface QuotaResult {
+    models: QuotaModel[];
+    tier: string | null;
+    tierName: string | null;
+    isForbidden: boolean;
+    isError: boolean;
+    errorMessage?: string;
+}
+
 // ==================== Local Quota Types ====================
 
 /** Model quota info from local LS GetUserStatus response */

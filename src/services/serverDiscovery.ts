@@ -3,6 +3,8 @@ import { promisify } from 'util';
 import * as http from 'http';
 import { ServerInfo } from '../types';
 import { LS_PROCESS_GREP } from '../constants';
+import { getWindowsProcessLines } from '../utils/lsClient';
+import { collectBody } from '../utils/http';
 
 const execAsync = promisify(exec);
 const isWindows = process.platform === 'win32';
@@ -61,22 +63,18 @@ export class ServerDiscoveryService {
         return this.parsePsOutput(stdout);
     }
 
-    /** Windows: use wmic to find candidates */
+    /** Windows: use PowerShell + wmic fallback to find candidates */
     private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string }[]> {
-        const { stdout } = await execAsync(
-            `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get ProcessId,CommandLine /format:csv 2>nul`
-        );
-        // wmic CSV: Node,CommandLine,ProcessId
-        const candidates: { pid: string; csrfToken: string; wsId?: string }[] = [];
-        for (const line of stdout.split('\n')) {
-            const tokenMatch = line.match(/--csrf_token\s+([a-zA-Z0-9\-]+)/);
-            if (!tokenMatch) continue;
-            const pidMatch = line.trim().match(/,(\d+)\s*$/);
-            if (!pidMatch) continue;
-            const wsMatch = line.match(/--workspace_id\s+(\S+)/);
-            candidates.push({ pid: pidMatch[1], csrfToken: tokenMatch[1], wsId: wsMatch?.[1] });
-        }
-        return candidates;
+        const lines = await getWindowsProcessLines(LS_PROCESS_GREP);
+        return lines.flatMap(line => {
+            const csrf = line.match(/--csrf_token[\s=]+([a-zA-Z0-9-]+)/)?.[1];
+            const pid  = line.match(/--api_server_port[\s=]+(\d+)/)?.[1]  // not used but present
+                      ?? line.match(/ProcessId[=,"\s]*(\d+)/i)?.[1];
+            // PID comes from PowerShell's ExpandProperty — not in the line itself.
+            // Use a sentinel to force port-scan-all-LS-ports fallback when pid unknown.
+            const wsId = line.match(/--workspace_id[\s=]+(\S+)/)?.[1];
+            return csrf ? [{ pid: pid ?? '0', csrfToken: csrf, wsId }] : [];
+        });
     }
 
     /** Parse `ps` stdout into candidates */
@@ -129,7 +127,6 @@ export class ServerDiscoveryService {
             const body = JSON.stringify({
                 metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' },
             });
-
             const req = http.request({
                 hostname: '127.0.0.1',
                 port: serverInfo.port,
@@ -142,23 +139,18 @@ export class ServerDiscoveryService {
                     'X-Codeium-Csrf-Token': serverInfo.csrfToken,
                 },
                 timeout: 3000,
-            }, (res: any) => {
-                let chunks = '';
-                res.on('data', (chunk: any) => chunks += chunk);
-                res.on('end', () => {
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                        try {
-                            resolve(JSON.parse(chunks));
-                        } catch {
-                            reject(new Error('Invalid JSON response'));
-                        }
+            }, async (res) => {
+                try {
+                    const { status, body: data } = await collectBody(res);
+                    if (status >= 200 && status < 300) {
+                        try { resolve(JSON.parse(data)); }
+                        catch { reject(new Error('Invalid JSON response')); }
                     } else {
-                        reject(new Error(`Server responded with status ${res.statusCode}`));
+                        reject(new Error(`Server responded with status ${status}`));
                     }
-                });
+                } catch (e) { reject(e); }
             });
-
-            req.on('error', (e: any) => reject(e));
+            req.on('error', reject);
             req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
             req.write(body);
             req.end();

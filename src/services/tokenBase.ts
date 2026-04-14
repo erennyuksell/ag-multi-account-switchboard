@@ -4,6 +4,7 @@ import { ServerInfo } from '../types';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
+import { collectBuffer } from '../utils/http';
 
 
 const log = createLogger('TokenBase');
@@ -374,17 +375,15 @@ export class TokenBaseService {
                     'X-Codeium-Csrf-Token': serverInfo.csrfToken,
                 },
                 timeout: timeoutMs,
-            }, (res) => {
-                const chunks: Buffer[] = [];
-                res.on('data', (c: Buffer) => chunks.push(c));
-                res.on('end', () => {
-                    const body = Buffer.concat(chunks);
-                    if (res.statusCode === 200) {
+            }, async (res) => {
+                try {
+                    const { status, body } = await collectBuffer(res);
+                    if (status === 200) {
                         resolve(body);
                     } else {
-                        reject(new Error(`HTTP ${res.statusCode}: ${body.toString().substring(0, 100)}`));
+                        reject(new Error(`HTTP ${status}: ${body.toString().substring(0, 100)}`));
                     }
-                });
+                } catch (e) { reject(e); }
             });
             req.on('error', reject);
             req.on('timeout', () => req.destroy(new Error('timeout')));

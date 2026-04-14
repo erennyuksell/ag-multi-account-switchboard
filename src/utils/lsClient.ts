@@ -19,8 +19,33 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
+import { collectBuffer } from './http';
 
 const execAsync = promisify(exec);
+
+/**
+ * Returns raw command-line strings for all processes matching `grep` on Windows.
+ * Prefers PowerShell (works on Win 11 22H2+ where wmic is removed), falls back to wmic.
+ * Never throws — returns [] on any failure.
+ */
+export async function getWindowsProcessLines(grep: string): Promise<string[]> {
+    const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${grep}*' } | Select-Object -ExpandProperty CommandLine"`;
+    const wmic = `wmic process where "CommandLine like '%${grep}%'" get CommandLine /format:value 2>nul`;
+    try {
+        const { stdout } = await execAsync(ps, { timeout: 8000 });
+        return stdout.split('\n').map(l => l.trim()).filter(Boolean);
+    } catch {
+        try {
+            const { stdout } = await execAsync(wmic, { timeout: 5000 });
+            // wmic /format:value emits "CommandLine=<value>" lines
+            return stdout.split('\n')
+                .map(l => l.replace(/^CommandLine=/i, '').trim())
+                .filter(Boolean);
+        } catch {
+            return [];
+        }
+    }
+}
 
 /** { port, csrf, wsId } tuple extracted from a running Language Server process */
 export interface LsEndpoint {
@@ -41,20 +66,18 @@ export interface LsEndpoint {
  */
 export async function findLSEndpoints(): Promise<LsEndpoint[]> {
     try {
-        let stdout: string;
+        let lines: string[];
         if (process.platform === 'win32') {
-            ({ stdout } = await execAsync(
-                `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get CommandLine /format:value 2>nul`,
-                { timeout: 5000 },
-            ));
+            lines = await getWindowsProcessLines(LS_PROCESS_GREP);
         } else {
-            ({ stdout } = await execAsync(
+            const { stdout } = await execAsync(
                 `ps -A -ww -o args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
                 { timeout: 5000 },
-            ));
+            );
+            lines = stdout.trim().split('\n').filter(Boolean);
         }
 
-        return stdout.trim().split('\n').filter(Boolean).flatMap(line => {
+        return lines.flatMap(line => {
             const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
             const csrf = line.match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
             const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
@@ -118,19 +141,15 @@ export function callLSEndpoint(
                 },
                 ...(ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false }),
             },
-            (res) => {
-                const chunks: Buffer[] = [];
-                res.on('data', (c: Buffer) => chunks.push(c));
-                res.on('end', () => {
-                    const body = Buffer.concat(chunks);
-                    if (res.statusCode === 200) {
+            async (res) => {
+                try {
+                    const { status, body } = await collectBuffer(res);
+                    if (status === 200) {
                         resolve(body);
                     } else {
-                        reject(new Error(
-                            `HTTP ${res.statusCode}: ${body.toString().substring(0, 200)}`,
-                        ));
+                        reject(new Error(`HTTP ${status}: ${body.toString().substring(0, 200)}`));
                     }
-                });
+                } catch (e) { reject(e); }
             },
         );
         req.on('error', reject);
