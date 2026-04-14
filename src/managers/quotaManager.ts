@@ -212,9 +212,9 @@ export class QuotaManager {
         }
 
         try {
-            // Fallback: read from antigravityAuthStatus in state.vscdb (async — does not block)
+            // Fallback: read from antigravityAuthStatus in state.vscdb
             const sql = "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus';";
-            const { stdout } = await execAsync(`echo "${sql}" | sqlite3 "${STATE_DB_PATH}"`, {
+            const { stdout } = await execAsync(`sqlite3 "${STATE_DB_PATH}" "${sql}"`, {
                 timeout: 5000,
             });
             const result = stdout.trim();
