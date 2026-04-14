@@ -1,10 +1,29 @@
 {
-  "name": "my-ag-panel",
+  "name": "ag-multi-account-switchboard",
   "displayName": "AG Multi-Account Switchboard",
   "description": "Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets and reset timers — all in one sidebar panel.",
   "icon": "assets/icon.png",
   "version": "2.0.0",
-  "publisher": "eren",
+  "publisher": "erennyuksel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/erennyuksell/ag-multi-account-switchboard"
+  },
+  "homepage": "https://github.com/erennyuksell/ag-multi-account-switchboard#readme",
+  "bugs": {
+    "url": "https://github.com/erennyuksell/ag-multi-account-switchboard/issues"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "antigravity",
+    "ai",
+    "quota",
+    "multi-account",
+    "switchboard"
+  ],
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -62,11 +81,14 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish:ovsx": "ovsx publish *.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.0.0",
     "typescript": "^5.4.0"
   }
 }
