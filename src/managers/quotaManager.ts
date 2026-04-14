@@ -279,7 +279,13 @@ export class QuotaManager {
             if (isValid && diffMs > 0) {
                 const h = Math.floor(diffMs / 3_600_000);
                 const min = Math.floor((diffMs % 3_600_000) / 60_000);
-                timeDiff = h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
+                if (h >= 24) {
+                    const d = Math.floor(h / 24);
+                    const rh = h % 24;
+                    timeDiff = rh > 0 ? `(${d}d ${rh}h left)` : `(${d}d left)`;
+                } else {
+                    timeDiff = h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
+                }
             } else {
                 timeDiff = '(Reset)';
             }
