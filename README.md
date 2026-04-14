@@ -6,6 +6,14 @@
   <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/preview.png" alt="AG Multi-Account Switchboard Preview" width="400"/>
 </p>
 
+<p align="center">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20only-lightgrey?logo=apple"/>
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-green"/>
+</p>
+
+> **⚠️ macOS Only** — Windows and Linux support is not yet available. The extension relies on macOS-specific paths to communicate with the local Antigravity server.
+
 ---
 
 ## ✨ Features
