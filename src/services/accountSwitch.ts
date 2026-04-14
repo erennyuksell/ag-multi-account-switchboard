@@ -6,12 +6,13 @@ import * as https from 'https';
 import * as fs from 'fs';
 import { GoogleAuthService } from './googleAuth';
 import { SwitchAccountOptions, USSApi } from '../types';
-import { STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
+import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
 import {
     encodeVarInt, encodeTag, encodeString, encodeVarintField,
     encodeMessage, extractField, extractStringField,
 } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
+import { writeToStateDb } from '../utils/dbWriter';
 
 const log = createLogger('AccountSwitch');
 
@@ -330,6 +331,7 @@ export class AccountSwitchService {
     /**
      * Write auth status to the IDE's state database (async — does not block extension host).
      * Uses hex-encoded JSON as SQLite X'...' blob to prevent SQL injection.
+     * Delegates to dbWriter which: (1) creates a backup first, (2) uses cross-platform CLI args.
      */
     private writeAuthStatusToDb(name: string, email: string, apiKey: string): void {
         const proto = Buffer.concat([encodeVarintField(2, 1), encodeString(3, name), encodeString(7, email)]);
@@ -338,10 +340,8 @@ export class AccountSwitchService {
         const hexValue = Buffer.from(json, 'utf-8').toString('hex');
         const sql = `UPDATE ItemTable SET value = CAST(X'${hexValue}' AS TEXT) WHERE key = 'antigravityAuthStatus';`;
 
-        // Pipe SQL via echo — exec() doesn't support `input` option (that's execSync-only)
-        const escapedSql = sql.replace(/"/g, '\\"');
-        execAsync(`echo "${escapedSql}" | sqlite3 "${STATE_DB_PATH}"`, { timeout: 5000 })
-            .catch(err => log.warn('Legacy DB write failed:', err?.message));
+        // Delegate to dbWriter: backs up state.vscdb first, then writes cross-platform
+        writeToStateDb(sql).catch(err => log.warn('Legacy DB write failed:', err?.message));
     }
 
     async testApiAccess(): Promise<boolean> {
@@ -369,13 +369,29 @@ function delay(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
 }
 
-/** Find active language server processes via ps + grep (async — does not block) */
+/**
+ * Find active language server processes and return their HTTP port + CSRF token.
+ * Uses ps on macOS/Linux, wmic on Windows — reads --https_server_port directly
+ * from process args (faster than lsof; different from serverDiscovery which finds
+ * the dynamically-assigned API port via TCP scan).
+ */
 async function findActiveLanguageServers(): Promise<Array<{ port: number; csrf: string }>> {
     try {
-        const { stdout } = await execAsync(`ps aux | grep "${LS_PROCESS_GREP}" | grep -v grep`, { timeout: 5000 });
+        let stdout: string;
+        if (process.platform === 'win32') {
+            ({ stdout } = await execAsync(
+                `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get CommandLine /format:value 2>nul`,
+                { timeout: 5000 }
+            ));
+        } else {
+            ({ stdout } = await execAsync(
+                `ps -A -ww -o args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
+                { timeout: 5000 }
+            ));
+        }
         return stdout.trim().split('\n').filter(Boolean).map(line => {
-            const port = line.match(/--https_server_port\s+(\d+)/)?.[1];
-            const csrf = line.match(/--csrf_token\s+([\w-]+)/)?.[1];
+            const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
+            const csrf = line.match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
             return port && csrf ? { port: +port, csrf } : null;
         }).filter((x): x is { port: number; csrf: string } => x !== null);
     } catch {
