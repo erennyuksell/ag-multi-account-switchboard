@@ -280,7 +280,7 @@ export function getScripts(): string {
                     subBlock = '<div class="acct-sub"><span style="color:var(--error)">\u26a0 ' + (a.errorMessage || 'Error') + '</span></div>';
                 } else {
                     // Use pinned model if set, otherwise bottleneck
-                    const pinnedId = pinnedModels[a.id || a.email];
+                    const pinnedId = pinnedModels[a.email];
                     const displayModel = pinnedId
                         ? (a.models.find(m => m.id === pinnedId) || a.bottleneck)
                         : a.bottleneck;
@@ -317,7 +317,7 @@ export function getScripts(): string {
                     for (const m of a.models) {
                         const fCls = fillClass(m.pct);
                         const mTl = timeLeft(m.resetTime);
-                        const acctKey = a.id || a.email;
+                        const acctKey = a.email;
                         const isPinned = pinnedModels[acctKey] === m.id;
                         const starCls = isPinned ? 'star-btn pinned' : 'star-btn';
                         const starIcon = isPinned ? '\u2605' : '\u2606';
