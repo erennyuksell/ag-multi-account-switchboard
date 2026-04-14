@@ -1,22 +1,15 @@
 import * as vscode from 'vscode';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import * as path from 'path';
-import * as https from 'https';
-import * as fs from 'fs';
 import { GoogleAuthService } from './googleAuth';
 import { SwitchAccountOptions, USSApi } from '../types';
-import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
 import {
     encodeVarInt, encodeTag, encodeString, encodeVarintField,
     encodeMessage, extractField, extractStringField,
 } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
 import { writeToStateDb } from '../utils/dbWriter';
+import { findLSEndpoints, loadLSCert, callLSEndpoint } from '../utils/lsClient';
 
 const log = createLogger('AccountSwitch');
-
-const execAsync = promisify(exec);
 
 /**
  * AccountSwitchService — Programmatic IDE account switching (NO RELOAD)
@@ -222,7 +215,7 @@ export class AccountSwitchService {
     // ==================== LS HTTP Communication ====================
 
     private async callRegisterGdmUserOnAllLS(): Promise<void> {
-        const lsProcesses = await findActiveLanguageServers();
+        const lsProcesses = await findLSEndpoints();
         if (lsProcesses.length === 0) {
             log.warn('No active LS processes found');
             return;
@@ -246,7 +239,7 @@ export class AccountSwitchService {
      *   this.switchGeneration will increment and this loop will abort.
      */
     private async pollRichUserStatus(uss: USSApi, generation: number, maxWaitMs = 12000, intervalMs = 1000): Promise<void> {
-        const lsProcesses = await findActiveLanguageServers();
+        const lsProcesses = await findLSEndpoints();
         if (lsProcesses.length === 0) return;
         const ca = loadLSCert();
         const ls = lsProcesses[0];
@@ -369,70 +362,5 @@ function delay(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
 }
 
-/**
- * Find active language server processes and return their HTTP port + CSRF token.
- * Uses ps on macOS/Linux, wmic on Windows — reads --https_server_port directly
- * from process args (faster than lsof; different from serverDiscovery which finds
- * the dynamically-assigned API port via TCP scan).
- */
-async function findActiveLanguageServers(): Promise<Array<{ port: number; csrf: string }>> {
-    try {
-        let stdout: string;
-        if (process.platform === 'win32') {
-            ({ stdout } = await execAsync(
-                `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get CommandLine /format:value 2>nul`,
-                { timeout: 5000 }
-            ));
-        } else {
-            ({ stdout } = await execAsync(
-                `ps -A -ww -o args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
-                { timeout: 5000 }
-            ));
-        }
-        return stdout.trim().split('\n').filter(Boolean).map(line => {
-            const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
-            const csrf = line.match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
-            return port && csrf ? { port: +port, csrf } : null;
-        }).filter((x): x is { port: number; csrf: string } => x !== null);
-    } catch {
-        return [];
-    }
-}
 
-/** Load LS TLS certificate for verified HTTPS calls */
-function loadLSCert(): Buffer | undefined {
-    const dynamicPath = path.join(path.dirname(require.main?.filename || ''), '..', 'languageServer', 'cert.pem');
-    for (const p of [dynamicPath, ...LS_CERT_PATHS]) {
-        try { return fs.readFileSync(p); } catch { /* try next */ }
-    }
-    return undefined;
-}
-
-/** Make a ConnectRPC-style POST to a language server endpoint */
-function callLSEndpoint(ls: { port: number; csrf: string }, endpoint: string, ca?: Buffer): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-        const req = https.request({
-            hostname: 'localhost',
-            port: ls.port,
-            path: endpoint,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/proto',
-                'Connect-Protocol-Version': '1',
-                'x-codeium-csrf-token': ls.csrf,
-                'Content-Length': '0',
-            },
-            ...(ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false }),
-        }, (res) => {
-            const chunks: Buffer[] = [];
-            res.on('data', (c: Buffer) => chunks.push(c));
-            res.on('end', () => {
-                const body = Buffer.concat(chunks);
-                res.statusCode === 200 ? resolve(body) : reject(new Error(`HTTP ${res.statusCode}: ${body.toString()}`));
-            });
-        });
-        req.on('error', reject);
-        req.setTimeout(10000, () => req.destroy(new Error('timeout')));
-        req.end();
-    });
-}
+// findActiveLanguageServers, loadLSCert, callLSEndpoint → moved to src/utils/lsClient.ts

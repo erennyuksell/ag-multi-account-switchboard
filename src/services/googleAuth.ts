@@ -1,7 +1,6 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as crypto from 'crypto';
-import * as url from 'url';
 import * as vscode from 'vscode';
 import {
     CLIENT_ID, CLIENT_SECRET, TOKEN_URL, AUTH_URL,
@@ -68,7 +67,7 @@ export class GoogleAuthService {
         tokens: { access_token: string; refresh_token: string; expires_in: number };
         userInfo: { email: string; name: string };
     } | null> {
-        return new Promise(async (resolve) => {
+        return new Promise((resolve) => {
             const port = 19876 + Math.floor(Math.random() * 100);
             const redirectUri = `http://127.0.0.1:${port}/callback`;
             const state = crypto.randomBytes(16).toString('hex');
@@ -96,9 +95,9 @@ export class GoogleAuthService {
                     return;
                 }
 
-                const parsed = url.parse(req.url, true);
-                const code = parsed.query.code as string;
-                const returnedState = parsed.query.state as string;
+                const parsed = new URL(req.url!, 'http://localhost');
+                const code = parsed.searchParams.get('code') ?? '';
+                const returnedState = parsed.searchParams.get('state') ?? '';
 
                 if (!code || returnedState !== state) {
                     res.writeHead(400);

@@ -20,14 +20,14 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "my-ag-sidebar",
+          "id": "ag-switchboard",
           "title": "Antigravity",
           "icon": "assets/icon.svg"
         }
       ]
     },
     "views": {
-      "my-ag-sidebar": [
+      "ag-switchboard": [
         {
           "type": "webview",
           "id": "ag.quotaView",

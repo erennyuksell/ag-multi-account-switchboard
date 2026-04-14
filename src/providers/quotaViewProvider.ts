@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AccountQuota } from '../types';
+import { AccountQuota, LocalQuotaData } from '../types';
 import { TokenBaseData } from '../services/tokenBase';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../webview/template';
@@ -63,7 +63,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
     }
 
     updateData(
-        localData: any,
+        localData: LocalQuotaData | null,
         selectedModels: string[],
         trackedQuotas: AccountQuota[] = [],
         activeEmail: string = '',

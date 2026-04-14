@@ -1,12 +1,6 @@
-import * as https from 'https';
-import * as fs from 'fs';
-import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
 import { createLogger } from '../utils/logger';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import * as path from 'path';
+import { findLSEndpoints, loadLSCert, callLSEndpoint } from '../utils/lsClient';
 
-const execAsync = promisify(exec);
 const log = createLogger('TokenBase');
 
 // ==================== Types ====================
@@ -149,25 +143,25 @@ function parseTokenBaseResponse(buf: Buffer): TokenBaseData {
     return { categories, totalTokens, remainingBudget, customizationBudget, usedPercent };
 }
 
-// ==================== Service ====================
 
 export class TokenBaseService {
 
     /** Fetch token base data from the first available LS */
     async fetchTokenBase(): Promise<TokenBaseData | null> {
         try {
-            const lsProcesses = await this.findLS();
+            const lsProcesses = await findLSEndpoints();
             if (lsProcesses.length === 0) {
                 log.warn('No active LS processes found');
                 return null;
             }
 
-            const ca = this.loadCert();
+            const ca = loadLSCert();
+            const endpoint = '/exa.language_server_pb.LanguageServerService/GetTokenBase';
 
             // Try each LS until one succeeds
             for (const ls of lsProcesses) {
                 try {
-                    const body = await this.callEndpoint(ls, ca);
+                    const body = await callLSEndpoint(ls, endpoint, ca);
                     const data = parseTokenBaseResponse(body);
                     log.info(`Token base fetched: ${data.totalTokens}/${data.customizationBudget} tokens (${data.usedPercent}% used, ${data.categories.length} categories)`);
                     return data;
@@ -181,54 +175,5 @@ export class TokenBaseService {
             log.error('fetchTokenBase failed:', e?.message);
             return null;
         }
-    }
-
-    private async findLS(): Promise<Array<{ port: number; csrf: string }>> {
-        try {
-            const { stdout } = await execAsync(`ps aux | grep "${LS_PROCESS_GREP}" | grep -v grep`, { timeout: 5000 });
-            return stdout.trim().split('\n').filter(Boolean).map(line => {
-                const port = line.match(/--https_server_port\s+(\d+)/)?.[1];
-                const csrf = line.match(/--csrf_token\s+([\w-]+)/)?.[1];
-                return port && csrf ? { port: +port, csrf } : null;
-            }).filter((x): x is { port: number; csrf: string } => x !== null);
-        } catch {
-            return [];
-        }
-    }
-
-    private loadCert(): Buffer | undefined {
-        const dynamicPath = path.join(path.dirname(require.main?.filename || ''), '..', 'languageServer', 'cert.pem');
-        for (const p of [dynamicPath, ...LS_CERT_PATHS]) {
-            try { return fs.readFileSync(p); } catch { /* next */ }
-        }
-        return undefined;
-    }
-
-    private callEndpoint(ls: { port: number; csrf: string }, ca?: Buffer): Promise<Buffer> {
-        return new Promise((resolve, reject) => {
-            const req = https.request({
-                hostname: 'localhost',
-                port: ls.port,
-                path: '/exa.language_server_pb.LanguageServerService/GetTokenBase',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/proto',
-                    'Connect-Protocol-Version': '1',
-                    'x-codeium-csrf-token': ls.csrf,
-                    'Content-Length': '0',
-                },
-                ...(ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false }),
-            }, (res) => {
-                const chunks: Buffer[] = [];
-                res.on('data', (c: Buffer) => chunks.push(c));
-                res.on('end', () => {
-                    const body = Buffer.concat(chunks);
-                    res.statusCode === 200 ? resolve(body) : reject(new Error(`HTTP ${res.statusCode}`));
-                });
-            });
-            req.on('error', reject);
-            req.setTimeout(10000, () => req.destroy(new Error('timeout')));
-            req.end();
-        });
     }
 }

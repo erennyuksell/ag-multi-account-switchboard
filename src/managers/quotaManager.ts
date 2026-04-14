@@ -21,6 +21,7 @@ export class QuotaManager {
     private lastLocalData: LocalQuotaData | null = null;
     private lastTrackedQuotas: AccountQuota[] = [];
     private viewProvider: QuotaViewProvider | null = null;
+    private _refreshInFlight = false;
     private readonly serverDiscovery = new ServerDiscoveryService();
     private readonly switchService: AccountSwitchService;
     private readonly tokenBaseService = new TokenBaseService();
@@ -83,6 +84,8 @@ export class QuotaManager {
     }
 
     async refresh() {
+        if (this._refreshInFlight) return;
+        this._refreshInFlight = true;
         try {
             if (this.viewProvider) this.viewProvider.setLoading();
 
@@ -121,6 +124,8 @@ export class QuotaManager {
             if (this.viewProvider) this.viewProvider.setError(msg);
             this.statusBarItem.text = '$(error) Antigravity: Error';
             this.statusBarItem.tooltip = msg;
+        } finally {
+            this._refreshInFlight = false;
         }
     }
 
