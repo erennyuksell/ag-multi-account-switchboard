@@ -9,6 +9,22 @@ export function getScripts(): string {
         let isFirstLoad = true;
         let currentIntervalMs = 60000;
 
+        // ─── Global Error Surface ───
+        window.onerror = function(msg, src, line, col, err) {
+            var overlay = document.getElementById('fatalError');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'fatalError';
+                overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;padding:10px 14px;background:#5a1d1d;color:#f97583;font-size:11px;font-family:monospace;z-index:9999;white-space:pre-wrap;word-break:break-all;border-bottom:1px solid #f97583';
+                document.body.prepend(overlay);
+            }
+            overlay.textContent = '\u26a0 Panel Script Error\\n' + msg + (line ? ' (line ' + line + ')' : '') + (err && err.stack ? '\\n' + err.stack.slice(0,300) : '');
+            return false;
+        };
+        window.addEventListener('unhandledrejection', function(e) {
+            window.onerror('Unhandled Promise: ' + (e.reason?.message || e.reason), '', 0, 0, e.reason);
+        });
+
         // ─── Actions ───
         function refresh() { vscode.postMessage({ type: 'refresh' }); }
         function addAccount() { vscode.postMessage({ type: 'addAccount' }); }
@@ -32,6 +48,12 @@ export function getScripts(): string {
             const btn = document.getElementById('refreshBtn');
             if (btn) { btn.classList.add('spinning'); setTimeout(() => btn.classList.remove('spinning'), 1200); }
             refresh();
+        }
+
+        function doRefreshTokenOnly() {
+            const trb = document.getElementById('tokenRefreshBtn');
+            if (trb) { trb.classList.add('spinning'); setTimeout(() => trb.classList.remove('spinning'), 1200); }
+            vscode.postMessage({ type: 'refreshTokenOnly' });
         }
 
         // ─── Tab Switching ───
@@ -363,12 +385,16 @@ export function getScripts(): string {
                     document.getElementById('content').classList.add('hidden');
                 } else {
                     document.getElementById('refreshBtn').classList.add('spinning');
+                    var trb = document.getElementById('tokenRefreshBtn');
+                    if (trb) trb.classList.add('spinning');
                 }
                 document.getElementById('error').innerText = '';
             }
             else if (msg.type === 'error') {
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('refreshBtn').classList.remove('spinning');
+                var trb2 = document.getElementById('tokenRefreshBtn');
+                if (trb2) trb2.classList.remove('spinning');
                 document.getElementById('error').innerText = msg.message;
                 if (isFirstLoad) {
                     document.getElementById('content').classList.remove('hidden');
@@ -379,6 +405,8 @@ export function getScripts(): string {
                 document.getElementById('loading').style.display = 'none';
                 const rb = document.getElementById('refreshBtn');
                 if (rb) rb.classList.remove('spinning');
+                var trb3 = document.getElementById('tokenRefreshBtn');
+                if (trb3) trb3.classList.remove('spinning');
                 document.getElementById('content').classList.remove('hidden');
                 document.getElementById('error').innerText = '';
                 isFirstLoad = false;
@@ -386,7 +414,13 @@ export function getScripts(): string {
                 try {
                     window._lastRenderArgs = [msg.data, msg.selectedModels, msg.trackedAccounts || [], msg.activeEmail || ''];
                     renderAll(...window._lastRenderArgs);
-                    if (msg.tokenBase) renderTokenBudget(msg.tokenBase);
+                    if (msg.tokenBase) {
+                        renderTokenBudget(msg.tokenBase);
+                    } else {
+                        const el = document.getElementById('tokenContent');
+                        if (el) el.innerHTML = '<div class="token-empty"><div class="em-icon">⚠️</div><div class="em-title">Token data unavailable</div><div class="em-sub">No Language Server found for this workspace.</div></div>';
+                    }
+                    renderWorkspaceContext(msg.workspaceContext || null);
                     document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
                 } catch (e) {
                     document.getElementById('error').innerText = 'Render error: ' + e.message;
@@ -395,7 +429,7 @@ export function getScripts(): string {
         });
 
         // ─── Token Budget Render ───
-        const CAT_ICONS = { 'Rules': '\\ud83d\\udccb', 'Skills': '\\ud83e\\udde0', 'Workflows': '\\u2699\\ufe0f', 'Mcp Tools': '\\ud83d\\udd0c' };
+        const CAT_ICONS = { 'Rules': '📋', 'Skills': '🧠', 'Workflows': '⚙️', 'Mcp Tools': '🔌' };
 
         function fmtNum(n) { return n.toLocaleString(); }
 
@@ -505,6 +539,90 @@ export function getScripts(): string {
             });
             el.querySelectorAll('.mcp-server .cat-item-name').forEach(function(n) {
                 if (openMcps.has(n.textContent)) n.closest('.mcp-server').classList.add('open');
+            });
+        }
+        // ─── Workspace Context Render ───
+        function renderWorkspaceContext(wc) {
+            const el = document.getElementById('workspaceContextContent');
+            if (!el) return;
+
+            var rAon = (wc && wc.rules) ? wc.rules : [];
+            var rMd  = (wc && wc.rulesModelDecision) ? wc.rulesModelDecision : [];
+            var rMan = (wc && wc.rulesManual) ? wc.rulesManual : [];
+            var skills = (wc && wc.skills) ? wc.skills : [];
+            var workflows = (wc && wc.workflows) ? wc.workflows : [];
+
+            if (!wc || (rAon.length + rMd.length + rMan.length + skills.length + workflows.length === 0)) {
+                el.innerHTML = '<div class="wc-empty">No .agent/ items indexed for this workspace.</div>';
+                return;
+            }
+
+            // Save open state
+            var openGroups = new Set();
+            el.querySelectorAll('.wc-group.open .wc-group-title').forEach(function(n) { openGroups.add(n.dataset.key); });
+
+            var html = '';
+
+            // Header
+            var total = rAon.length + rMd.length + rMan.length + skills.length + workflows.length;
+            html += '<div class="wc-header">';
+            html += '<span class="wc-ws-name">' + ((wc && wc.workspaceName) ? wc.workspaceName : 'Workspace') + '</span>';
+            html += '<span class="wc-total">' + total + ' items</span>';
+            html += '</div>';
+
+            var groups = [
+                { key: 'rules',      icon: '\ud83d\udccb', label: 'Rules',              items: rAon,  mode: 'always-on' },
+                { key: 'rulesmd',    icon: '\ud83d\udcc4', label: 'Rules (AI decides)', items: rMd,   mode: 'model-decision' },
+                { key: 'rulesmanual',icon: '\ud83d\udcc4', label: 'Rules (manual)',      items: rMan,  mode: 'manual' },
+                { key: 'skills',     icon: '\ud83e\udde0', label: 'Skills',              items: skills,    mode: 'on-demand' },
+                { key: 'workflows',  icon: '\u2699\ufe0f', label: 'Workflows',           items: workflows, mode: 'on-demand' },
+            ];
+
+            for (var gi = 0; gi < groups.length; gi++) {
+                var g = groups[gi];
+                if (!g.items || g.items.length === 0) continue;
+                var isOpen = openGroups.has(g.key);
+
+                // Total token estimate for group
+                var groupTokens = g.items.reduce(function(sum, it) { return sum + Math.round((it.sizeBytes || 0) / 4); }, 0);
+                var groupTokStr = groupTokens > 0 ? '~' + groupTokens.toLocaleString() + ' tok' : '';
+
+                html += '<div class="wc-group' + (isOpen ? ' open' : '') + '">';
+                html += '<div class="wc-group-hdr" onclick="toggleOpen(this)">';
+                html += '<span class="wc-group-icon">' + g.icon + '</span>';
+                html += '<span class="wc-group-title" data-key="' + g.key + '">' + g.label + '</span>';
+                html += '<span class="wc-mode-badge wc-mode-' + g.mode.replace(/-/g, '') + '">' + g.mode + '</span>';
+                if (groupTokStr) html += '<span class="wc-group-tokens">' + groupTokStr + '</span>';
+                html += '<span class="wc-group-count">' + g.items.length + '</span>';
+                html += '<span class="wc-chev">\u203a</span>';
+                html += '</div>';
+                html += '<div class="wc-items">';
+                for (var ii = 0; ii < g.items.length; ii++) {
+                    var item = g.items[ii];
+                    var tok = (item.sizeBytes || 0) > 0 ? Math.round(item.sizeBytes / 4) : 0;
+                    var escapedPath = (item.path || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+                    var escapedName = (item.name || '').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+                    html += '<div class="wc-item wc-item-clickable" data-open-path="' + escapedPath + '" title="' + escapedPath + '">';
+                    html += '<span class="wc-item-name">' + escapedName + '</span>';
+                    if (tok > 0) html += '<span class="wc-item-tokens">~' + tok.toLocaleString() + '</span>';
+                    html += '</div>';
+                }
+                html += '</div></div>';
+            }
+
+            el.innerHTML = html;
+
+            // Delegated click → open file in editor
+            el.querySelectorAll('.wc-item-clickable[data-open-path]').forEach(function(node) {
+                node.addEventListener('click', function() {
+                    var p = node.getAttribute('data-open-path');
+                    if (p) vscode.postMessage({ type: 'openFile', path: p });
+                });
+            });
+
+            // Restore open state
+            el.querySelectorAll('.wc-group .wc-group-title').forEach(function(n) {
+                if (openGroups.has(n.dataset.key)) n.closest('.wc-group').classList.add('open');
             });
         }
     `;

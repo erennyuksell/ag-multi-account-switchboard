@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { GoogleAuthService } from './googleAuth';
 import { SwitchAccountOptions, USSApi } from '../types';
 import {
-    encodeVarInt, encodeTag, encodeString, encodeVarintField,
+    encodeString, encodeVarintField,
     encodeMessage, extractField, extractStringField,
 } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
@@ -43,7 +43,6 @@ const log = createLogger('AccountSwitch');
  */
 export class AccountSwitchService {
 
-    private readonly context: vscode.ExtensionContext;
     private readonly authService: GoogleAuthService;
 
     // Proactive Token Renewal state
@@ -62,8 +61,7 @@ export class AccountSwitchService {
     /** Maximum safe setTimeout delay — Node.js caps at 2^31-1 ms (~24.8 days) */
     private static readonly MAX_TIMEOUT_MS = 2_147_483_647;
 
-    constructor(context: vscode.ExtensionContext, authService: GoogleAuthService) {
-        this.context = context;
+    constructor(_context: vscode.ExtensionContext, authService: GoogleAuthService) {
         this.authService = authService;
     }
 

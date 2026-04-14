@@ -3,7 +3,7 @@
   "displayName": "AG Multi-Account Switchboard",
   "description": "Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets and reset timers — all in one sidebar panel.",
   "icon": "assets/icon.png",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "publisher": "erennyuksell",
   "license": "MIT",
   "repository": {
@@ -28,7 +28,6 @@
     "vscode": "^1.80.0"
   },
   "main": "./out/extension.js",
-
   "activationEvents": [
     "onView:ag.quotaView",
     "onStartupFinished"
@@ -38,7 +37,7 @@
       "activitybar": [
         {
           "id": "ag-switchboard",
-          "title": "Antigravity",
+          "title": "AG Switchboard",
           "icon": "assets/icon.svg"
         }
       ]
@@ -48,7 +47,7 @@
         {
           "type": "webview",
           "id": "ag.quotaView",
-          "name": "Quota",
+          "name": "Accounts",
           "icon": "assets/icon.svg"
         }
       ]
@@ -56,22 +55,22 @@
     "commands": [
       {
         "command": "ag.refreshQuota",
-        "title": "Antigravity: Refresh Quota",
+        "title": "AG Switchboard: Refresh Quota",
         "icon": "$(refresh)"
       },
       {
         "command": "ag.addAccount",
-        "title": "Antigravity: Add Tracked Account",
+        "title": "AG Switchboard: Add Account",
         "icon": "$(add)"
       },
       {
         "command": "ag.removeAccount",
-        "title": "Antigravity: Remove Tracked Account",
+        "title": "AG Switchboard: Remove Account",
         "icon": "$(trash)"
       },
       {
         "command": "ag.addAccountByToken",
-        "title": "Antigravity: Add Account via Token",
+        "title": "AG Switchboard: Add Account via Token",
         "icon": "$(key)"
       }
     ],

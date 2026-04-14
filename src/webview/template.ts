@@ -6,7 +6,7 @@ import { getScripts } from './scripts';
  * Assembles the full webview HTML from separate style and script modules.
  * This file only contains the HTML skeleton — all CSS is in styles.ts, all JS in scripts.ts.
  */
-export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+export function getWebviewContent(_webview: vscode.Webview, _extensionUri: vscode.Uri): string {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -67,13 +67,32 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
 
         <!-- Tab 2: Token Budget -->
         <div id="tab-tokens" class="tab-content">
+            <!-- Token tab refresh strip -->
+            <div class="token-strip">
+                <span class="token-strip-label">Context Budget</span>
+                <button class="s-btn" id="tokenRefreshBtn" title="Refresh token budget" onclick="doRefreshTokenOnly()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+                </button>
+            </div>
             <div id="tokenContent" class="token-tab">
                 <div class="token-empty">
-                    <div class="em-icon">\\ud83d\\udcca</div>
-                    <div class="em-title">Loading token data...</div>
+                    <div class="em-icon">📊</div>
+                    <div class="em-title">Token data loading...</div>
+                </div>
+            </div>
+            <!-- Workspace Context: .agent/ items from LS index (not filesystem) -->
+            <div class="wc-section">
+                <div class="wc-section-hdr">
+                    <span class="wc-section-icon">🗂️</span>
+                    <span class="wc-section-label">Workspace Context</span>
+                    <span class="wc-section-badge">.agent/</span>
+                </div>
+                <div id="workspaceContextContent" class="wc-content">
+                    <div class="wc-empty">Loading workspace context...</div>
                 </div>
             </div>
         </div>
+
 
         <!-- Footer -->
         <div class="foot">

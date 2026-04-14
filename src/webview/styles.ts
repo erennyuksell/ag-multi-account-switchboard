@@ -372,6 +372,16 @@ export function getStyles(): string {
         .tab-content.active { display: flex; }
 
         /* ─── Token Budget Tab ─── */
+        .token-strip {
+            padding: 6px 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            background: rgba(128,128,128,0.03);
+            flex-shrink: 0;
+        }
+        .token-strip-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
         .token-tab { padding: 8px; }
         .token-empty { text-align: center; padding: 28px 16px; color: var(--muted); }
         .token-empty .em-icon { font-size: 28px; margin-bottom: 10px; opacity: .35; }
@@ -486,5 +496,100 @@ export function getStyles(): string {
         .mcp-server.open .mcp-server-chev { transform: rotate(90deg); }
         .mcp-server .mcp-tools { max-height: 0; overflow: hidden; transition: max-height .25s ease; }
         .mcp-server.open .mcp-tools { max-height: 800px; }
+
+        /* ─── Workspace Context Section ─── */
+        .wc-section {
+            margin-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+        .wc-section-hdr {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 8px 5px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+        }
+        .wc-section-icon { font-size: 13px; }
+        .wc-section-label { flex: 1; }
+        .wc-section-badge {
+            font-family: var(--vscode-editor-font-family, monospace);
+            font-size: 10px;
+            background: rgba(128,128,128,0.12);
+            color: var(--muted);
+            border-radius: 3px;
+            padding: 1px 5px;
+        }
+        .wc-content { padding: 0 0 6px; }
+        .wc-empty { padding: 6px 10px; font-size: 11px; color: var(--muted); font-style: italic; }
+
+        /* Workspace header strip */
+        .wc-header {
+            display: flex; align-items: center; gap: 6px;
+            padding: 4px 8px 6px;
+            font-size: 11px;
+        }
+        .wc-ws-name { font-weight: 500; color: var(--fg); flex: 1; }
+        .wc-total { color: var(--muted); font-size: 10px; }
+
+        /* Workspace groups (rules/skills/workflows) */
+        .wc-group { border-radius: 4px; overflow: hidden; margin: 0 4px 3px; }
+        .wc-group-hdr {
+            display: flex; align-items: center; gap: 6px;
+            padding: 5px 8px;
+            cursor: pointer;
+            user-select: none;
+            border-radius: 4px;
+            background: rgba(128,128,128,0.04);
+        }
+        .wc-group-hdr:hover { background: var(--hover); }
+        .wc-group-icon { font-size: 12px; }
+        .wc-group-title { flex: 1; font-size: 12px; font-weight: 500; }
+        .wc-group-count {
+            font-size: 10px; font-weight: 600;
+            background: var(--badge-bg); color: var(--badge-fg);
+            border-radius: 8px; padding: 0 5px; min-width: 18px;
+            text-align: center;
+        }
+        .wc-group-tokens {
+            font-size: 10px; color: var(--muted);
+            font-family: var(--vscode-editor-font-family, monospace);
+        }
+        .wc-mode-badge {
+            font-size: 9px; font-weight: 600;
+            border-radius: 3px; padding: 1px 5px;
+            text-transform: uppercase; letter-spacing: 0.05em;
+            flex-shrink: 0;
+        }
+        .wc-mode-alwayson    { background: rgba(78,201,176,0.15); color: #4ec9b0; }
+        .wc-mode-modeldecision { background: rgba(179,136,255,0.15); color: #b388ff; }
+        .wc-mode-manual      { background: rgba(128,128,128,0.12); color: var(--muted); }
+        .wc-mode-ondemand    { background: rgba(204,167,0,0.15); color: #cca700; }
+        .wc-chev {
+            color: var(--muted); font-size: 11px;
+            transition: transform .2s; flex-shrink: 0;
+        }
+        .wc-group.open .wc-chev { transform: rotate(90deg); }
+        .wc-items { max-height: 0; overflow: hidden; transition: max-height .25s ease; }
+        .wc-group.open .wc-items { max-height: 1200px; }
+
+        /* Individual workspace item rows */
+        .wc-item {
+            display: flex; align-items: center; gap: 6px;
+            padding: 3px 8px 3px 22px;
+            font-size: 11px;
+        }
+        .wc-item:hover { background: var(--hover); border-radius: 3px; }
+        .wc-item-clickable { cursor: pointer; }
+        .wc-item-clickable:hover .wc-item-name { color: var(--accent); text-decoration: underline; }
+        .wc-item-name {
+            flex: 1; color: var(--fg);
+            font-family: var(--vscode-editor-font-family, monospace);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .wc-item-tokens { color: var(--muted); font-size: 10px; flex-shrink: 0; font-family: var(--vscode-editor-font-family, monospace); }
     `;
 }

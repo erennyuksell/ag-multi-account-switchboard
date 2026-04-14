@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AccountQuota, LocalQuotaData } from '../types';
-import { TokenBaseData } from '../services/tokenBase';
+import { TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../webview/template';
 
@@ -32,6 +32,28 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'refresh':
                     this.quotaManager.refresh();
                     break;
+                case 'refreshTokenOnly':
+                    this.quotaManager.refreshTokenOnly();
+                    break;
+                case 'openFile': {
+                    const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+                    if (wsRoot && msg.path) {
+                        // Skills are indexed as directories — open their SKILL.md
+                        const isSkillDir = /^\.agent\/skills\/[^/]+$/.test(msg.path);
+                        const filePath = isSkillDir ? msg.path + '/SKILL.md' : msg.path;
+                        const fileUri = vscode.Uri.joinPath(wsRoot, filePath);
+                        vscode.workspace.openTextDocument(fileUri).then(doc =>
+                            vscode.window.showTextDocument(doc, { preview: true })
+                        ).then(undefined, () => {
+                            // Fallback: try without SKILL.md (e.g. index.md)
+                            const fallback = vscode.Uri.joinPath(wsRoot, msg.path);
+                            vscode.workspace.openTextDocument(fallback).then(doc =>
+                                vscode.window.showTextDocument(doc, { preview: true })
+                            );
+                        });
+                    }
+                    break;
+                }
                 case 'toggleModel':
                     await this.quotaManager.toggleStatusBarModel(msg.modelId, msg.isVisible);
                     break;
@@ -68,6 +90,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
         trackedQuotas: AccountQuota[] = [],
         activeEmail: string = '',
         tokenBase: TokenBaseData | null = null,
+        workspaceContext: WorkspaceContextData | null = null,
     ) {
         this._view?.webview.postMessage({
             type: 'update',
@@ -75,6 +98,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
             selectedModels,
             activeEmail,
             tokenBase,
+            workspaceContext,
             trackedAccounts: trackedQuotas.map(q => ({
                 id: q.account.id,
                 email: q.account.email,

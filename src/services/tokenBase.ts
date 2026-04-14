@@ -1,7 +1,38 @@
 import { createLogger } from '../utils/logger';
 import { findLSEndpoints, loadLSCert, callLSEndpoint } from '../utils/lsClient';
+import { ServerInfo } from '../types';
+import * as http from 'http';
+import * as fs from 'fs';
+import * as path from 'path';
+
 
 const log = createLogger('TokenBase');
+
+// ==================== Workspace Context Types ====================
+
+export interface WorkspaceContextItem {
+    /** Display name e.g. "advanced-event-handler-refs" */
+    name: string;
+    /** Relative path e.g. ".agent/rules/advanced-event-handler-refs.md" */
+    path: string;
+    /** Size in bytes from LS index */
+    sizeBytes: number;
+    /** Actual trigger from frontmatter: always_on | model_decision | manual */
+    trigger: 'always_on' | 'model_decision' | 'manual';
+}
+
+export interface WorkspaceContextData {
+    /** Name of the workspace folder */
+    workspaceName: string;
+    /** Rules with trigger=always_on */
+    rules: WorkspaceContextItem[];
+    /** Rules with trigger=model_decision */
+    rulesModelDecision: WorkspaceContextItem[];
+    /** Rules with trigger=manual */
+    rulesManual: WorkspaceContextItem[];
+    skills: WorkspaceContextItem[];
+    workflows: WorkspaceContextItem[];
+}
 
 // ==================== Types ====================
 
@@ -78,9 +109,6 @@ function readFields(buf: Buffer): ProtoField[] {
     return fields;
 }
 
-function getString(f: ProtoField): string {
-    return f.bytes?.toString('utf-8') || '';
-}
 
 // ==================== Response Parser ====================
 
@@ -144,36 +172,223 @@ function parseTokenBaseResponse(buf: Buffer): TokenBaseData {
 }
 
 
+// ==================== Context Scope Parser ====================
+
+/**
+ * Parse GetMatchingContextScopeItems response.
+ * Structure: top-level repeated nested message → inner nested → f4(size), f5(uri), f6({f1:root,f2:relPath})
+ */
+function parseContextScope(buf: Buffer): Array<{ uri: string; relPath: string; sizeBytes: number }> {
+    const results: Array<{ uri: string; relPath: string; sizeBytes: number }> = [];
+    const topFields = readFields(buf);
+
+    for (const topField of topFields) {
+        if (!topField.bytes) continue;
+
+        // Try direct data first, then one level deeper
+        let dataFields = readFields(topField.bytes);
+        const deeper = dataFields.find(f => (f.field === 1 || f.field === 2) && f.bytes);
+        if (deeper?.bytes) {
+            const deepFields = readFields(deeper.bytes);
+            if (deepFields.some(f => f.field === 5 && f.bytes)) {
+                dataFields = deepFields;
+            }
+        }
+
+        const uriField = dataFields.find(f => f.field === 5 && f.bytes);
+        if (!uriField?.bytes) continue;
+        const uri = uriField.bytes.toString('utf-8');
+        if (!uri.includes('.agent/')) continue;
+
+        const sizeBytes = dataFields.find(f => f.field === 4)?.varint ?? 0;
+        const pathWrapper = dataFields.find(f => f.field === 6 && f.bytes)?.bytes;
+
+        let relPath = '';
+        if (pathWrapper) {
+            const pf = readFields(pathWrapper);
+            relPath = pf.find(f => f.field === 2)?.bytes?.toString('utf-8') ?? '';
+        }
+        if (!relPath) {
+            const m = uri.match(/(\.agent\/.+)/);
+            relPath = m ? m[1] : '';
+        }
+
+        if (relPath) results.push({ uri, relPath, sizeBytes });
+    }
+
+    return results;
+}
+
+/** Read trigger value from a rule .md file's frontmatter */
+function readRuleTrigger(filePath: string): 'always_on' | 'model_decision' | 'manual' {
+    try {
+        // Only read first 256 bytes — frontmatter is always at the top
+        const fd = fs.openSync(filePath, 'r');
+        const buf = Buffer.alloc(256);
+        fs.readSync(fd, buf, 0, 256, 0);
+        fs.closeSync(fd);
+        const head = buf.toString('utf-8');
+        const match = head.match(/^---[\s\S]*?^trigger:\s*(\S+)/m);
+        if (match) {
+            const t = match[1].trim();
+            if (t === 'manual') return 'manual';
+            if (t === 'model_decision') return 'model_decision';
+        }
+    } catch { /* ignore — default to always_on */ }
+    return 'always_on';
+}
+
+/** Categorize raw scope items into rules/skills/workflows (trigger=always_on default) */
+function categorizeAgentItems(
+    items: Array<{ relPath: string; sizeBytes: number }>,
+    workspaceName: string
+): WorkspaceContextData {
+    const allRules: WorkspaceContextItem[] = [];
+    const skills: WorkspaceContextItem[] = [];
+    const workflows: WorkspaceContextItem[] = [];
+
+    for (const { relPath, sizeBytes } of items) {
+        const parts = relPath.split('/');
+        // .agent/rules/FILENAME.md  (depth 3)
+        if (parts[1] === 'rules' && parts.length === 3 && relPath.endsWith('.md')) {
+            allRules.push({ name: parts[2].replace(/\.md$/, ''), path: relPath, sizeBytes, trigger: 'always_on' });
+        }
+        // .agent/skills/SKILLNAME  (depth 3, no extension = directory)
+        else if (parts[1] === 'skills' && parts.length === 3 && !parts[2].includes('.')) {
+            skills.push({ name: parts[2], path: relPath, sizeBytes, trigger: 'always_on' });
+        }
+        // .agent/workflows/FILENAME.md  (depth 3)
+        else if (parts[1] === 'workflows' && parts.length === 3 && relPath.endsWith('.md')) {
+            workflows.push({ name: parts[2].replace(/\.md$/, ''), path: relPath, sizeBytes, trigger: 'always_on' });
+        }
+    }
+
+    const byName = (a: WorkspaceContextItem, b: WorkspaceContextItem) => a.name.localeCompare(b.name);
+    return {
+        workspaceName,
+        rules: allRules.sort(byName),          // triggers will be enriched later
+        rulesModelDecision: [],
+        rulesManual: [],
+        skills: skills.sort(byName),
+        workflows: workflows.sort(byName),
+    };
+}
+
 export class TokenBaseService {
 
-    /** Fetch token base data from the first available LS */
-    async fetchTokenBase(): Promise<TokenBaseData | null> {
+    /**
+     * Fetch token base data.
+     *
+     * Strategy:
+     * 1. If serverInfo provided (from serverDiscovery), call GetTokenBase via HTTP
+     *    on the same port \u2014 no separate HTTPS discovery needed, works for all workspaces.
+     * 2. Fallback: HTTPS discovery (only finds LS with --https_server_port in args).
+     */
+    async fetchTokenBase(serverInfo?: ServerInfo | null, workspaceId?: string): Promise<TokenBaseData | null> {
+        // Path 1: HTTP via already-discovered workspace LS port
+        if (serverInfo) {
+            try {
+                const body = await this.callHttp(serverInfo, '/exa.language_server_pb.LanguageServerService/GetTokenBase', 5000);
+                const data = parseTokenBaseResponse(body);
+                log.info(`Token base (HTTP): ${data.totalTokens}/${data.customizationBudget} tokens (${data.usedPercent}%)`);
+                return data;
+            } catch (e: any) {
+                log.warn('HTTP token base failed, falling back to HTTPS discovery:', e?.message);
+            }
+        }
+
+        // Path 2: HTTPS discovery fallback (legacy \u2014 only works if --https_server_port in args)
         try {
-            const lsProcesses = await findLSEndpoints();
-            if (lsProcesses.length === 0) {
-                log.warn('No active LS processes found');
-                return null;
+            let lsProcesses = await findLSEndpoints();
+            if (lsProcesses.length === 0) return null;
+
+            if (workspaceId) {
+                lsProcesses = [...lsProcesses].sort((a, b) =>
+                    (a.wsId === workspaceId ? 0 : 1) - (b.wsId === workspaceId ? 0 : 1)
+                );
             }
 
             const ca = loadLSCert();
             const endpoint = '/exa.language_server_pb.LanguageServerService/GetTokenBase';
-
-            // Try each LS until one succeeds
             for (const ls of lsProcesses) {
                 try {
                     const body = await callLSEndpoint(ls, endpoint, ca);
                     const data = parseTokenBaseResponse(body);
-                    log.info(`Token base fetched: ${data.totalTokens}/${data.customizationBudget} tokens (${data.usedPercent}% used, ${data.categories.length} categories)`);
+                    log.info(`Token base (HTTPS): ${data.totalTokens}/${data.customizationBudget} tokens (${data.usedPercent}%)`);
                     return data;
                 } catch (e: any) {
                     log.warn(`LS port ${ls.port} failed:`, e?.message);
                 }
             }
-
-            return null;
         } catch (e: any) {
             log.error('fetchTokenBase failed:', e?.message);
+        }
+
+        return null;
+    }
+
+    /**
+     * Fetch workspace context items from GetMatchingContextScopeItems.
+     * Reads each rule file's frontmatter to get the real trigger type.
+     * @param workspaceFsPath  Absolute filesystem path to workspace root (e.g. /Users/eren/denetmenapp-web)
+     */
+    async fetchWorkspaceContext(serverInfo: ServerInfo, workspaceName: string, workspaceFsPath: string): Promise<WorkspaceContextData | null> {
+        try {
+            const buf = await this.callHttp(serverInfo, '/exa.language_server_pb.LanguageServerService/GetMatchingContextScopeItems');
+            const raw = parseContextScope(buf);
+            const data = categorizeAgentItems(raw, workspaceName);
+
+            // Enrich each rule with its REAL trigger from frontmatter
+            const enriched: WorkspaceContextItem[] = [];
+            for (const rule of data.rules) {
+                const absPath = path.join(workspaceFsPath, rule.path);
+                const trigger = readRuleTrigger(absPath);
+                enriched.push({ ...rule, trigger });
+            }
+
+            // Split by actual trigger
+            data.rules = enriched.filter(r => r.trigger === 'always_on');
+            data.rulesModelDecision = enriched.filter(r => r.trigger === 'model_decision').sort((a, b) => a.name.localeCompare(b.name));
+            data.rulesManual = enriched.filter(r => r.trigger === 'manual').sort((a, b) => a.name.localeCompare(b.name));
+
+            log.info(`Workspace context: ${data.rules.length} always-on rules, ${data.rulesModelDecision.length} model-decision, ${data.rulesManual.length} manual, ${data.skills.length} skills, ${data.workflows.length} workflows`);
+            return data;
+        } catch (e: any) {
+            log.warn('fetchWorkspaceContext failed:', e?.message);
             return null;
         }
+    }
+
+    /** Generic HTTP POST to LS endpoint, returns raw Buffer */
+    private callHttp(serverInfo: ServerInfo, endpointPath: string, timeoutMs = 8000): Promise<Buffer> {
+        return new Promise((resolve, reject) => {
+            const req = http.request({
+                hostname: '127.0.0.1',
+                port: serverInfo.port,
+                path: endpointPath,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/proto',
+                    'Content-Length': '0',
+                    'Connect-Protocol-Version': '1',
+                    'X-Codeium-Csrf-Token': serverInfo.csrfToken,
+                },
+                timeout: timeoutMs,
+            }, (res) => {
+                const chunks: Buffer[] = [];
+                res.on('data', (c: Buffer) => chunks.push(c));
+                res.on('end', () => {
+                    const body = Buffer.concat(chunks);
+                    if (res.statusCode === 200) {
+                        resolve(body);
+                    } else {
+                        reject(new Error(`HTTP ${res.statusCode}: ${body.toString().substring(0, 100)}`));
+                    }
+                });
+            });
+            req.on('error', reject);
+            req.on('timeout', () => req.destroy(new Error('timeout')));
+            req.end();
+        });
     }
 }

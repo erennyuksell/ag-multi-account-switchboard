@@ -22,10 +22,12 @@ import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
 
 const execAsync = promisify(exec);
 
-/** { port, csrf } tuple extracted from a running Language Server process */
+/** { port, csrf, wsId } tuple extracted from a running Language Server process */
 export interface LsEndpoint {
     port: number;
     csrf: string;
+    /** workspace_id from LS process args — used to match the active workspace */
+    wsId?: string;
 }
 
 // ==================== Process Discovery ====================
@@ -55,7 +57,8 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
         return stdout.trim().split('\n').filter(Boolean).flatMap(line => {
             const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
             const csrf = line.match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
-            return port && csrf ? [{ port: +port, csrf }] : [];
+            const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
+            return port && csrf ? [{ port: +port, csrf, wsId }] : [];
         });
     } catch {
         return [];

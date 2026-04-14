@@ -6,7 +6,7 @@ import { AccountQuota, LocalQuotaData, ClientModelConfig, USSApi } from '../type
 import { AccountManager } from './accountManager';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
-import { TokenBaseService, TokenBaseData } from '../services/tokenBase';
+import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
 import { STATE_DB_PATH } from '../constants';
 import { extractStringField } from '../utils/protobuf';
@@ -26,6 +26,7 @@ export class QuotaManager {
     private readonly switchService: AccountSwitchService;
     private readonly tokenBaseService = new TokenBaseService();
     private lastTokenBase: TokenBaseData | null = null;
+    private lastWorkspaceContext: WorkspaceContextData | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -83,19 +84,26 @@ export class QuotaManager {
         if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
     }
 
-    async refresh() {
+    async refresh(activeEmailHint?: string) {
         if (this._refreshInFlight) return;
         this._refreshInFlight = true;
         try {
             if (this.viewProvider) this.viewProvider.setLoading();
 
-            // Parallel: local server + all tracked accounts + active email
-            const [localResult, trackedResult, activeEmail, tokenBase] = await Promise.all([
-                this.fetchLocal().catch(() => null),
+            // Discover workspace LS once — share with both quota fetch and token budget
+            const workspaceId = this.getWorkspaceId();
+            const serverInfo = await this.serverDiscovery.discover(workspaceId).catch(() => null);
+
+            // Parallel: local server + all tracked accounts + active email + workspace context
+            const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
+            const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const [localResult, trackedResult, tokenBase, workspaceContext] = await Promise.all([
+                serverInfo ? this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null) : Promise.resolve(null),
                 this.accountManager.refreshAllQuotas().catch(() => []),
-                this.getActiveEmail(),
-                this.tokenBaseService.fetchTokenBase().catch(() => null),
+                this.tokenBaseService.fetchTokenBase(serverInfo, workspaceId).catch(() => null),
+                serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
+            const activeEmail = activeEmailHint ?? await this.getActiveEmail();
 
             // Local (active IDE account)
             if (localResult) {
@@ -110,11 +118,12 @@ export class QuotaManager {
             // Tracked accounts
             this.lastTrackedQuotas = trackedResult;
             this.lastTokenBase = tokenBase;
+            this.lastWorkspaceContext = workspaceContext;
 
             // Push to webview
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-                    this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase);
+                    this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase, this.lastWorkspaceContext);
                 } else {
                     this.viewProvider.setError('Antigravity IDE server not found and no tracked accounts.');
                 }
@@ -124,6 +133,44 @@ export class QuotaManager {
             if (this.viewProvider) this.viewProvider.setError(msg);
             this.statusBarItem.text = '$(error) Antigravity: Error';
             this.statusBarItem.tooltip = msg;
+        } finally {
+            this._refreshInFlight = false;
+        }
+    }
+
+    /** Refresh ONLY token budget + workspace context — no account quota fetching */
+    async refreshTokenOnly() {
+        if (this._refreshInFlight) return;
+        this._refreshInFlight = true;
+        try {
+            if (this.viewProvider) this.viewProvider.setLoading();
+
+            const workspaceId = this.getWorkspaceId();
+            const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
+            const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const serverInfo = await this.serverDiscovery.discover(workspaceId).catch(() => null);
+
+            const [tokenBase, workspaceContext] = await Promise.all([
+                this.tokenBaseService.fetchTokenBase(serverInfo, workspaceId).catch(() => null),
+                serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
+            ]);
+
+            this.lastTokenBase = tokenBase;
+            this.lastWorkspaceContext = workspaceContext;
+
+            if (this.viewProvider) {
+                const activeEmail = await this.getActiveEmail();
+                this.viewProvider.updateData(
+                    this.lastLocalData,
+                    this.getSelectedModels(),
+                    this.lastTrackedQuotas,
+                    activeEmail,
+                    this.lastTokenBase,
+                    this.lastWorkspaceContext,
+                );
+            }
+        } catch (error: any) {
+            if (this.viewProvider) this.viewProvider.setError(error.message || 'Token refresh failed');
         } finally {
             this._refreshInFlight = false;
         }
@@ -156,11 +203,11 @@ export class QuotaManager {
             email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
         });
         if (success) {
-            // Immediate refresh: picks up new email → active badge updates
-            await this.refresh();
+            // Pass email directly — skip USS/sqlite3 which may still be stale.
+            // Switch is confirmed (success === true), so this is not optimistic.
+            await this.refresh(account.email);
 
-            // Delayed refresh (3s): picks up models + avatar after registerGdmUser
-            // completes its backend roundtrip
+            // Delayed refresh (3s): USS should now be in sync — read from it normally.
             setTimeout(() => this.refresh(), 3000);
         }
     }
@@ -178,23 +225,17 @@ export class QuotaManager {
 
     // --- Private ---
 
-    private async fetchLocal(): Promise<LocalQuotaData | null> {
-        const workspaceId = this.getWorkspaceId();
-        const serverInfo = await this.serverDiscovery.discover(workspaceId);
-        if (!serverInfo) return null;
-        return this.serverDiscovery.fetchLocalQuota(serverInfo);
-    }
-
     /** Build workspace_id matching the language server's --workspace_id arg format */
     private getWorkspaceId(): string | undefined {
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) return undefined;
-        // Format: file:///Users/eren/foo → file_Users_eren_foo
+        // Format must match LS's --workspace_id: slashes AND hyphens → underscores
+        // e.g. /Users/eren/denetmenapp-web → file_Users_eren_denetmenapp_web
         const uri = folders[0].uri;
         if (uri.scheme === 'file') {
-            return 'file_' + uri.path.replace(/\//g, '_').replace(/^_/, '');
+            return 'file_' + uri.path.replace(/\//g, '_').replace(/^_/, '').replace(/-/g, '_');
         }
-        return uri.toString().replace(/[/:]/g, '_');
+        return uri.toString().replace(/[/:\-]/g, '_');
     }
 
     /** Read active IDE email from USS API or antigravityAuthStatus */
