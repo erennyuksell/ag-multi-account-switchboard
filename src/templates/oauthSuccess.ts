@@ -169,8 +169,30 @@ h1{
   </div>
 
   <script>
-    let s=5;const el=document.getElementById('cd');
-    const t=setInterval(()=>{s--;el.textContent=s;if(s<=0){clearInterval(t);window.close()}},1000);
+    let s = 5;
+    const el = document.getElementById('cd');
+    const hint = document.querySelector('.close-hint');
+
+    const t = setInterval(() => {
+      s--;
+      if (el) el.textContent = s;
+      if (s <= 0) {
+        clearInterval(t);
+        // Attempt 1: standard window.close()
+        window.close();
+        // Attempt 2: some Chromium-based browsers allow this trick
+        setTimeout(() => {
+          try { window.open('', '_self', ''); window.close(); } catch(e) {}
+        }, 100);
+        // Attempt 3: if still open after 400ms, update UI to manual-close state
+        setTimeout(() => {
+          if (!window.closed && hint) {
+            hint.innerHTML =
+              'Authentication complete \u00b7 <strong style="color:#a5b4fc;cursor:pointer" onclick="window.close()">Close this tab \u2715</strong>';
+          }
+        }, 400);
+      }
+    }, 1000);
   </script>
 </body>
 </html>`;
