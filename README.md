@@ -12,7 +12,7 @@
   <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-green"/>
 </p>
 
-> **⚠️ macOS Only** — Windows and Linux support is not yet available. The extension relies on macOS-specific paths to communicate with the local Antigravity server.
+> **⚠️ macOS Only** — The extension currently relies on macOS-specific binary names (`language_server_macos`) and app paths (`/Applications/Antigravity.app/...`) to communicate with the local Antigravity server. Linux/Windows support requires platform detection updates in the source.
 
 ---
 
