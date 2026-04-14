@@ -3,7 +3,7 @@
 **Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets, and reset timers — all in one sidebar panel.**
 
 <p align="center">
-  <img src="assets/preview.png" alt="Antigravity Quota Panel" width="400"/>
+  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/preview.png" alt="AG Multi-Account Switchboard Preview" width="400"/>
 </p>
 
 ---
