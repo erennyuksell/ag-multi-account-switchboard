@@ -491,7 +491,21 @@ export function getScripts(): string {
                 html += '</div></div>';
             }
 
+            // Save which categories / mcp-servers are currently open
+            var openCats = new Set();
+            var openMcps = new Set();
+            el.querySelectorAll('.cat-card.open .cat-name').forEach(function(n) { openCats.add(n.textContent); });
+            el.querySelectorAll('.mcp-server.open .cat-item-name').forEach(function(n) { openMcps.add(n.textContent); });
+
             el.innerHTML = html;
+
+            // Restore open state
+            el.querySelectorAll('.cat-card .cat-name').forEach(function(n) {
+                if (openCats.has(n.textContent)) n.closest('.cat-card').classList.add('open');
+            });
+            el.querySelectorAll('.mcp-server .cat-item-name').forEach(function(n) {
+                if (openMcps.has(n.textContent)) n.closest('.mcp-server').classList.add('open');
+            });
         }
     `;
 }
