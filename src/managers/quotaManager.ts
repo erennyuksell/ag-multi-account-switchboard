@@ -64,12 +64,20 @@ export class QuotaManager {
     setViewProvider(provider: QuotaViewProvider) {
         this.viewProvider = provider;
         if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-            this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas);
+            this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, '', null, null, this.getPinnedModels());
         }
     }
 
     getSelectedModels(): string[] {
         return this.context.globalState.get<string[]>('ag.selectedStatusBarModels', []);
+    }
+
+    getPinnedModels(): Record<string, string> {
+        return { ...this.context.globalState.get<Record<string, string>>('ag.pinnedModels', {}) };
+    }
+
+    async setPinnedModels(pins: Record<string, string>): Promise<void> {
+        await this.context.globalState.update('ag.pinnedModels', pins);
     }
 
     async toggleStatusBarModel(modelId: string, isVisible: boolean) {
@@ -123,7 +131,7 @@ export class QuotaManager {
             // Push to webview
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-                    this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase, this.lastWorkspaceContext);
+                    this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase, this.lastWorkspaceContext, this.getPinnedModels());
                 } else {
                     this.viewProvider.setError('Antigravity IDE server not found and no tracked accounts.');
                 }
@@ -167,6 +175,7 @@ export class QuotaManager {
                     activeEmail,
                     this.lastTokenBase,
                     this.lastWorkspaceContext,
+                    this.getPinnedModels(),
                 );
             }
         } catch (error: any) {

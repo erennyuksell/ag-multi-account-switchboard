@@ -57,6 +57,17 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'toggleModel':
                     await this.quotaManager.toggleStatusBarModel(msg.modelId, msg.isVisible);
                     break;
+                case 'setPinnedModel': {
+                    // Persist pin state in globalState so it survives panel reload & extension restart
+                    const pins = this.quotaManager.getPinnedModels();
+                    if (msg.modelId) {
+                        pins[msg.accountKey] = msg.modelId;
+                    } else {
+                        delete pins[msg.accountKey];
+                    }
+                    await this.quotaManager.setPinnedModels(pins);
+                    break;
+                }
                 case 'addAccount':
                     vscode.commands.executeCommand('ag.addAccount');
                     break;
@@ -91,6 +102,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
         activeEmail: string = '',
         tokenBase: TokenBaseData | null = null,
         workspaceContext: WorkspaceContextData | null = null,
+        pinnedModels: Record<string, string> = {},
     ) {
         this._view?.webview.postMessage({
             type: 'update',
@@ -99,6 +111,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
             activeEmail,
             tokenBase,
             workspaceContext,
+            pinnedModels,
             trackedAccounts: trackedQuotas.map(q => ({
                 id: q.account.id,
                 email: q.account.email,

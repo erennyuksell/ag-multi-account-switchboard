@@ -34,13 +34,16 @@ export function getScripts(): string {
         function copyToken(id) { vscode.postMessage({ type: 'copyToken', accountId: id }); }
         function toggleModel(modelId, isVisible) { vscode.postMessage({ type: 'toggleModel', modelId, isVisible }); }
         window._pinnedModels = window._pinnedModels || {};
-        function pinModel(accountId, modelId) {
-            if (window._pinnedModels[accountId] === modelId) {
-                delete window._pinnedModels[accountId];
+        function pinModel(accountKey, rawModelId) {
+            const modelId = decodeURIComponent(rawModelId);
+            const isCurrentlyPinned = window._pinnedModels[accountKey] === modelId;
+            if (isCurrentlyPinned) {
+                delete window._pinnedModels[accountKey];
+                vscode.postMessage({ type: 'setPinnedModel', accountKey, modelId: null });
             } else {
-                window._pinnedModels[accountId] = modelId;
+                window._pinnedModels[accountKey] = modelId;
+                vscode.postMessage({ type: 'setPinnedModel', accountKey, modelId });
             }
-            vscode.setState({ ...vscode.getState(), pinnedModels: window._pinnedModels });
             renderAll(...(window._lastRenderArgs || []));
         }
 
@@ -75,10 +78,10 @@ export function getScripts(): string {
             vscode.setState({ ...vscode.getState(), intervalMs: currentIntervalMs });
         }
 
-        // Restore state
+        // Restore state — pinnedModels come from backend (globalState), not webview state
         const savedState = vscode.getState() || {};
         currentIntervalMs = savedState.intervalMs || 60000;
-        window._pinnedModels = savedState.pinnedModels || {};
+        // pinnedModels will be populated on first 'update' message from backend
         document.querySelectorAll('.iv-btn').forEach(b => {
             b.classList.toggle('active', parseInt(b.dataset.ms) === currentIntervalMs);
         });
@@ -177,7 +180,8 @@ export function getScripts(): string {
 
                 accounts.push({
                     type: 'active',
-                    email: status.email || status.name || 'Active Account',
+                // Bug#1: use stable 'active-local' fallback — not status.name which can vary
+                    email: status.email || 'active-local',
                     models,
                     bottleneck: bn,
                     resetTime: bn?.resetTime || models[0]?.resetTime || '',
@@ -348,8 +352,11 @@ export function getScripts(): string {
                         const isPinned = pinnedModels[acctKey] === m.id;
                         const starCls = isPinned ? 'star-btn pinned' : 'star-btn';
                         const starIcon = isPinned ? '\u2605' : '\u2606';
+                        // Bug#3: encodeURIComponent so '/' in model IDs doesn't break onclick attr
+                        const safeModelId = encodeURIComponent(m.id);
                         html += '<div class="m-item">';
-                        html += '<button class="' + starCls + '" title="Pin to collapsed view" onclick="event.stopPropagation();pinModel(\\'' + acctKey + '\\',\\'' + m.id + '\\')">' + starIcon + '</button>';
+                        html += '<button class="' + starCls + '" title="Pin to collapsed view" onclick="event.stopPropagation();pinModel(\'' + acctKey + '\',\'' + safeModelId + '\')">'
+                            + starIcon + '</button>';
                         html += '<div class="m-content">';
                         html += '<div class="m-top">';
                         html += '<span class="m-label">' + m.label + '</span>';
@@ -413,6 +420,8 @@ export function getScripts(): string {
 
                 try {
                     window._lastRenderArgs = [msg.data, msg.selectedModels, msg.trackedAccounts || [], msg.activeEmail || ''];
+                    // Bug#4: pinnedModels come from globalState via backend — sync to local mirror
+                    if (msg.pinnedModels) { window._pinnedModels = msg.pinnedModels; }
                     renderAll(...window._lastRenderArgs);
                     if (msg.tokenBase) {
                         renderTokenBudget(msg.tokenBase);
