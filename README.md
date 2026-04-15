@@ -1,6 +1,6 @@
 # AG Multi-Account Switchboard
 
-**Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets, and reset timers — all in one sidebar panel.**
+**Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets, workspace context — all in one sidebar panel.**
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/preview.png" alt="AG Multi-Account Switchboard Preview" width="400"/>
@@ -9,10 +9,10 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.0.0-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-2.0.6-green"/>
 </p>
 
-> **🖥️ Platform Support** — macOS is fully tested. Linux and Windows support is included but not yet validated — paths are based on standard Antigravity installation locations.
+> **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
 
 ---
 
@@ -20,11 +20,11 @@
 
 ### 📊 Live Quota Dashboard
 
-Monitor all your AI model quotas at a glance with color-coded progress bars, usage percentages, and reset timers — all updated automatically.
+Monitor all your AI model quotas at a glance with color-coded progress bars, usage percentages, and reset timers — updated automatically on a configurable schedule.
 
 ### 👥 Multi-Account Support
 
-Track up to unlimited Google accounts simultaneously. Switch between accounts without leaving the IDE. Each account shows its own model quota breakdown.
+Track unlimited Google accounts simultaneously. Switch between accounts without leaving the IDE. Each account shows its own model quota breakdown.
 
 ### ⚡ One-Click Account Switching
 
@@ -32,15 +32,19 @@ Instantly switch your active Antigravity account directly from the panel — no 
 
 ### ⭐ Pinned Model
 
-Star your preferred model to always show it in the collapsed header view — your most important quota, always visible.
+Star your preferred model to always show it in the collapsed account header — your most important quota, always visible at a glance.
 
 ### 🎛️ Status Bar Integration
 
-Toggle individual models on/off in the status bar. Configure exactly which quotas appear at a glance.
+Toggle individual models on/off in the status bar. Configure exactly which quotas appear at a glance without opening the panel.
 
 ### 🔑 Token Budget Monitoring
 
-Track your token consumption alongside quota usage for complete AI spend visibility.
+See your current token budget usage and workspace context items (rules, skills, workflows) with estimated token costs — directly from the local Antigravity Language Server.
+
+### 🗂️ Workspace Context Panel
+
+View all active `.agent/` context items (rules, skills, workflows) loaded into your current session, their trigger mode (`always-on`, `model-decision`, `manual`), and their estimated token footprint.
 
 ### 🔋 AI Credits & Plan Info
 
@@ -48,7 +52,7 @@ See your current plan tier (Ultra, Premium, Free), available AI credits, prompt 
 
 ### 🔄 Auto-Refresh
 
-Configurable refresh intervals (30s, 1m, 5m, 10m, 30m). Automatic detection of external account switches — the panel stays in sync even when you change accounts via the IDE's profile menu.
+Configurable refresh intervals (30s, 1m, 2m, 5m). Automatic detection of external account switches — the panel stays in sync even when you change accounts via the IDE's profile menu.
 
 ---
 
@@ -56,19 +60,19 @@ Configurable refresh intervals (30s, 1m, 5m, 10m, 30m). Automatic detection of e
 
 ### Requirements
 
-- **macOS only** — Windows and Linux support is planned
-- **Antigravity IDE** (the panel reads quota data from the local Antigravity server)
-- For tracked accounts: a Google account with Antigravity access
+- **Antigravity IDE** (the panel reads quota data from the local Antigravity language server)
+- A Google account with Antigravity access for tracked accounts
+- macOS, Linux, or Windows
 
 ### Installation
 
-1. Install from the **Antigravity Extension Marketplace**
+1. Install from the **Open VSX Registry** or **Antigravity Extension Marketplace**
 2. The **Antigravity** icon appears in the Activity Bar
-3. Click it to open the Quota panel — your active account loads automatically
+3. Click it to open the panel — your active account loads automatically
 
-### Adding Accounts
+### Adding Tracked Accounts
 
-Click **`+`** in the panel header to add a tracked account via Google OAuth, or use **`🔑`** to add by refresh token.
+Click **`+`** in the panel header to add an account via Google OAuth, or click **`🔑`** to add one by pasting a refresh token directly.
 
 ---
 
@@ -80,12 +84,12 @@ Click **`+`** in the panel header to add a tracked account via Google OAuth, or 
 ┌─────────────────────────────────────────┐
 │  ● 4 accounts · 1h 30m reset    ↺  🔑  +│  ← header (collapsed summary)
 ├─────────────────────────────────────────┤
-│  your@account.com  [ACTIVE] [Ultra]    │
-│  Claude Opus 4.6 · 60% · 4h 36m    ˅  │  ← expand/collapse
-│  CR 24.849  P 500/50K  F 100/150K      │
+│  your@account.com  [ACTIVE] [Ultra]     │
+│  Claude Opus 4.6 · 60% · 4h 36m    ˅   │  ← expand/collapse
+│  CR 24.849  P 500/50K  F 100/150K       │
 │                                         │
 │  ★ Claude Opus 4.6 (Thinking)   60% ●  │
-│  ████████████░░░░░░░░░░░░░░░░░░         │
+│  ████████████░░░░░░░░░░░░░░░░░░          │
 │  Reset 4h 36m                           │
 │                                         │
 │  Claude Sonnet 4.6 (Thinking)   60% ○  │
@@ -93,14 +97,14 @@ Click **`+`** in the panel header to add a tracked account via Google OAuth, or 
 └─────────────────────────────────────────┘
 ```
 
-| Symbol          | Meaning                                  |
-| --------------- | ---------------------------------------- |
-| 🟢 Green dot    | Quota > 50% remaining                    |
-| 🟡 Yellow dot   | Quota 20–50% remaining                   |
-| 🔴 Red dot      | Quota < 20% remaining                    |
-| ★ Star (gold)   | Pinned model — shown in collapsed header |
-| ☆ Star (hover)  | Click to pin this model                  |
-| ● Toggle (blue) | Model visible in status bar              |
+| Symbol          | Meaning                                   |
+| --------------- | ----------------------------------------- |
+| 🟢 Green dot    | Quota > 50% remaining                     |
+| 🟡 Yellow dot   | Quota 20–50% remaining                    |
+| 🔴 Red dot      | Quota < 20% remaining                     |
+| ★ Star (gold)   | Pinned model — shown in collapsed header  |
+| ☆ Star (hover)  | Click to pin this model                   |
+| ● Toggle (blue) | Model visible in status bar               |
 
 ### Commands
 
@@ -119,20 +123,21 @@ Click the status bar item `$(pulse) Antigravity Quota` to trigger an instant ref
 
 ## ⚙️ Configuration
 
-| Setting           | Description                                                                  | Default |
-| ----------------- | ---------------------------------------------------------------------------- | ------- |
-| Refresh interval  | Set via the interval buttons in the panel header (30s / 1m / 5m / 10m / 30m) | `60s`   |
-| Pinned model      | Click ☆ star on any model row to pin it                                      | none    |
-| Status bar models | Toggle ● switch on each model row                                            | off     |
+| Setting           | Description                                                                 | Default |
+| ----------------- | --------------------------------------------------------------------------- | ------- |
+| Refresh interval  | Set via the interval buttons in the panel header (30s / 1m / 2m / 5m)      | `1m`    |
+| Pinned model      | Click ☆ star on any model row to pin it                                     | none    |
+| Status bar models | Toggle ● switch on each model row                                           | off     |
 
-All preferences (pinned models, selected status bar models, refresh interval) are persisted across restarts.
+All preferences (pinned models, selected status bar models, refresh interval) are persisted across IDE restarts.
 
 ---
 
 ## 🔒 Privacy & Security
 
-- **OAuth tokens** are stored in VS Code's encrypted `SecretStorage` — never in plain text.
+- **OAuth tokens** are stored in VS Code's encrypted `SecretStorage` (macOS Keychain / Windows Credential Store / Linux libsecret) — never in plain text.
 - Quota data is fetched directly from Google's Antigravity API using your own credentials.
+- Token budget and workspace context are read from the local Antigravity Language Server process — no network requests leave your machine for this data.
 - No telemetry. No external servers. All data stays local.
 
 ---
@@ -145,11 +150,15 @@ All preferences (pinned models, selected status bar models, refresh interval) ar
 
 **Panel shows "Server Not Found"**
 
-> The active account quota requires the local Antigravity server to be running. Tracked account quotas are fetched independently and will still work.
+> Active account quota and token budget data require the local Antigravity Language Server to be running. Tracked account quotas are fetched independently and will still work without the local server.
 
 **Account switch not reflected in the panel**
 
 > The panel watches for external account changes automatically. If it doesn't update within ~1 second, click the refresh button (↺).
+
+**Windows: token budget or workspace context not showing**
+
+> Ensure the Antigravity Language Server is running. On Windows, the extension uses PowerShell for process discovery (wmic fallback for older systems). No additional tools need to be installed.
 
 ---
 
