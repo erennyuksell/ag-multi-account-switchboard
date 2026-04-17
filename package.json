@@ -30,7 +30,6 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onView:ag.quotaView",
     "onStartupFinished"
   ],
   "contributes": {
