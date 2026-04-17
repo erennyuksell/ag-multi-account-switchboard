@@ -330,10 +330,39 @@ export function getStyles(): string {
 
         /* ─── States ─── */
         .loader {
-            border: 2px solid var(--border); border-top-color: var(--accent);
-            border-radius: 50%; width: 18px; height: 18px;
-            animation: spin .8s linear infinite; margin: 24px auto; display: none;
+            display: none;
+            padding: 0 12px;
         }
+
+        .init-shimmer {
+            display: flex; flex-direction: column; gap: 10px;
+            padding-top: 8px;
+        }
+        .init-shimmer .sh-strip {
+            height: 32px; border-radius: 6px;
+            background: linear-gradient(90deg, rgba(128,128,128,.08) 25%, rgba(128,128,128,.16) 50%, rgba(128,128,128,.08) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.4s ease-in-out infinite;
+        }
+        .init-shimmer .sh-card {
+            height: 96px; border-radius: 10px;
+            background: linear-gradient(90deg, rgba(128,128,128,.06) 25%, rgba(128,128,128,.13) 50%, rgba(128,128,128,.06) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.4s ease-in-out infinite;
+            animation-delay: .15s;
+        }
+        .init-shimmer .sh-card-sm {
+            height: 52px; border-radius: 10px;
+            background: linear-gradient(90deg, rgba(128,128,128,.05) 25%, rgba(128,128,128,.11) 50%, rgba(128,128,128,.05) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.4s ease-in-out infinite;
+            animation-delay: .3s;
+        }
+        .init-label {
+            text-align: center; font-size: 11px; color: var(--muted);
+            padding: 6px 0 0; opacity: .7;
+        }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
         @keyframes spin { to { transform: rotate(360deg); } }
         .err-msg { text-align: center; font-size: 12px; color: var(--error); padding: 0; }
         .err-msg:not(:empty) { padding: 12px; }

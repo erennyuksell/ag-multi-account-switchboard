@@ -3,6 +3,9 @@ import { AccountQuota, LocalQuotaData } from '../types';
 import { TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../webview/template';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('ViewProvider');
 
 export class QuotaViewProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
@@ -24,11 +27,18 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this.extensionUri],
         };
 
-        webviewView.webview.html = getWebviewContent(webviewView.webview, this.extensionUri);
-
         webviewView.webview.onDidReceiveMessage(async (msg) => {
             switch (msg.type) {
+                case 'weblog':
+                    log.info(`[WEBVIEW_LOG] ${msg.msg}`);
+                    break;
                 case 'ready':
+                    log.info('MSG: ready received');
+                    // Instant: push whatever is in memory RIGHT NOW (0ms, no network)
+                    this.quotaManager.pushCachedData();
+                    // Then silently fetch fresh data in background
+                    this.quotaManager.refreshSilent();
+                    break;
                 case 'refresh':
                     this.quotaManager.refresh();
                     break;
@@ -85,6 +95,8 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                     break;
             }
         });
+
+        webviewView.webview.html = getWebviewContent(webviewView.webview, this.extensionUri);
     }
 
     setLoading() {

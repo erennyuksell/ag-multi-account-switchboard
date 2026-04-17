@@ -4,13 +4,24 @@
  */
 export function getScripts(): string {
     return `
-        const vscode = acquireVsCodeApi();
+        let vscode;
+        try {
+            vscode = acquireVsCodeApi();
+            function wlog(m) { vscode.postMessage({ type: 'weblog', msg: m }); }
+            wlog('SCRIPT_EVALUATED_TOP');
+        } catch (initErr) {
+            document.getElementById('error').innerText = 'Init crash: ' + initErr.message;
+            document.getElementById('error').style.display = 'block';
+        }
+
         let refreshTimer = null;
         let isFirstLoad = true;
         let currentIntervalMs = 60000;
 
         // ─── Global Error Surface ───
         window.onerror = function(msg, src, line, col, err) {
+            document.getElementById('error').innerText += '\\nGlobal crash: ' + msg + ' line: ' + line;
+            if (vscode) vscode.postMessage({ type: 'weblog', msg: 'CRITICAL_CRASH: ' + msg + ' at line ' + line });
             var overlay = document.getElementById('fatalError');
             if (!overlay) {
                 overlay = document.createElement('div');
@@ -87,7 +98,9 @@ export function getScripts(): string {
         });
         refreshTimer = setInterval(refresh, currentIntervalMs);
 
+        wlog('BEFORE_READY_POST');
         vscode.postMessage({ type: 'ready' });
+        wlog('AFTER_READY_POST');
 
         // Restore active tab
         if (savedState.activeTab) {
@@ -281,9 +294,9 @@ export function getScripts(): string {
 
                 const actionBtns = a.type === 'tracked'
                     ? '<div class="acct-actions">'
-                      + '<button class="acct-switch" title="Switch IDE to this account" onclick="event.stopPropagation();switchAccount(\\'' + a.id + '\\')">' + switchSvg + '</button>'
-                      + '<button class="acct-key" title="Copy Token" onclick="event.stopPropagation();copyToken(\\\'' + a.id + '\\\')">' + keySvg + '</button>'
-                      + '<button class="acct-del" title="Remove" onclick="event.stopPropagation();removeAccount(\\\'' + a.id + '\\\')">' + trashSvg + '</button>'
+                      + '<button class="acct-switch" title="Switch IDE to this account" onclick="event.stopPropagation();switchAccount(&quot;' + a.id + '&quot;)">' + switchSvg + '</button>'
+                      + '<button class="acct-key" title="Copy Token" onclick="event.stopPropagation();copyToken(&quot;' + a.id + '&quot;)">' + keySvg + '</button>'
+                      + '<button class="acct-del" title="Remove" onclick="event.stopPropagation();removeAccount(&quot;' + a.id + '&quot;)">' + trashSvg + '</button>'
                       + '</div>'
                     : '';
                 const activeBadge = a.type === 'active' ? '<span class="active-tag">ACTIVE</span>' : '';
@@ -355,7 +368,7 @@ export function getScripts(): string {
                         // Bug#3: encodeURIComponent so '/' in model IDs doesn't break onclick attr
                         const safeModelId = encodeURIComponent(m.id);
                         html += '<div class="m-item">';
-                        html += '<button class="' + starCls + '" title="Pin to collapsed view" onclick="event.stopPropagation();pinModel(\'' + acctKey + '\',\'' + safeModelId + '\')">'
+                        html += '<button class="' + starCls + '" title="Pin to collapsed view" onclick="event.stopPropagation();pinModel(&quot;' + acctKey + '&quot;,&quot;' + safeModelId + '&quot;)">'
                             + starIcon + '</button>';
                         html += '<div class="m-content">';
                         html += '<div class="m-top">';
@@ -385,6 +398,7 @@ export function getScripts(): string {
         // ─── Message Handler ───
         window.addEventListener('message', event => {
             const msg = event.data;
+            wlog('MSG_RECEIVED_TYPE_' + msg.type);
 
             if (msg.type === 'loading') {
                 if (isFirstLoad) {

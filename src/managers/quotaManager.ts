@@ -92,11 +92,39 @@ export class QuotaManager {
         if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
     }
 
+    /** Push whatever is already in memory to the webview — zero network, instant render */
+    pushCachedData() {
+        if (!this.viewProvider) { log.info('pushCachedData: no viewProvider'); return; }
+        const hasLocal = !!this.lastLocalData;
+        const hasTracked = this.lastTrackedQuotas.length > 0;
+        log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}`);
+        if (hasLocal || hasTracked) {
+            this.viewProvider.updateData(
+                this.lastLocalData,
+                this.getSelectedModels(),
+                this.lastTrackedQuotas,
+                '',
+                this.lastTokenBase,
+                this.lastWorkspaceContext,
+                this.getPinnedModels(),
+            );
+        }
+    }
+
+    /** Background refresh — no spinner, just silently update */
+    async refreshSilent() {
+        await this.refresh();
+    }
+
     async refresh(activeEmailHint?: string) {
-        if (this._refreshInFlight) return;
+        if (this._refreshInFlight) { log.info('refresh: SKIPPED (_refreshInFlight=true)'); return; }
         this._refreshInFlight = true;
+        log.info('refresh: STARTED');
         try {
-            if (this.viewProvider) this.viewProvider.setLoading();
+            // Only show loading spinner when there is truly no data to display.
+            // If stale data exists, keep it visible while refreshing in the background.
+            const hasData = !!(this.lastLocalData || this.lastTrackedQuotas.length > 0);
+            if (this.viewProvider && !hasData) this.viewProvider.setLoading();
 
             // Discover workspace LS once — share with both quota fetch and token budget
             const workspaceId = this.getWorkspaceId();
@@ -129,20 +157,25 @@ export class QuotaManager {
             this.lastWorkspaceContext = workspaceContext;
 
             // Push to webview
+            log.info(`refresh: localResult=${!!localResult}, trackedCount=${trackedResult.length}, hasProvider=${!!this.viewProvider}`);
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
                     this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase, this.lastWorkspaceContext, this.getPinnedModels());
+                    log.info('refresh: updateData sent');
                 } else {
                     this.viewProvider.setError('Antigravity IDE server not found and no tracked accounts.');
+                    log.info('refresh: setError sent (no data)');
                 }
             }
         } catch (error: any) {
             const msg = error.message || 'Unknown error';
+            log.info(`refresh: CAUGHT ERROR: ${msg}`);
             if (this.viewProvider) this.viewProvider.setError(msg);
             this.statusBarItem.text = '$(error) Antigravity: Error';
             this.statusBarItem.tooltip = msg;
         } finally {
             this._refreshInFlight = false;
+            log.info('refresh: FINISHED');
         }
     }
 

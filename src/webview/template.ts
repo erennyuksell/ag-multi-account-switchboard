@@ -16,7 +16,15 @@ export function getWebviewContent(_webview: vscode.Webview, _extensionUri: vscod
     <style>${getStyles()}</style>
 </head>
 <body>
-    <div id="loading" class="loader"></div>
+    <div id="loading" class="loader" style="display: block;">
+        <div class="init-shimmer">
+            <div class="sh-strip"></div>
+            <div class="sh-card"></div>
+            <div class="sh-card-sm"></div>
+            <div class="sh-card-sm"></div>
+        </div>
+        <div class="init-label">Connecting to Antigravity...</div>
+    </div>
     <div id="error" class="err-msg"></div>
 
     <div id="content" class="hidden">
@@ -96,7 +104,7 @@ export function getWebviewContent(_webview: vscode.Webview, _extensionUri: vscod
 
         <!-- Footer -->
         <div class="foot">
-            <span id="lastUpdated">—</span>
+            <span id="lastUpdated">—</span><span style="opacity:.4;font-size:9px;margin-left:4px">v9</span>
             <div class="interval-pick">
                 <button class="iv-btn" data-ms="30000" onclick="setInterval2(this)">30s</button>
                 <button class="iv-btn active" data-ms="60000" onclick="setInterval2(this)">1m</button>
