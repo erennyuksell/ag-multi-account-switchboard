@@ -146,7 +146,7 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
 
         <!-- Footer -->
         <div class="foot">
-            <span id="lastUpdated">—</span><span style="opacity:.4;font-size:9px;margin-left:4px">v12</span>
+            <span id="lastUpdated">—</span>
             <div class="interval-pick">
                 <button class="iv-btn" data-ms="30000" data-action="set-interval">30s</button>
                 <button class="iv-btn active" data-ms="60000" data-action="set-interval">1m</button>

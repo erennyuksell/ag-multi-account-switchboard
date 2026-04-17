@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.0.6-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-2.1.0-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
@@ -159,6 +159,20 @@ All preferences (pinned models, selected status bar models, refresh interval) ar
 **Windows: token budget or workspace context not showing**
 
 > Ensure the Antigravity Language Server is running. On Windows, the extension uses PowerShell for process discovery (wmic fallback for older systems). No additional tools need to be installed.
+
+---
+
+## 📝 Changelog
+
+### v2.1.0
+
+- **Branded init screen** — Radar pulse animation with AG branding on startup
+- **Sticky layout** — Header and footer stay pinned; only the account list scrolls
+- **Modular webview architecture** — Monolithic inline scripts split into typed modules with esbuild bundling
+- **Race condition fix** — Pending refresh queue prevents lost account switches during background refreshes
+- **Dual add buttons** — "Add Account" and "Add via Token" side by side at the bottom
+- **Token tab scroll** — Token Budget tab header stays fixed while content scrolls
+- **Clean code** — Extracted `quotaIcon()` and `formatTimeLeft()` helpers, simplified state types
 
 ---
 
