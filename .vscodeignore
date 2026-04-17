@@ -3,6 +3,7 @@
 *.vsix
 src/**
 out/**/*.map
+out/webview-types/**
 .vscode-test/**
 node_modules/**
 .gitignore

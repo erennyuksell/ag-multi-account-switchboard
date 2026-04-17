@@ -1,0 +1,65 @@
+/**
+ * Message handler — routes incoming messages from the extension host.
+ */
+
+import { wlog, setPinnedModels, setLastRenderArgs, lastRenderArgs } from './context';
+import { renderAll } from './renderers/accounts';
+import { renderTokenBudget } from './renderers/tokens';
+import { renderWorkspaceContext } from './renderers/workspace';
+
+const $ = (id: string) => document.getElementById(id);
+
+function stopSpinners(): void {
+    $('loading')!.style.display = 'none';
+    $('refreshBtn')?.classList.remove('spinning');
+    $('tokenRefreshBtn')?.classList.remove('spinning');
+}
+
+export function setupMessageHandler(): void {
+    window.addEventListener('message', event => {
+        const msg = event.data;
+        wlog('MSG_RECEIVED_TYPE_' + msg.type);
+
+        switch (msg.type) {
+            case 'loading': {
+                const isFirst = $('content')!.classList.contains('hidden');
+                if (isFirst) {
+                    $('loading')!.style.display = 'block';
+                    $('content')!.classList.add('hidden');
+                } else {
+                    $('refreshBtn')!.classList.add('spinning');
+                    $('tokenRefreshBtn')?.classList.add('spinning');
+                }
+                $('error')!.innerText = '';
+                break;
+            }
+            case 'error':
+                stopSpinners();
+                $('error')!.innerText = msg.message;
+                if ($('content')!.classList.contains('hidden')) $('content')!.classList.remove('hidden');
+                break;
+
+            case 'update': {
+                stopSpinners();
+                $('content')!.classList.remove('hidden');
+                $('error')!.innerText = '';
+                try {
+                    setLastRenderArgs([msg.data, msg.selectedModels, msg.trackedAccounts || [], msg.activeEmail || '']);
+                    if (msg.pinnedModels) setPinnedModels(msg.pinnedModels);
+                    renderAll(lastRenderArgs[0], lastRenderArgs[1], lastRenderArgs[2], lastRenderArgs[3] as string);
+                    if (msg.tokenBase) {
+                        renderTokenBudget(msg.tokenBase);
+                    } else {
+                        const el = $('tokenContent');
+                        if (el) el.innerHTML = '<div class="token-empty"><div class="em-icon">⚠️</div><div class="em-title">Token data unavailable</div><div class="em-sub">No Language Server found for this workspace.</div></div>';
+                    }
+                    renderWorkspaceContext(msg.workspaceContext || null);
+                    $('lastUpdated')!.textContent = 'Updated ' + new Date().toLocaleTimeString();
+                } catch (e) {
+                    $('error')!.innerText = 'Render error: ' + (e as Error).message;
+                }
+                break;
+            }
+        }
+    });
+}

@@ -22,6 +22,8 @@ export class QuotaManager {
     private lastTrackedQuotas: AccountQuota[] = [];
     private viewProvider: QuotaViewProvider | null = null;
     private _refreshInFlight = false;
+    /** Email hint from a switch that arrived during an in-flight refresh */
+    private _pendingHint: string | undefined;
     private readonly serverDiscovery = new ServerDiscoveryService();
     private readonly switchService: AccountSwitchService;
     private readonly tokenBaseService = new TokenBaseService();
@@ -117,7 +119,15 @@ export class QuotaManager {
     }
 
     async refresh(activeEmailHint?: string) {
-        if (this._refreshInFlight) { log.info('refresh: SKIPPED (_refreshInFlight=true)'); return; }
+        if (this._refreshInFlight) {
+            if (activeEmailHint) {
+                this._pendingHint = activeEmailHint;
+                log.info(`refresh: QUEUED (hint=${activeEmailHint})`);
+            } else {
+                log.info('refresh: SKIPPED (_refreshInFlight=true)');
+            }
+            return;
+        }
         this._refreshInFlight = true;
         log.info('refresh: STARTED');
         try {
@@ -176,6 +186,12 @@ export class QuotaManager {
         } finally {
             this._refreshInFlight = false;
             log.info('refresh: FINISHED');
+            const hint = this._pendingHint;
+            if (hint) {
+                this._pendingHint = undefined;
+                log.info(`refresh: DRAINING QUEUED (hint=${hint})`);
+                this.refresh(hint);
+            }
         }
     }
 
@@ -245,12 +261,12 @@ export class QuotaManager {
             email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
         });
         if (success) {
-            // Pass email directly — skip USS/sqlite3 which may still be stale.
-            // Switch is confirmed (success === true), so this is not optimistic.
-            await this.refresh(account.email);
+            // Delay first refresh — LS needs ~1-2s to process registerGdmUser
+            // and fetch new models from backend. Immediate refresh sees stale data.
+            setTimeout(() => this.refresh(account.email), 1500);
 
-            // Delayed refresh (3s): USS should now be in sync — read from it normally.
-            setTimeout(() => this.refresh(), 3000);
+            // Second refresh (5s): USS fully propagated, re-read without hint.
+            setTimeout(() => this.refresh(), 5000);
         }
     }
 
@@ -325,61 +341,38 @@ export class QuotaManager {
         const rawModels = data.userStatus?.cascadeModelConfigData?.clientModelConfigs;
         if (!rawModels || rawModels.length === 0) return;
 
-        // Sort by label for consistent ordering
-        const sortedModels = [...rawModels].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
-
+        const sorted = [...rawModels].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
         const selectedIds = this.getSelectedModels();
-        const selectedModels = sortedModels.filter(m => selectedIds.includes(m.modelOrAlias?.model || ''));
+        const selected = sorted.filter(m => selectedIds.includes(m.modelOrAlias?.model || ''));
 
-        if (selectedModels.length === 0) {
+        // Status bar text
+        if (selected.length === 0) {
             this.statusBarItem.text = '$(pulse) Quota: No Model Selected';
         } else {
-            const parts = selectedModels.map(m => {
+            this.statusBarItem.text = selected.map(m => {
                 const pct = getQuotaPercent(m);
-                if (pct === null) return `⚪ ${m.label}: N/A`;
-                const icon = pct >= 100 ? '🟢' : pct <= 0 ? '🔴' : '🟡';
-                return `${icon} ${m.label}: ${pct.toFixed(0)}%`;
-            });
-            this.statusBarItem.text = parts.join('  |  ');
+                return `${quotaIcon(pct)} ${m.label}: ${pct === null ? 'N/A' : pct.toFixed(0) + '%'}`;
+            }).join('  |  ');
         }
 
         // Rich tooltip
-        const md = new vscode.MarkdownString();
-        md.isTrusted = true;
+        const md = new vscode.MarkdownString('', true);
         md.appendMarkdown('**Antigravity Quota Models**\n\n---\n\n');
 
-        for (const m of sortedModels) {
+        for (const m of sorted) {
             if (!m.quotaInfo) continue;
             const pct = getQuotaPercent(m);
-            const icon = pct === null ? '⚪' : pct >= 100 ? '🟢' : pct <= 0 ? '🔴' : '🟡';
-            const pctStr = pct === null ? 'N/A' : `${pct.toFixed(0)}%`;
-
-            const resetTime = m.quotaInfo.resetTime ? new Date(m.quotaInfo.resetTime) : null;
-            const isValid = resetTime && !isNaN(resetTime.getTime());
-            const diffMs = isValid ? resetTime.getTime() - Date.now() : 0;
-
-            let timeDiff = '';
-            if (isValid && diffMs > 0) {
-                const h = Math.floor(diffMs / 3_600_000);
-                const min = Math.floor((diffMs % 3_600_000) / 60_000);
-                if (h >= 24) {
-                    const d = Math.floor(h / 24);
-                    const rh = h % 24;
-                    timeDiff = rh > 0 ? `(${d}d ${rh}h left)` : `(${d}d left)`;
-                } else {
-                    timeDiff = h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
-                }
-            } else {
-                timeDiff = '(Reset)';
-            }
-
-            const timeStr = isValid
-                ? resetTime.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                : 'Unknown';
             const sel = selectedIds.includes(m.modelOrAlias?.model || '') ? ' *(Selected)*' : '';
 
-            md.appendMarkdown(`${icon} **${m.label}** (${pctStr})${sel}\n\n`);
-            md.appendMarkdown(`*Resets:* ${timeStr} ${timeDiff}\n\n---\n\n`);
+            const resetDate = m.quotaInfo.resetTime ? new Date(m.quotaInfo.resetTime) : null;
+            const isValid = resetDate && !isNaN(resetDate.getTime());
+            const timeStr = isValid
+                ? resetDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                : 'Unknown';
+            const timeLeft = isValid ? formatTimeLeft(resetDate.getTime() - Date.now()) : '';
+
+            md.appendMarkdown(`${quotaIcon(pct)} **${m.label}** (${pct === null ? 'N/A' : pct.toFixed(0) + '%'})${sel}\n\n`);
+            md.appendMarkdown(`*Resets:* ${timeStr} ${timeLeft}\n\n---\n\n`);
         }
 
         this.statusBarItem.tooltip = md;
@@ -388,11 +381,26 @@ export class QuotaManager {
 
 // ==================== Standalone Helpers ====================
 
-/**
- * Extract quota percentage from a model config.
- * Returns null if data is unavailable (vs. 0 which means "quota exhausted").
- */
 function getQuotaPercent(m: ClientModelConfig): number | null {
     if (m.quotaInfo?.remainingFraction === undefined) return null;
     return Math.max(0, Math.min(100, m.quotaInfo.remainingFraction * 100));
+}
+
+function quotaIcon(pct: number | null): string {
+    if (pct === null) return '⚪';
+    if (pct >= 100) return '🟢';
+    if (pct <= 0) return '🔴';
+    return '🟡';
+}
+
+function formatTimeLeft(ms: number): string {
+    if (ms <= 0) return '(Reset)';
+    const h = Math.floor(ms / 3_600_000);
+    const min = Math.floor((ms % 3_600_000) / 60_000);
+    if (h >= 24) {
+        const d = Math.floor(h / 24);
+        const rh = h % 24;
+        return rh > 0 ? `(${d}d ${rh}h left)` : `(${d}d left)`;
+    }
+    return h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
 }

@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { AccountQuota, LocalQuotaData } from '../types';
 import { TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { QuotaManager } from '../managers/quotaManager';
-import { getWebviewContent } from '../webview/template';
+import { getWebviewContent } from '../templates/webviewTemplate';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ViewProvider');
@@ -88,7 +88,8 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand('ag.removeAccount', msg.accountId);
                     break;
                 case 'switchAccount':
-                    this.quotaManager.switchAccount(msg.accountId);
+                    this.quotaManager.switchAccount(msg.accountId).catch(e =>
+                        log.error('switchAccount unhandled:', e?.message || e));
                     break;
                 case 'copyToken':
                     this.quotaManager.copyToken(msg.accountId);

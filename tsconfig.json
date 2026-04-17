@@ -1,17 +1,7 @@
 {
-  "compilerOptions": {
-    "module": "CommonJS",
-    "target": "ES2022",
-    "outDir": "out",
-    "lib": [
-      "ES2022"
-    ],
-    "sourceMap": true,
-    "rootDir": "src",
-    "strict": true
-  },
-  "exclude": [
-    "node_modules",
-    ".vscode-test"
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.extension.json" },
+    { "path": "./tsconfig.webview.json" }
   ]
 }

@@ -78,15 +78,19 @@
     "menus": {}
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "package": "vsce package",
+    "compile": "npm run compile:extension && npm run compile:webview",
+    "compile:extension": "tsc -p ./tsconfig.extension.json",
+    "compile:webview": "node esbuild.webview.mjs",
+    "watch": "tsc -watch -p ./tsconfig.extension.json",
+    "watch:webview": "node esbuild.webview.mjs --watch",
+    "package": "npm run compile:extension && node esbuild.webview.mjs --production && vsce package",
     "publish:ovsx": "ovsx publish *.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.4.0"
   }
 }
