@@ -9,7 +9,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-2.1.0-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-2.3.0-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
@@ -53,6 +53,33 @@ See your current plan tier (Ultra, Premium, Free), available AI credits, prompt 
 ### 🔄 Auto-Refresh
 
 Configurable refresh intervals (30s, 1m, 2m, 5m). Automatic detection of external account switches — the panel stays in sync even when you change accounts via the IDE's profile menu.
+
+### 📈 Token Usage Analytics
+
+Deep usage statistics across **all** your Antigravity conversations — ever. Track input/output/cache tokens, estimated costs, model distribution, and activity patterns.
+
+**Sidebar (compact dashboard):**
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-sidebar.png" alt="Usage Stats Sidebar" width="350"/>
+</p>
+
+- 6 KPI cards: Input, Cache, Output, Total, API Calls, **Estimated Cost**
+- Time range selector (24h / 7d / 30d / All Time)
+- Activity heatmap (GitHub contribution style)
+- Model breakdown with token counts
+
+**Full dashboard (editor tab):**
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-panel.png" alt="Usage Stats Full Dashboard" width="700"/>
+</p>
+
+- 9 KPI cards including Avg Tokens/Call, Cache Rate, Days Active
+- Daily stacked bar chart with Input/Cache/Output legend
+- Hourly pattern heatmap
+- Cost estimation table per model
+- Top conversations ranked by token usage
 
 ---
 
@@ -163,6 +190,24 @@ All preferences (pinned models, selected status bar models, refresh interval) ar
 ---
 
 ## 📝 Changelog
+
+### v2.3.0
+
+- **Usage Stats Dashboard** — Deep analytics across all conversations with sidebar compact view + full editor tab
+- **9 KPI cards** — Input, Cache, Output, Total, API Calls, Est. Cost, Days Active, Avg/Call, Cache Rate
+- **Estimated Cost** — Per-model cost estimation based on public API pricing (sidebar + detail panel)
+- **Default 24h range** — Sidebar defaults to last 24 hours; auto-refresh no longer resets your selected range
+- **Smart model merging** — Claude Sonnet 4.6 + Sonnet 4.6 (Thinking) consolidated into single entry
+- **Compact model breakdown** — Sidebar shows model name + bar + in/cache/out tokens without excessive detail
+- **Flash elimination** — Range switching and tab switching no longer cause visual flashing
+- **PostMessage architecture** — Detail panel uses DOM patching instead of full HTML rebuild
+
+### v2.2.0
+
+- **Deep usage stats** — All-time token usage analytics with disk caching and incremental refresh
+- **Bento grid layout** — Full dashboard with daily bars, heatmap, hourly pattern, model distribution, cost estimation
+- **Progressive loading** — Stream partial results during first-time full fetch
+- **GitHub contribution grid** — Activity heatmap with 5 intensity levels
 
 ### v2.1.0
 

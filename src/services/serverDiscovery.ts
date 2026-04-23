@@ -1,10 +1,8 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import * as http from 'http';
 import { ServerInfo } from '../types';
 import { LS_PROCESS_GREP } from '../constants';
-import { getWindowsProcessLines } from '../utils/lsClient';
-import { collectBody } from '../utils/http';
+import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 
 const execAsync = promisify(exec);
 const isWindows = process.platform === 'win32';
@@ -24,17 +22,19 @@ export class ServerDiscoveryService {
      */
     async discover(workspaceId?: string): Promise<ServerInfo | null> {
         try {
-            const candidates = isWindows
+            let candidates = isWindows
                 ? await this.findCandidatesWindows()
                 : await this.findCandidatesUnix();
 
-            // Prioritize: exact workspace match first, then any
+            // STRICT workspace isolation: if workspaceId is provided,
+            // ONLY try candidates from the same workspace.
+            // Falling through to other workspaces causes wrong-LS contamination.
             if (workspaceId) {
-                candidates.sort((a, b) => {
-                    const aMatch = a.wsId === workspaceId ? 0 : 1;
-                    const bMatch = b.wsId === workspaceId ? 0 : 1;
-                    return aMatch - bMatch;
-                });
+                const matching = candidates.filter(c => c.wsId === workspaceId);
+                if (matching.length > 0) {
+                    candidates = matching; // Only probe our workspace's LS
+                }
+                // If no match found, fall through to all candidates (cold start)
             }
 
             for (const cand of candidates) {
@@ -44,7 +44,7 @@ export class ServerDiscoveryService {
                 for (const port of ports) {
                     try {
                         await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
-                        return { port, csrfToken: cand.csrfToken, protocol: 'http' };
+                        return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
                     } catch { /* try next port */ }
                 }
             }
@@ -56,7 +56,7 @@ export class ServerDiscoveryService {
     }
 
     /** macOS / Linux: use ps to find candidates */
-    private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string }[]> {
+    private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         const { stdout } = await execAsync(
             `ps -A -ww -o pid,args | grep "${LS_PROCESS_GREP}" | grep -v grep`
         );
@@ -64,7 +64,7 @@ export class ServerDiscoveryService {
     }
 
     /** Windows: use PowerShell + wmic fallback to find candidates */
-    private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string }[]> {
+    private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         const lines = await getWindowsProcessLines(LS_PROCESS_GREP);
         return lines.flatMap(line => {
             const csrf = line.match(/--csrf_token[\s=]+([a-zA-Z0-9-]+)/)?.[1];
@@ -73,13 +73,14 @@ export class ServerDiscoveryService {
             // PID comes from PowerShell's ExpandProperty — not in the line itself.
             // Use a sentinel to force port-scan-all-LS-ports fallback when pid unknown.
             const wsId = line.match(/--workspace_id[\s=]+(\S+)/)?.[1];
-            return csrf ? [{ pid: pid ?? '0', csrfToken: csrf, wsId }] : [];
+            const httpsPortMatch = line.match(/--https_server_port[\s=]+(\d+)/);
+            return csrf ? [{ pid: pid ?? '0', csrfToken: csrf, wsId, httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined }] : [];
         });
     }
 
     /** Parse `ps` stdout into candidates */
-    private parsePsOutput(stdout: string): { pid: string; csrfToken: string; wsId?: string }[] {
-        const candidates: { pid: string; csrfToken: string; wsId?: string }[] = [];
+    private parsePsOutput(stdout: string): { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] {
+        const candidates: { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] = [];
         for (const line of stdout.split('\n')) {
             if (!line.trim()) continue;
             const pidMatch = line.trim().match(/^(\d+)\s/);
@@ -87,7 +88,13 @@ export class ServerDiscoveryService {
             const tokenMatch = line.match(/--csrf_token\s+([a-zA-Z0-9\-]+)/);
             if (!tokenMatch) continue;
             const wsMatch = line.match(/--workspace_id\s+(\S+)/);
-            candidates.push({ pid: pidMatch[1], csrfToken: tokenMatch[1], wsId: wsMatch?.[1] });
+            const httpsPortMatch = line.match(/--https_server_port\s+(\d+)/);
+            candidates.push({
+                pid: pidMatch[1],
+                csrfToken: tokenMatch[1],
+                wsId: wsMatch?.[1],
+                httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined,
+            });
         }
         return candidates;
     }
@@ -123,38 +130,9 @@ export class ServerDiscoveryService {
 
     /** Fetch GetUserStatus from the local language server */
     fetchLocalQuota(serverInfo: ServerInfo): Promise<any> {
-        return new Promise((resolve, reject) => {
-            const body = JSON.stringify({
-                metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' },
-            });
-            const req = http.request({
-                hostname: '127.0.0.1',
-                port: serverInfo.port,
-                path: '/exa.language_server_pb.LanguageServerService/GetUserStatus',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body),
-                    'Connect-Protocol-Version': '1',
-                    'X-Codeium-Csrf-Token': serverInfo.csrfToken,
-                },
-                timeout: 3000,
-            }, async (res) => {
-                try {
-                    const { status, body: data } = await collectBody(res);
-                    if (status >= 200 && status < 300) {
-                        try { resolve(JSON.parse(data)); }
-                        catch { reject(new Error('Invalid JSON response')); }
-                    } else {
-                        reject(new Error(`Server responded with status ${status}`));
-                    }
-                } catch (e) { reject(e); }
-            });
-            req.on('error', reject);
-            req.on('timeout', () => { req.destroy(); reject(new Error('Request timed out')); });
-            req.write(body);
-            req.end();
-        });
+        return callLsJson(serverInfo, 'GetUserStatus', {
+            metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' },
+        }, 3000);
     }
 
     /** Quick probe to validate a server candidate */

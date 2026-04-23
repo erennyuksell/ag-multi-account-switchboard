@@ -1,10 +1,9 @@
 import { createLogger } from '../utils/logger';
-import { findLSEndpoints, loadLSCert, callLSEndpoint } from '../utils/lsClient';
+import { findLSEndpoints, loadLSCert, callLSEndpoint, callLsProto } from '../utils/lsClient';
+import { readFields, type ProtoField } from '../utils/protobuf';
 import { ServerInfo } from '../types';
-import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
-import { collectBuffer } from '../utils/http';
 
 
 const log = createLogger('TokenBase');
@@ -61,54 +60,7 @@ export interface TokenBaseData {
     usedPercent: number;
 }
 
-// ==================== Protobuf Decoders ====================
-
-function decodeVarint(buf: Buffer, offset: number): { value: number; offset: number } {
-    let result = 0, shift = 0;
-    while (offset < buf.length) {
-        const byte = buf[offset++];
-        result |= (byte & 0x7F) << shift;
-        if (!(byte & 0x80)) break;
-        shift += 7;
-    }
-    return { value: result, offset };
-}
-
-interface ProtoField {
-    field: number;
-    wireType: number;
-    varint?: number;
-    bytes?: Buffer;
-}
-
-function readFields(buf: Buffer): ProtoField[] {
-    const fields: ProtoField[] = [];
-    let offset = 0;
-    while (offset < buf.length) {
-        const tag = decodeVarint(buf, offset);
-        offset = tag.offset;
-        const fieldNumber = tag.value >> 3;
-        const wireType = tag.value & 0x7;
-
-        if (wireType === 0) {
-            const val = decodeVarint(buf, offset);
-            fields.push({ field: fieldNumber, wireType, varint: val.value });
-            offset = val.offset;
-        } else if (wireType === 2) {
-            const len = decodeVarint(buf, offset);
-            offset = len.offset;
-            fields.push({ field: fieldNumber, wireType, bytes: buf.slice(offset, offset + len.value) });
-            offset += len.value;
-        } else if (wireType === 5) {
-            offset += 4;
-        } else if (wireType === 1) {
-            offset += 8;
-        } else {
-            break;
-        }
-    }
-    return fields;
-}
+// Protobuf decoders → unified in utils/protobuf.ts (readFields, ProtoField)
 
 
 // ==================== Response Parser ====================
@@ -336,7 +288,22 @@ export class TokenBaseService {
     async fetchWorkspaceContext(serverInfo: ServerInfo, workspaceName: string, workspaceFsPath: string): Promise<WorkspaceContextData | null> {
         try {
             const buf = await this.callHttp(serverInfo, '/exa.language_server_pb.LanguageServerService/GetMatchingContextScopeItems');
-            const raw = parseContextScope(buf);
+            let raw = parseContextScope(buf);
+
+            // Guard: if LS returned items from a DIFFERENT workspace (race on first boot),
+            // filter to only items whose URI matches this workspace's path.
+            if (workspaceFsPath) {
+                const before = raw.length;
+                raw = raw.filter(item => item.uri.includes(workspaceFsPath));
+                if (raw.length < before) {
+                    log.warn(`Workspace context: filtered ${before - raw.length} items from other workspace(s)`);
+                }
+                if (raw.length === 0) {
+                    log.warn('Workspace context: all items filtered — likely wrong LS, returning null');
+                    return null;
+                }
+            }
+
             const data = categorizeAgentItems(raw, workspaceName);
 
             // Enrich each rule with its REAL trigger from frontmatter
@@ -360,34 +327,8 @@ export class TokenBaseService {
         }
     }
 
-    /** Generic HTTP POST to LS endpoint, returns raw Buffer */
+    /** Generic HTTP POST to LS endpoint, returns raw Buffer — delegates to unified client */
     private callHttp(serverInfo: ServerInfo, endpointPath: string, timeoutMs = 8000): Promise<Buffer> {
-        return new Promise((resolve, reject) => {
-            const req = http.request({
-                hostname: '127.0.0.1',
-                port: serverInfo.port,
-                path: endpointPath,
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/proto',
-                    'Content-Length': '0',
-                    'Connect-Protocol-Version': '1',
-                    'X-Codeium-Csrf-Token': serverInfo.csrfToken,
-                },
-                timeout: timeoutMs,
-            }, async (res) => {
-                try {
-                    const { status, body } = await collectBuffer(res);
-                    if (status === 200) {
-                        resolve(body);
-                    } else {
-                        reject(new Error(`HTTP ${status}: ${body.toString().substring(0, 100)}`));
-                    }
-                } catch (e) { reject(e); }
-            });
-            req.on('error', reject);
-            req.on('timeout', () => req.destroy(new Error('timeout')));
-            req.end();
-        });
+        return callLsProto(serverInfo, endpointPath, timeoutMs);
     }
 }

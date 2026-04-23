@@ -74,6 +74,10 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.5"/><path d="M8 4v4l2.5 2.5"/></svg>
                 Token Budget
             </button>
+            <button class="tab-btn" data-action="switch-tab" data-tab="usage">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1" y="5" width="3" height="9" rx="0.5"/><rect x="6.5" y="1" width="3" height="13" rx="0.5"/><rect x="12" y="3" width="3" height="11" rx="0.5"/></svg>
+                Usage Stats
+            </button>
         </div>
 
         <!-- Tab 1: Accounts -->
@@ -129,6 +133,8 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
                         <div class="em-title">Token data loading...</div>
                     </div>
                 </div>
+                <!-- Active Context Window -->
+                <div id="contextWindowContent" class="ctx-window-wrap"></div>
                 <!-- Workspace Context: .agent/ items from LS index (not filesystem) -->
                 <div class="wc-section">
                     <div class="wc-section-hdr">
@@ -144,9 +150,28 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
         </div>
 
 
+        <!-- Tab 3: Usage Stats -->
+        <div id="tab-usage" class="tab-content">
+            <div class="token-strip">
+                <span class="token-strip-label">Session Token Usage</span>
+                <button class="s-btn" id="usageRefreshBtn" title="Refresh usage stats" data-action="refresh-usage-only">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
+                </button>
+            </div>
+            <div class="token-scroll">
+                <div id="usageContent" class="usage-tab">
+                    <div class="token-empty">
+                        <div class="em-icon">📊</div>
+                        <div class="em-title">Usage data loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Footer -->
         <div class="foot">
             <span id="lastUpdated">—</span>
+            <span class="build-tag">b25</span>
             <div class="interval-pick">
                 <button class="iv-btn" data-ms="30000" data-action="set-interval">30s</button>
                 <button class="iv-btn active" data-ms="60000" data-action="set-interval">1m</button>

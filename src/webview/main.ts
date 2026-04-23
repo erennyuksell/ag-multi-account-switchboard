@@ -10,7 +10,7 @@ import { setupMessageHandler } from './message-handler';
 import {
     refresh, addAccount, addAccountByToken, removeAccount, switchAccount,
     copyToken, toggleModel, pinModel, doRefresh, doRefreshTokenOnly,
-    switchTab, pickInterval, toggleOpen,
+    doRefreshUsage, switchTab, pickInterval, toggleOpen,
 } from './actions';
 
 interface SavedState { intervalMs?: number; activeTab?: string }
@@ -53,12 +53,15 @@ if (saved.activeTab) {
 }
 
 // ─── Event Delegation ───
+import { renderUsageStats } from './renderers/usage';
+
 const ACTIONS: Record<string, (t: HTMLElement) => void> = {
     'switch-tab':           t => switchTab(t.dataset.tab!, t),
     'refresh':              () => doRefresh(),
     'add-account':          () => addAccount(),
     'add-account-by-token': () => addAccountByToken(),
     'refresh-token-only':   () => doRefreshTokenOnly(),
+    'refresh-usage-only':   () => doRefreshUsage(),
     'set-interval':         t => pickInterval(t),
     'switch-account':       t => switchAccount(t.dataset.id!),
     'copy-token':           t => copyToken(t.dataset.id!),
@@ -66,6 +69,19 @@ const ACTIONS: Record<string, (t: HTMLElement) => void> = {
     'toggle-open':          t => toggleOpen(t),
     'pin-model':            t => pinModel(t.dataset.accountKey!, t.dataset.modelId!),
     'open-file':            t => vscode.postMessage({ type: 'openFile', path: t.dataset.openPath }),
+    'set-usage-range':      t => {
+        const range = t.dataset.range || 'all';
+        (window as any).__usageRange = range;
+        // Immediate visual feedback — toggle active class without waiting for backend
+        const bar = document.getElementById('usageRangeBar');
+        if (bar) {
+            bar.querySelectorAll('.deep-range-btn').forEach(b => b.classList.remove('active'));
+            t.classList.add('active');
+        }
+        // Send to extension host for proper re-aggregation
+        vscode.postMessage({ type: 'setUsageRange', range });
+    },
+    'open-usage-panel':     () => vscode.postMessage({ type: 'openUsagePanel' }),
 };
 
 document.addEventListener('click', (e: MouseEvent) => {

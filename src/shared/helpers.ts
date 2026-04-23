@@ -1,7 +1,9 @@
 /**
- * Pure utility functions used across renderers.
- * No side effects, no DOM access — just data transformation.
+ * Shared helpers — SSOT for both extension host and webview.
+ * Pure functions only: no DOM, no Node APIs, no side effects.
  */
+
+// ─── CSS class helpers ───
 
 export function dotClass(pct: number): string {
     return pct >= 50 ? 'g' : pct >= 20 ? 'y' : 'r';
@@ -12,6 +14,8 @@ export const fillClass = dotClass;
 export function pctClass(pct: number): string {
     return pct >= 80 ? 'r' : pct >= 50 ? 'y' : 'g';
 }
+
+// ─── Time helpers ───
 
 export function timeLeft(resetTimeStr: string | undefined | null): string {
     if (!resetTimeStr) return '';
@@ -36,6 +40,8 @@ export function resetDateStr(resetTimeStr: string | undefined | null): string {
     return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// ─── Model/Tier name helpers ───
+
 export function shortModelName(name: string | undefined | null): string {
     if (!name) return '?';
     return name.split('/').pop()!.replace(/^models-/, '').replace(/^models_/, '');
@@ -47,12 +53,46 @@ export function shortTierName(name: string | undefined | null): string {
     return parts[parts.length - 1] || name;
 }
 
+// ─── Number formatters ───
+
 export function fmtK(n: number | null | undefined): string {
     if (n == null) return '';
     if (n >= 1000) return Math.round(n / 1000) + 'K';
     return '' + n;
 }
 
+/** Number → locale string with separators (28,921) */
 export function fmtNum(n: number): string {
     return n.toLocaleString();
+}
+
+/** Large number → compact string (1.2M, 489.7K) */
+export function fmtBig(n: number): string {
+    if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'B';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+}
+
+/** ISO date → short display (Apr 19) */
+export function fmtShortDate(iso: string): string {
+    if (!iso || iso.length < 10) return iso;
+    const parts = iso.split('-');
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return months[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10);
+}
+
+// ─── HTML/Security helpers ───
+
+/** HTML entity escape */
+export function escHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** CSP nonce generator */
+export function getNonce(): string {
+    let text = '';
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    for (let i = 0; i < 32; i++) text += chars.charAt(Math.floor(Math.random() * chars.length));
+    return text;
 }

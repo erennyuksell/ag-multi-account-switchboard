@@ -14,6 +14,7 @@
  */
 
 import * as https from 'https';
+import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -157,3 +158,149 @@ export function callLSEndpoint(
         req.end();
     });
 }
+
+// ==================== Unified LS HTTP Client ====================
+//
+// Single source of truth for all Language Server HTTP calls.
+// Replaces 5 duplicate implementations in:
+//   contextWindow.callLs, usage/index.callLsJson, serverDiscovery.fetchLocalQuota,
+//   tokenBase.callHttp, rpcDirectClient.httpsPost
+
+import { ServerInfo } from '../types';
+
+/**
+ * POST JSON to a Language Server HTTP endpoint and return parsed JSON.
+ * This is the SSOT for all JSON-based LS communication.
+ *
+ * @param serverInfo  - Server connection info (port + csrf)
+ * @param method      - RPC method name, e.g. 'GetAllCascadeTrajectories'
+ * @param body        - JSON body to send (default: {})
+ * @param timeoutMs   - Request timeout (default: 8000ms)
+ */
+export function callLsJson(
+    serverInfo: ServerInfo,
+    method: string,
+    body: Record<string, unknown> = {},
+    timeoutMs = 8000,
+): Promise<any> {
+    const SVC = '/exa.language_server_pb.LanguageServerService/';
+    const fullPath = method.startsWith('/') ? method : SVC + method;
+
+    return new Promise((resolve, reject) => {
+        const bodyStr = JSON.stringify(body);
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: serverInfo.port,
+            path: fullPath,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyStr),
+                'Connect-Protocol-Version': '1',
+                'X-Codeium-Csrf-Token': serverInfo.csrfToken,
+            },
+            timeout: timeoutMs,
+        }, (res) => {
+            let data = '';
+            res.on('data', (chunk: string | Buffer) => { data += chunk; });
+            res.on('end', () => {
+                const status = res.statusCode ?? 0;
+                if (status >= 200 && status < 300) {
+                    try { resolve(JSON.parse(data)); }
+                    catch { resolve(null); }
+                } else {
+                    reject(new Error(`${method} HTTP ${status}: ${data.substring(0, 200)}`));
+                }
+            });
+            res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error(`${method} timeout`)); });
+        req.write(bodyStr);
+        req.end();
+    });
+}
+
+/**
+ * POST to a Language Server HTTP endpoint and return raw Buffer (for proto responses).
+ * This is the SSOT for all proto-binary LS communication.
+ */
+export function callLsProto(
+    serverInfo: ServerInfo,
+    endpointPath: string,
+    timeoutMs = 8000,
+): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const req = http.request({
+            hostname: '127.0.0.1',
+            port: serverInfo.port,
+            path: endpointPath,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/proto',
+                'Content-Length': '0',
+                'Connect-Protocol-Version': '1',
+                'X-Codeium-Csrf-Token': serverInfo.csrfToken,
+            },
+            timeout: timeoutMs,
+        }, async (res) => {
+            try {
+                const { status, body } = await collectBuffer(res);
+                if (status === 200) {
+                    resolve(body);
+                } else {
+                    reject(new Error(`HTTP ${status}: ${body.toString().substring(0, 100)}`));
+                }
+            } catch (e) { reject(e); }
+        });
+        req.on('error', reject);
+        req.on('timeout', () => req.destroy(new Error('timeout')));
+        req.end();
+    });
+}
+
+/**
+ * POST JSON to a Language Server HTTPS endpoint (for RPC Direct calls).
+ * This is the SSOT for all HTTPS JSON-based LS communication.
+ */
+export function callLsHttpsJson(
+    httpsPort: number,
+    csrfToken: string,
+    path: string,
+    body: Record<string, unknown> = {},
+    timeoutMs = 8000,
+): Promise<any> {
+    return new Promise((resolve, reject) => {
+        const bodyStr = JSON.stringify(body);
+        const req = https.request({
+            hostname: '127.0.0.1',
+            port: httpsPort,
+            path,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyStr),
+                'Connect-Protocol-Version': '1',
+                'X-Codeium-Csrf-Token': csrfToken,
+            },
+            timeout: timeoutMs,
+            rejectUnauthorized: false,
+        }, (res) => {
+            let data = '';
+            res.on('data', (c: string | Buffer) => { data += c; });
+            res.on('end', () => {
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    try { resolve(JSON.parse(data)); }
+                    catch { reject(new Error(`Invalid JSON from ${path}`)); }
+                } else {
+                    reject(new Error(`${path} returned ${res.statusCode}`));
+                }
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error(`${path} timeout`)); });
+        req.write(bodyStr);
+        req.end();
+    });
+}
+

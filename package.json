@@ -3,7 +3,7 @@
   "displayName": "AG Multi-Account Switchboard",
   "description": "Switch between Antigravity accounts instantly. Monitor AI quotas, token budgets and reset timers — all in one sidebar panel.",
   "icon": "assets/icon.png",
-  "version": "2.1.0",
+  "version": "2.3.5",
   "publisher": "erennyuksell",
   "license": "MIT",
   "repository": {
@@ -72,9 +72,70 @@
         "command": "ag.addAccountByToken",
         "title": "AG Switchboard: Add Account via Token",
         "icon": "$(key)"
+      },
+      {
+        "command": "ag.openUsageStats",
+        "title": "AG Switchboard: Open Usage Statistics",
+        "icon": "$(graph)"
       }
     ],
-    "menus": {}
+    "menus": {},
+    "configuration": {
+      "title": "AG Switchboard",
+      "properties": {
+        "ag-switchboard.modelPricing": {
+          "type": "object",
+          "description": "Model pricing per 1M tokens. Keys: model tier. Values: { input, output, cache }.",
+          "default": {
+            "opus": {
+              "input": 5,
+              "output": 25,
+              "cache": 0.5
+            },
+            "sonnet": {
+              "input": 3,
+              "output": 15,
+              "cache": 0.3
+            },
+            "haiku": {
+              "input": 1,
+              "output": 5,
+              "cache": 0.1
+            },
+            "gemini-3-pro": {
+              "input": 2,
+              "output": 12,
+              "cache": 0.2
+            },
+            "gemini-3-flash": {
+              "input": 0.5,
+              "output": 3,
+              "cache": 0.05
+            },
+            "gemini-2-pro": {
+              "input": 1.25,
+              "output": 10,
+              "cache": 0.125
+            },
+            "gemini-2-flash": {
+              "input": 0.3,
+              "output": 2.5,
+              "cache": 0.03
+            },
+            "flash-lite": {
+              "input": 0.1,
+              "output": 0.4,
+              "cache": 0.01
+            },
+            "gpt-oss": {
+              "input": 2.5,
+              "output": 10,
+              "cache": 0.25
+            }
+          }
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "npm run compile:extension && npm run compile:webview",

@@ -38,6 +38,8 @@ export interface ServerInfo {
     port: number;
     csrfToken: string;
     protocol: 'http' | 'https';
+    /** HTTPS server port for cascade trajectory endpoints (differs from extension_server_port) */
+    httpsPort?: number;
 }
 
 /** Options for programmatic IDE account switching */
@@ -47,6 +49,18 @@ export interface SwitchAccountOptions {
     accessToken: string;
     refreshToken: string;
     expiryTimestamp: number;
+}
+
+/** Unified state object passed to viewProvider.updateData() — replaces 9 positional params */
+export interface ViewState {
+    localData: LocalQuotaData | null;
+    selectedModels: string[];
+    trackedQuotas: AccountQuota[];
+    activeEmail: string;
+    tokenBase: any | null;
+    workspaceContext: any | null;
+    pinnedModels: Record<string, string>;
+    usageStats: DeepUsageStats | null;
 }
 
 // ==================== IDE Internal Types ====================
@@ -115,4 +129,86 @@ export interface LocalQuotaData {
             clientModelConfigs?: ClientModelConfig[];
         };
     };
+}
+
+// ==================== Deep Usage Stats Types ====================
+
+/** Time-bucketed token usage */
+export interface TokenBucket {
+    input: number;
+    output: number;
+    cache: number;        // cacheRead — kept as 'cache' for backward compat
+    cacheWrite: number;   // cache creation tokens
+    reasoning: number;    // thinking/reasoning tokens
+    calls: number;
+}
+
+/** Daily breakdown entry */
+export interface DailyBucket extends TokenBucket {
+    date: string;  // YYYY-MM-DD
+}
+
+/** Hourly breakdown entry (aggregated across all days) */
+export interface HourlyBucket extends TokenBucket {
+    hour: number;  // 0-23
+}
+
+/** Model breakdown entry */
+export interface ModelBucket extends TokenBucket {
+    displayName: string;
+}
+
+/** Cascade/conversation breakdown */
+export interface CascadeBucket extends TokenBucket {
+    id: string;
+    title: string;
+}
+
+/** Provider breakdown entry */
+export interface ProviderBucket extends TokenBucket {
+    provider: string;
+    displayName: string;
+}
+
+/** Day-of-week aggregation (Mon=0 .. Sun=6) */
+export interface WeekdayBucket extends TokenBucket {
+    day: number;       // 0=Mon .. 6=Sun
+    label: string;     // "Mon", "Tue" ...
+}
+
+/** Monthly breakdown per model (for tooltip) */
+export interface MonthlyModelEntry {
+    displayName: string;
+    tokens: number;
+    cost: number;
+}
+
+/** Calendar month bucket (filter-independent) */
+export interface MonthlyBucket extends TokenBucket {
+    key: string;       // YYYY-MM
+    label: string;     // "Jan", "Feb" etc.
+    total: number;
+    cost: number;
+    topModels: MonthlyModelEntry[];
+}
+
+/** Full deep analytics stats */
+export interface DeepUsageStats {
+    totalTokens: number;
+    totalInput: number;
+    totalOutput: number;
+    totalCache: number;
+    totalCacheWrite: number;
+    totalReasoning: number;
+    totalCalls: number;
+    daysActive: number;
+    cacheRate: number;
+    dateRange: { from: string; to: string };
+    daily: DailyBucket[];
+    hourly: HourlyBucket[];
+    models: ModelBucket[];
+    cascades: CascadeBucket[];
+    providers: ProviderBucket[];
+    weekday: WeekdayBucket[];
+    monthly: MonthlyBucket[];  // filter-independent, data-driven
 }

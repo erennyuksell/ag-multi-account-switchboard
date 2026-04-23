@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
-import { AccountQuota, LocalQuotaData } from '../types';
+import { AccountQuota, LocalQuotaData, ViewState } from '../types';
 import { TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
+import { DeepUsageStats } from '../types';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../templates/webviewTemplate';
+import { getPricing } from '../shared/usage-components';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ViewProvider');
@@ -35,9 +37,9 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'ready':
                     log.info('MSG: ready received');
                     // Instant: push whatever is in memory RIGHT NOW (0ms, no network)
+                    // Context window comes from lastContextWindow cache (set by USS or globalState restore).
+                    // Do NOT re-fetch here — getActiveContext() global sort can pick wrong conversation.
                     this.quotaManager.pushCachedData();
-                    // Then silently fetch fresh data in background
-                    this.quotaManager.refreshSilent();
                     break;
                 case 'refresh':
                     this.quotaManager.refresh();
@@ -76,6 +78,11 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                         delete pins[msg.accountKey];
                     }
                     await this.quotaManager.setPinnedModels(pins);
+                    // Push confirmed pin state back to webview immediately.
+                    // Without this, the next auto-refresh could overwrite the
+                    // webview's in-memory pinnedModels with stale globalState data
+                    // if the refresh started before the save completed.
+                    this.quotaManager.pushCachedData();
                     break;
                 }
                 case 'addAccount':
@@ -94,6 +101,12 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'copyToken':
                     this.quotaManager.copyToken(msg.accountId);
                     break;
+                case 'openUsagePanel':
+                    vscode.commands.executeCommand('ag.openUsageStats');
+                    break;
+                case 'setUsageRange':
+                    this.handleUsageRange(msg.range);
+                    break;
             }
         });
 
@@ -108,24 +121,19 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: 'error', message });
     }
 
-    updateData(
-        localData: LocalQuotaData | null,
-        selectedModels: string[],
-        trackedQuotas: AccountQuota[] = [],
-        activeEmail: string = '',
-        tokenBase: TokenBaseData | null = null,
-        workspaceContext: WorkspaceContextData | null = null,
-        pinnedModels: Record<string, string> = {},
-    ) {
+    updateData(state: ViewState) {
         this._view?.webview.postMessage({
             type: 'update',
-            data: localData,
-            selectedModels,
-            activeEmail,
-            tokenBase,
-            workspaceContext,
-            pinnedModels,
-            trackedAccounts: trackedQuotas.map(q => ({
+            data: state.localData,
+            selectedModels: state.selectedModels,
+            activeEmail: state.activeEmail,
+            tokenBase: state.tokenBase,
+            workspaceContext: state.workspaceContext,
+            pinnedModels: state.pinnedModels,
+            usageStats: state.usageStats,
+            contextWindow: null,
+            pricing: getPricing(),
+            trackedAccounts: state.trackedQuotas.map(q => ({
                 id: q.account.id,
                 email: q.account.email,
                 name: q.account.name,
@@ -138,5 +146,25 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 lastUpdated: q.lastUpdated,
             })),
         });
+    }
+
+    /** Push context window data to webview (separate from main update) */
+    postContextWindow(data: any) {
+        this._view?.webview.postMessage({
+            type: 'contextWindowUpdate',
+            data,
+        });
+    }
+
+    private handleUsageRange(range: string) {
+        this.quotaManager.setUsageRange(range);
+        const filtered = this.quotaManager.getFilteredUsageStats(range);
+        if (filtered) {
+            this._view?.webview.postMessage({
+                type: 'usageStatsUpdate',
+                usageStats: filtered,
+                pricing: getPricing(),
+            });
+        }
     }
 }

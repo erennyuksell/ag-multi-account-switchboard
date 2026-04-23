@@ -1,45 +1,61 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { AccountQuota, LocalQuotaData, ClientModelConfig, USSApi } from '../types';
+import { PollLock } from '../utils/pollLock';
+import { AccountQuota, LocalQuotaData, ServerInfo, ViewState } from '../types';
 import { AccountManager } from './accountManager';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
 import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
+import { UsageStatsService } from '../services/usage';
+import { ContextWindowService, ContextWindowData } from '../services/contextWindow';
+import { StatusBarService } from '../services/statusBar';
+import { EmailResolver } from '../services/emailResolver';
+import { DeepUsageStats } from '../types';
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
 import { STATE_DB_PATH } from '../constants';
-import { extractStringField } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('QuotaManager');
 
-const execAsync = promisify(exec);
+const diagPath = '/tmp/ag-ctx-diag.log';
+function diag(msg: string) {
+    try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] QM: ${msg}\n`); } catch {}
+}
 
 export class QuotaManager {
-    private statusBarItem: vscode.StatusBarItem;
+    private readonly statusBar: StatusBarService;
+    private readonly emailResolver = new EmailResolver();
     private lastLocalData: LocalQuotaData | null = null;
     private lastTrackedQuotas: AccountQuota[] = [];
     private viewProvider: QuotaViewProvider | null = null;
     private _refreshInFlight = false;
     /** Email hint from a switch that arrived during an in-flight refresh */
     private _pendingHint: string | undefined;
+    private _pendingManualRefresh = false;
     private readonly serverDiscovery = new ServerDiscoveryService();
     private readonly switchService: AccountSwitchService;
     private readonly tokenBaseService = new TokenBaseService();
+    private readonly usageStatsService = new UsageStatsService();
+    private readonly contextWindowService = new ContextWindowService();
     private lastTokenBase: TokenBaseData | null = null;
     private lastWorkspaceContext: WorkspaceContextData | null = null;
+    private lastUsageStats: DeepUsageStats | null = null;
+    private lastContextWindow: ContextWindowData | null = null;
+    private lastContextConversationId: string | null = null;
+
+    private static readonly CTX_CACHE_KEY = 'ag.lastContextWindow';
+    private currentUsageRange: string = '24h';
+
+    // Server discovery cache — avoids redundant ps+lsof shell spawns
+    private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
+    private static readonly SERVER_CACHE_TTL = 60_000; // 60s
 
     constructor(
         private readonly context: vscode.ExtensionContext,
         private readonly accountManager: AccountManager,
     ) {
         this.switchService = new AccountSwitchService(context, accountManager.getAuthService());
-        this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-        this.statusBarItem.command = 'ag.refreshQuota';
-        this.statusBarItem.text = '$(pulse) Antigravity Quota: Loading...';
-        this.statusBarItem.show();
-        context.subscriptions.push(this.statusBarItem);
+        this.statusBar = new StatusBarService(context);
         // Ensure token renewal timer is cleaned up on extension deactivation
         context.subscriptions.push({ dispose: () => this.switchService.dispose() });
 
@@ -55,8 +71,16 @@ export class QuotaManager {
             log.warn('Could not watch state.vscdb for account changes:', e);
         }
 
+        // Restore cached context window from globalState for instant first paint
+        this.lastContextWindow = this.context.globalState.get<ContextWindowData | null>(QuotaManager.CTX_CACHE_KEY, null);
+        if (this.lastContextWindow) {
+            this.lastContextConversationId = this.lastContextWindow.conversationId;
+            log.info(`Restored cached context window: ${this.lastContextConversationId?.substring(0, 12)}`);
+        }
+
         // Initial fetch; subsequent refreshes driven by webview interval picker
         this.refresh();
+
     }
 
     getSwitchService(): AccountSwitchService {
@@ -66,12 +90,45 @@ export class QuotaManager {
     setViewProvider(provider: QuotaViewProvider) {
         this.viewProvider = provider;
         if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-            this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, '', null, null, this.getPinnedModels());
+            this.viewProvider.updateData(this.buildViewState(''));
         }
+    }
+
+    // ── ViewState builder (DRY: used by all updateData calls) ──
+
+    private buildViewState(activeEmail: string): ViewState {
+        return {
+            localData: this.lastLocalData,
+            selectedModels: this.getSelectedModels(),
+            trackedQuotas: this.lastTrackedQuotas,
+            activeEmail,
+            tokenBase: this.lastTokenBase,
+            workspaceContext: this.lastWorkspaceContext,
+            pinnedModels: this.getPinnedModels(),
+            usageStats: this.getRangeFilteredStats(),
+        };
     }
 
     getSelectedModels(): string[] {
         return this.context.globalState.get<string[]>('ag.selectedStatusBarModels', []);
+    }
+
+    getLastUsageStats(): DeepUsageStats | null {
+        return this.lastUsageStats;
+    }
+
+    getFilteredUsageStats(range: string): DeepUsageStats | null {
+        return this.usageStatsService.getFilteredStats(range);
+    }
+
+    setUsageRange(range: string) {
+        this.currentUsageRange = range;
+    }
+
+    /** Returns stats filtered by the user's currently selected range */
+    private getRangeFilteredStats(): DeepUsageStats | null {
+        if (!this.lastUsageStats) return null;
+        return this.usageStatsService.getFilteredStats(this.currentUsageRange);
     }
 
     getPinnedModels(): Record<string, string> {
@@ -94,29 +151,104 @@ export class QuotaManager {
         if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
     }
 
-    /** Push whatever is already in memory to the webview — zero network, instant render */
+     /** Push whatever is already in memory to the webview — zero network, instant render */
     pushCachedData() {
         if (!this.viewProvider) { log.info('pushCachedData: no viewProvider'); return; }
         const hasLocal = !!this.lastLocalData;
         const hasTracked = this.lastTrackedQuotas.length > 0;
-        log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}`);
+        log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}, hasCtx=${!!this.lastContextWindow}`);
+
         if (hasLocal || hasTracked) {
-            this.viewProvider.updateData(
-                this.lastLocalData,
-                this.getSelectedModels(),
-                this.lastTrackedQuotas,
-                '',
-                this.lastTokenBase,
-                this.lastWorkspaceContext,
-                this.getPinnedModels(),
-            );
+            this.viewProvider.updateData(this.buildViewState(''));
+            // Push cached context window if available — NO re-fetch here
+            // Context window is fetched ONLY in refreshContextWindow() during the main refresh cycle.
+            if (this.lastContextWindow) {
+                this.viewProvider.postContextWindow(this.lastContextWindow);
+            }
         }
     }
 
-    /** Background refresh — no spinner, just silently update */
-    async refreshSilent() {
-        await this.refresh();
+    // ── Shared server resolution (DRY: used by refresh, refreshTokenOnly, fetchCtxIndependent) ──
+
+    private async resolveServer(forceRefresh = false): Promise<ServerInfo | null> {
+        if (!forceRefresh && this.cachedServer && Date.now() - this.cachedServer.ts < QuotaManager.SERVER_CACHE_TTL) {
+            return this.cachedServer.info;
+        }
+        const info = await this.serverDiscovery.discover(this.getWorkspaceId()).catch(() => null);
+        this.cachedServer = { info, ts: Date.now() };
+        return info;
     }
+
+    /**
+     * Fetch context window data independently of the main refresh cycle.
+     * Called by USS tracker on conversation switch or data update.
+     *
+     * Strategy: check if LS has written new generator metadata entries
+     * (numTotalGeneratorMetadata increased). If not yet, retry with backoff.
+     * This is a definitive "new data exists" check — no token-count heuristics.
+     */
+    private _cwDebounce: ReturnType<typeof setTimeout> | null = null;
+    private _cwRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Last known generator metadata entry count per cascade — definitive change detector */
+    private _lastKnownMetaCount = new Map<string, number>();
+
+    async fetchContextWindowIndependent(cascadeId: string) {
+        this.lastContextConversationId = cascadeId;
+        this.contextWindowService.invalidateCache(cascadeId);
+
+        // Debounce: collapse rapid USS events into a single fetch
+        if (this._cwDebounce) clearTimeout(this._cwDebounce);
+        if (this._cwRetryTimer) clearTimeout(this._cwRetryTimer);
+        this._cwDebounce = setTimeout(() => this._executeFetch(cascadeId, 0), 500);
+    }
+
+    /**
+     * Internal: execute fetch with retry logic.
+     *
+     * Why always-fetch instead of count-gating:
+     * LS only writes NEW generator metadata entries on planner responses, not every step.
+     * numTotalGeneratorMetadata can stay the same across multiple turns (e.g. short responses).
+     * But the LAST entry's estimatedTokensUsed may still update. So we always fetch and
+     * compare the resulting token count to decide if a retry is needed.
+     */
+    private async _executeFetch(cascadeId: string, attempt: number) {
+        const RETRY_DELAYS = [3000, 7000]; // retry at 3s, then 7s
+        const maxAttempts = 1 + RETRY_DELAYS.length; // initial + 2 retries = 3 total
+        const shortId = cascadeId.substring(0, 12);
+
+        diag(`fetchCWI attempt ${attempt}/${maxAttempts - 1}: ${shortId}`);
+        try {
+            this.contextWindowService.invalidateCache(cascadeId);
+            const serverInfo = await this.resolveServer();
+            if (!serverInfo) { diag('fetchCWI: no server'); return; }
+            diag(`fetchCWI: port=${serverInfo.port}`);
+
+            const prevTokens = this.lastContextWindow?.usedTokens ?? 0;
+            await this.refreshContextWindow(serverInfo, cascadeId);
+            const newTokens = this.lastContextWindow?.usedTokens ?? 0;
+
+            diag(`fetchCWI: tokens prev=${prevTokens} new=${newTokens}`);
+
+            if (newTokens !== prevTokens || prevTokens === 0) {
+                // Data changed or first fetch — done!
+                diag(`fetchCWI: SUCCESS — tokens updated ${prevTokens}→${newTokens}`);
+            } else if (attempt < maxAttempts - 1) {
+                // Tokens unchanged — LS may not have written yet. Retry.
+                const delay = RETRY_DELAYS[attempt];
+                diag(`fetchCWI: tokens unchanged, retry in ${delay}ms (attempt ${attempt + 1})`);
+                this._cwRetryTimer = setTimeout(() => this._executeFetch(cascadeId, attempt + 1), delay);
+            } else {
+                diag(`fetchCWI: retries exhausted, tokens=${newTokens}`);
+            }
+        } catch (err) {
+            diag(`fetchCWI FAILED: ${(err as Error)?.message}`);
+            log.info(`fetchCtxIndependent: FAILED ${(err as Error)?.message}`);
+        }
+    }
+
+
+
+
 
     async refresh(activeEmailHint?: string) {
         if (this._refreshInFlight) {
@@ -124,10 +256,20 @@ export class QuotaManager {
                 this._pendingHint = activeEmailHint;
                 log.info(`refresh: QUEUED (hint=${activeEmailHint})`);
             } else {
-                log.info('refresh: SKIPPED (_refreshInFlight=true)');
+                // Queue the manual refresh so it runs after the current one
+                this._pendingManualRefresh = true;
+                log.info('refresh: QUEUED (manual, will run after current finishes)');
             }
             return;
         }
+
+        // Multi-instance safety: prevent duplicate refresh across VS Code windows
+        const lock = new PollLock();
+        if (!await lock.tryAcquire()) {
+            log.info('refresh: SKIPPED (another instance holds the lock)');
+            return;
+        }
+
         this._refreshInFlight = true;
         log.info('refresh: STARTED');
         try {
@@ -137,8 +279,7 @@ export class QuotaManager {
             if (this.viewProvider && !hasData) this.viewProvider.setLoading();
 
             // Discover workspace LS once — share with both quota fetch and token budget
-            const workspaceId = this.getWorkspaceId();
-            const serverInfo = await this.serverDiscovery.discover(workspaceId).catch(() => null);
+            const serverInfo = await this.resolveServer();
 
             // Parallel: local server + all tracked accounts + active email + workspace context
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
@@ -146,9 +287,21 @@ export class QuotaManager {
             const [localResult, trackedResult, tokenBase, workspaceContext] = await Promise.all([
                 serverInfo ? this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null) : Promise.resolve(null),
                 this.accountManager.refreshAllQuotas().catch(() => []),
-                this.tokenBaseService.fetchTokenBase(serverInfo, workspaceId).catch(() => null),
+                this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
                 serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
+
+            // Deep usage stats — pre-load from disk cache SYNCHRONOUSLY (~20ms for 4MB)
+            // so it's included in the very first webview render. No shimmer needed.
+            if (!this.lastUsageStats) {
+                log.info('refresh: lastUsageStats is null, loading disk cache...');
+                const cachedStats = this.usageStatsService.loadFromDiskCacheSync();
+                log.info(`refresh: loadFromDiskCacheSync returned ${cachedStats ? 'data (totalCalls=' + cachedStats.totalCalls + ')' : 'null'}`);
+                if (cachedStats) this.lastUsageStats = cachedStats;
+            } else {
+                log.info(`refresh: lastUsageStats already present (totalCalls=${this.lastUsageStats.totalCalls})`);
+            }
+
             const activeEmail = activeEmailHint ?? await this.getActiveEmail();
 
             // Local (active IDE account)
@@ -157,8 +310,7 @@ export class QuotaManager {
                 this.updateStatusBar(localResult);
             } else {
                 this.lastLocalData = null;
-                this.statusBarItem.text = '$(error) Antigravity: Server Not Found';
-                this.statusBarItem.tooltip = 'Could not connect to local Antigravity server';
+                this.statusBar.setError('$(error) Antigravity: Server Not Found', 'Could not connect to local Antigravity server');
             }
 
             // Tracked accounts
@@ -166,32 +318,95 @@ export class QuotaManager {
             this.lastTokenBase = tokenBase;
             this.lastWorkspaceContext = workspaceContext;
 
-            // Push to webview
+            // Push to webview IMMEDIATELY — loading state ends here
+            // Deep stats are fetched in background AFTER render (Tier 1 optimization)
             log.info(`refresh: localResult=${!!localResult}, trackedCount=${trackedResult.length}, hasProvider=${!!this.viewProvider}`);
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-                    this.viewProvider.updateData(this.lastLocalData, this.getSelectedModels(), this.lastTrackedQuotas, activeEmail, this.lastTokenBase, this.lastWorkspaceContext, this.getPinnedModels());
+                    this.viewProvider.updateData(this.buildViewState(activeEmail));
                     log.info('refresh: updateData sent');
+
+                    // Context window is USS-only — no polling fallback needed
                 } else {
                     this.viewProvider.setError('Antigravity IDE server not found and no tracked accounts.');
                     log.info('refresh: setError sent (no data)');
                 }
             }
+
+            // Deep usage stats — fire-and-forget AFTER render (non-blocking)
+            // Cold conversations backfill silently in background via callback.
+            if (serverInfo) {
+                const isSubsequentCall = !!this.lastUsageStats;
+                this.usageStatsService.fetchDeepStats(serverInfo, isSubsequentCall, (backfilledStats) => {
+                    this.lastUsageStats = backfilledStats;
+                    this.pushCachedData();
+                }).then(deep => {
+                    if (deep) { this.lastUsageStats = deep; this.pushCachedData(); }
+                }).catch(err => {
+                    log.info(`fetchDeepStats FAILED: ${err?.message}`);
+                });
+            }
         } catch (error: any) {
             const msg = error.message || 'Unknown error';
             log.info(`refresh: CAUGHT ERROR: ${msg}`);
             if (this.viewProvider) this.viewProvider.setError(msg);
-            this.statusBarItem.text = '$(error) Antigravity: Error';
-            this.statusBarItem.tooltip = msg;
+            this.statusBar.setError('$(error) Antigravity: Error', msg);
         } finally {
             this._refreshInFlight = false;
+            await lock.release();
             log.info('refresh: FINISHED');
             const hint = this._pendingHint;
+            const manualPending = this._pendingManualRefresh;
+            this._pendingHint = undefined;
+            this._pendingManualRefresh = false;
             if (hint) {
-                this._pendingHint = undefined;
                 log.info(`refresh: DRAINING QUEUED (hint=${hint})`);
                 this.refresh(hint);
+            } else if (manualPending) {
+                log.info('refresh: DRAINING QUEUED (manual)');
+                this.refresh();
             }
+        }
+    }
+
+    /** Fetch context window for a specific conversation and push to webview */
+    private async refreshContextWindow(serverInfo: ServerInfo, cascadeId: string): Promise<void> {
+        diag(`refreshCW: fetching for ${cascadeId.substring(0,12)}`);
+        try {
+            const ctx = await this.contextWindowService.getContextForCascade(serverInfo, cascadeId);
+
+            if (!ctx) {
+                diag(`refreshCW: ctx is null for ${cascadeId.substring(0,12)}`);
+                // If this is the ACTIVE conversation and ctx is null (new/empty conversation),
+                // clear stale data so the widget doesn't show the previous conversation's info.
+                if (cascadeId === this.lastContextConversationId) {
+                    this.lastContextWindow = null;
+                    this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
+                    if (this.viewProvider) {
+                        this.viewProvider.postContextWindow(null);
+                        diag('refreshCW: cleared stale context (active conversation has no data)');
+                    }
+                }
+                return;
+            }
+
+            diag(`refreshCW: got data — title="${ctx.title?.substring(0,30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0,12)}`);
+
+            if (ctx.conversationId !== this.lastContextConversationId) {
+                log.info(`Context window: conversation → ${ctx.conversationId?.substring(0, 12)}`);
+                this.lastContextConversationId = ctx.conversationId;
+            }
+            this.lastContextWindow = ctx;
+            this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, ctx);
+            if (this.viewProvider) {
+                this.viewProvider.postContextWindow(ctx);
+                diag(`refreshCW: pushed to webview — tokens=${ctx.usedTokens}`);
+            } else {
+                diag('refreshCW: NO viewProvider — data not pushed');
+            }
+        } catch (err) {
+            diag(`refreshCW FAILED: ${(err as Error)?.message}`);
+            log.info(`refreshContextWindow FAILED: ${(err as Error)?.message}`);
         }
     }
 
@@ -202,13 +417,12 @@ export class QuotaManager {
         try {
             if (this.viewProvider) this.viewProvider.setLoading();
 
-            const workspaceId = this.getWorkspaceId();
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
             const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-            const serverInfo = await this.serverDiscovery.discover(workspaceId).catch(() => null);
+            const serverInfo = await this.resolveServer();
 
             const [tokenBase, workspaceContext] = await Promise.all([
-                this.tokenBaseService.fetchTokenBase(serverInfo, workspaceId).catch(() => null),
+                this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
                 serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
 
@@ -217,15 +431,7 @@ export class QuotaManager {
 
             if (this.viewProvider) {
                 const activeEmail = await this.getActiveEmail();
-                this.viewProvider.updateData(
-                    this.lastLocalData,
-                    this.getSelectedModels(),
-                    this.lastTrackedQuotas,
-                    activeEmail,
-                    this.lastTokenBase,
-                    this.lastWorkspaceContext,
-                    this.getPinnedModels(),
-                );
+                this.viewProvider.updateData(this.buildViewState(activeEmail));
             }
         } catch (error: any) {
             if (this.viewProvider) this.viewProvider.setError(error.message || 'Token refresh failed');
@@ -296,111 +502,12 @@ export class QuotaManager {
         return uri.toString().replace(/[/:\-]/g, '_');
     }
 
-    /** Read active IDE email from USS API or antigravityAuthStatus */
+    /** Delegate to EmailResolver */
     private async getActiveEmail(): Promise<string> {
-        try {
-            // Try USS API first (in-memory, most accurate)
-            const uss: USSApi | undefined = (vscode as any).antigravityUnifiedStateSync;
-            if (uss?.UserStatus?.getUserStatus) {
-                const statusBinary = await uss.UserStatus.getUserStatus();
-                if (statusBinary) {
-                    const bytes = typeof statusBinary === 'string'
-                        ? Buffer.from(statusBinary, 'base64')
-                        : Buffer.from(statusBinary);
-                    const email = extractStringField(bytes, 7);
-                    if (email) return email;
-                }
-            }
-        } catch (e: any) {
-            log.warn('USS email read failed:', e?.message);
-        }
-
-        try {
-            // Fallback: read from antigravityAuthStatus in state.vscdb
-            const sql = "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus';";
-            const { stdout } = await execAsync(`sqlite3 "${STATE_DB_PATH}" "${sql}"`, {
-                timeout: 5000,
-            });
-            const result = stdout.trim();
-            if (result) {
-                try {
-                    const parsed = JSON.parse(result);
-                    return parsed.email || '';
-                } catch {
-                    log.warn('Invalid JSON in antigravityAuthStatus');
-                }
-            }
-        } catch (e: any) {
-            log.warn('DB email read failed:', e?.message);
-        }
-
-        return '';
+        return this.emailResolver.getActiveEmail();
     }
 
     private updateStatusBar(data: LocalQuotaData): void {
-        const rawModels = data.userStatus?.cascadeModelConfigData?.clientModelConfigs;
-        if (!rawModels || rawModels.length === 0) return;
-
-        const sorted = [...rawModels].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
-        const selectedIds = this.getSelectedModels();
-        const selected = sorted.filter(m => selectedIds.includes(m.modelOrAlias?.model || ''));
-
-        // Status bar text
-        if (selected.length === 0) {
-            this.statusBarItem.text = '$(pulse) Quota: No Model Selected';
-        } else {
-            this.statusBarItem.text = selected.map(m => {
-                const pct = getQuotaPercent(m);
-                return `${quotaIcon(pct)} ${m.label}: ${pct === null ? 'N/A' : pct.toFixed(0) + '%'}`;
-            }).join('  |  ');
-        }
-
-        // Rich tooltip
-        const md = new vscode.MarkdownString('', true);
-        md.appendMarkdown('**Antigravity Quota Models**\n\n---\n\n');
-
-        for (const m of sorted) {
-            if (!m.quotaInfo) continue;
-            const pct = getQuotaPercent(m);
-            const sel = selectedIds.includes(m.modelOrAlias?.model || '') ? ' *(Selected)*' : '';
-
-            const resetDate = m.quotaInfo.resetTime ? new Date(m.quotaInfo.resetTime) : null;
-            const isValid = resetDate && !isNaN(resetDate.getTime());
-            const timeStr = isValid
-                ? resetDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                : 'Unknown';
-            const timeLeft = isValid ? formatTimeLeft(resetDate.getTime() - Date.now()) : '';
-
-            md.appendMarkdown(`${quotaIcon(pct)} **${m.label}** (${pct === null ? 'N/A' : pct.toFixed(0) + '%'})${sel}\n\n`);
-            md.appendMarkdown(`*Resets:* ${timeStr} ${timeLeft}\n\n---\n\n`);
-        }
-
-        this.statusBarItem.tooltip = md;
+        this.statusBar.update(data, this.getSelectedModels());
     }
-}
-
-// ==================== Standalone Helpers ====================
-
-function getQuotaPercent(m: ClientModelConfig): number | null {
-    if (m.quotaInfo?.remainingFraction === undefined) return null;
-    return Math.max(0, Math.min(100, m.quotaInfo.remainingFraction * 100));
-}
-
-function quotaIcon(pct: number | null): string {
-    if (pct === null) return '⚪';
-    if (pct >= 100) return '🟢';
-    if (pct <= 0) return '🔴';
-    return '🟡';
-}
-
-function formatTimeLeft(ms: number): string {
-    if (ms <= 0) return '(Reset)';
-    const h = Math.floor(ms / 3_600_000);
-    const min = Math.floor((ms % 3_600_000) / 60_000);
-    if (h >= 24) {
-        const d = Math.floor(h / 24);
-        const rh = h % 24;
-        return rh > 0 ? `(${d}d ${rh}h left)` : `(${d}d left)`;
-    }
-    return h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
 }

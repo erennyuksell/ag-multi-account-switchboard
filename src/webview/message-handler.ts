@@ -6,6 +6,8 @@ import { wlog, setPinnedModels, setLastRenderArgs, lastRenderArgs } from './cont
 import { renderAll } from './renderers/accounts';
 import { renderTokenBudget } from './renderers/tokens';
 import { renderWorkspaceContext } from './renderers/workspace';
+import { renderUsageStats, renderContextWindow } from './renderers/usage';
+import { updatePricing } from '../shared/usage-components';
 
 const $ = (id: string) => document.getElementById(id);
 
@@ -44,6 +46,10 @@ export function setupMessageHandler(): void {
                 $('content')!.classList.remove('hidden');
                 $('error')!.innerText = '';
                 try {
+                // Save scroll position before re-render
+                    const contentEl = $('content');
+                    const scrollY = contentEl?.scrollTop ?? 0;
+
                     setLastRenderArgs([msg.data, msg.selectedModels, msg.trackedAccounts || [], msg.activeEmail || '']);
                     if (msg.pinnedModels) setPinnedModels(msg.pinnedModels);
                     renderAll(lastRenderArgs[0], lastRenderArgs[1], lastRenderArgs[2], lastRenderArgs[3] as string);
@@ -54,10 +60,36 @@ export function setupMessageHandler(): void {
                         if (el) el.innerHTML = '<div class="token-empty"><div class="em-icon">⚠️</div><div class="em-title">Token data unavailable</div><div class="em-sub">No Language Server found for this workspace.</div></div>';
                     }
                     renderWorkspaceContext(msg.workspaceContext || null);
+                    const usageData = msg.usageStats || null;
+                    if (msg.pricing) updatePricing(msg.pricing);
+                    if (usageData) (window as any).__lastDeepStats = usageData;
+                    renderUsageStats(usageData);
+                    if (msg.contextWindow) renderContextWindow(msg.contextWindow);
                     $('lastUpdated')!.textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+                    // Restore scroll position after DOM updates
+                    if (contentEl && scrollY > 0) {
+                        requestAnimationFrame(() => { contentEl.scrollTop = scrollY; });
+                    }
                 } catch (e) {
+                    wlog('RENDER_ERROR:' + (e as Error).message);
                     $('error')!.innerText = 'Render error: ' + (e as Error).message;
                 }
+                break;
+            }
+
+            case 'usageStatsUpdate': {
+                const stats = msg.usageStats || null;
+                if (stats) {
+                    if (msg.pricing) updatePricing(msg.pricing);
+                    (window as any).__lastDeepStats = stats;
+                    renderUsageStats(stats);
+                }
+                break;
+            }
+
+            case 'contextWindowUpdate': {
+                renderContextWindow(msg.data || null);
                 break;
             }
         }

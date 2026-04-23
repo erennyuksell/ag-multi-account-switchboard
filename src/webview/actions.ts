@@ -65,6 +65,8 @@ export function pinModel(accountKey: string, rawModelId: string): void {
 export const doRefresh = () => spinAndCall('refreshBtn', refresh);
 export const doRefreshTokenOnly = () => spinAndCall('tokenRefreshBtn', () =>
     vscode.postMessage({ type: 'refreshTokenOnly' }));
+export const doRefreshUsage = () => spinAndCall('usageRefreshBtn', () =>
+    vscode.postMessage({ type: 'refresh' }));
 
 export function switchTab(tabId: string, el: HTMLElement): void {
     activateOne('.tab-btn', el);

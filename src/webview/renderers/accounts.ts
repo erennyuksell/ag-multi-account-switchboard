@@ -2,7 +2,7 @@
  * Account tab renderer — builds the account card HTML for the sidebar.
  */
 
-import { dotClass, fillClass, timeLeft, shortModelName, shortTierName, fmtK, fmtNum } from '../helpers';
+import { dotClass, fillClass, timeLeft, shortModelName, shortTierName, fmtK, fmtNum } from '../../shared/helpers';
 import { pinnedModels } from '../context';
 
 // SVG icon constants for tracked account action buttons

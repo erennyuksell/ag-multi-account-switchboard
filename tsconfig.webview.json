@@ -11,7 +11,7 @@
         "composite": true,
         "outDir": "out/webview-types"
     },
-    "include": ["src/webview/**/*.ts"]
+    "include": ["src/webview/**/*.ts", "src/shared/**/*.ts"]
 }
 
 

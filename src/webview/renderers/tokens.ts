@@ -2,7 +2,7 @@
  * Token Budget tab renderer — builds the donut chart and category breakdown.
  */
 
-import { pctClass, fmtNum } from '../helpers';
+import { pctClass, fmtNum } from '../../shared/helpers';
 
 const CAT_ICONS: Record<string, string> = { 'Rules': '📋', 'Skills': '🧠', 'Workflows': '⚙️', 'Mcp Tools': '🔌' };
 
