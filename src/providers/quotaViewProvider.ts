@@ -1,7 +1,5 @@
 import * as vscode from 'vscode';
-import { AccountQuota, LocalQuotaData, ViewState } from '../types';
-import { TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
-import { DeepUsageStats } from '../types';
+import { ViewState } from '../types';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../templates/webviewTemplate';
 import { getPricing } from '../shared/usage-components';
@@ -104,6 +102,9 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'openUsagePanel':
                     vscode.commands.executeCommand('ag.openUsageStats');
                     break;
+                case 'openContextDetail':
+                    vscode.commands.executeCommand('ag.openContextDetail');
+                    break;
                 case 'setUsageRange':
                     this.handleUsageRange(msg.range);
                     break;
@@ -124,27 +125,13 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
     updateData(state: ViewState) {
         this._view?.webview.postMessage({
             type: 'update',
-            data: state.localData,
-            selectedModels: state.selectedModels,
-            activeEmail: state.activeEmail,
+            accountCards: state.accountCards,
+            pinnedModels: state.pinnedModels,
             tokenBase: state.tokenBase,
             workspaceContext: state.workspaceContext,
-            pinnedModels: state.pinnedModels,
             usageStats: state.usageStats,
             contextWindow: null,
             pricing: getPricing(),
-            trackedAccounts: state.trackedQuotas.map(q => ({
-                id: q.account.id,
-                email: q.account.email,
-                name: q.account.name,
-                models: q.models,
-                tier: q.tier,
-                tierName: q.tierName,
-                isForbidden: q.isForbidden,
-                isError: q.isError,
-                errorMessage: q.errorMessage,
-                lastUpdated: q.lastUpdated,
-            })),
         });
     }
 

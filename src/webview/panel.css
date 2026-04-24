@@ -2585,6 +2585,9 @@ body {
     color: rgba(255,255,255,.85);
     font-family: var(--vscode-editor-font-family, monospace);
     letter-spacing: -.3px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 .ctx-token-sep {
     color: rgba(255,255,255,.2);
@@ -2691,4 +2694,24 @@ body {
     background: rgba(255,255,255,.04);
     color: rgba(255,255,255,.4);
     font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* ─── Context Detail — See All button ─── */
+.ctx-see-all-btn {
+    background: none;
+    border: 1px solid rgba(128,128,128,0.2);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 10px;
+    padding: 1px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color .12s, border-color .12s, background .12s;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.ctx-see-all-btn:hover {
+    color: var(--fg);
+    border-color: var(--muted);
+    background: var(--hover);
 }

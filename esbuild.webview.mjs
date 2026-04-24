@@ -21,7 +21,11 @@ copyFileSync(
     resolve(__dirname, 'src/webview/panel.css'),
     resolve(outDir, 'panel.css')
 );
-console.log('[webview] panel.css → out/webview/panel.css');
+copyFileSync(
+    resolve(__dirname, 'src/webview/context-detail.css'),
+    resolve(outDir, 'context-detail.css')
+);
+console.log('[webview] CSS → out/webview/ (panel.css, context-detail.css)');
 
 /** @type {import('esbuild').BuildOptions} */
 const buildOptions = {

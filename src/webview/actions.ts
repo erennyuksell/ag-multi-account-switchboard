@@ -59,7 +59,7 @@ export function pinModel(accountKey: string, rawModelId: string): void {
         pinnedModels[accountKey] = modelId;
         vscode.postMessage({ type: 'setPinnedModel', accountKey, modelId });
     }
-    renderAll(lastRenderArgs[0], lastRenderArgs[1], lastRenderArgs[2], lastRenderArgs[3] as string);
+    renderAll(lastRenderArgs[0] as any[], lastRenderArgs[1] as Record<string, string>);
 }
 
 export const doRefresh = () => spinAndCall('refreshBtn', refresh);

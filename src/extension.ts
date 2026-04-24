@@ -3,9 +3,11 @@ import { AccountManager } from './managers/accountManager';
 import { QuotaManager } from './managers/quotaManager';
 import { QuotaViewProvider } from './providers/quotaViewProvider';
 import { UsageStatsPanel } from './providers/usageStatsPanel';
+import { ContextDetailPanel } from './providers/contextDetailPanel';
 import { updatePricing, setExternalPricingResolver } from './shared/usage-components';
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
 import { initLogger, createLogger } from './utils/logger';
+import { extractField, extractStringField } from './utils/protobuf';
 
 const log = createLogger('Extension');
 
@@ -116,6 +118,19 @@ export async function activate(context: vscode.ExtensionContext) {
                     quotaManager.getFilteredUsageStats(range);
             }
         }),
+
+        vscode.commands.registerCommand('ag.openContextDetail', async () => {
+            const serverInfo = await quotaManager.getServerInfo();
+            // Show panel immediately with cached data (instant open)
+            const cachedCw = quotaManager.getLastContextWindow();
+            ContextDetailPanel.createOrShow(context.extensionUri, cachedCw, serverInfo);
+
+            // Then trigger a fresh fetch to get the latest context window
+            const cascadeId = quotaManager.getActiveConversationId();
+            if (cascadeId) {
+                quotaManager.fetchContextWindowOnce(cascadeId);
+            }
+        }),
     );
 
     // --- React to account changes ---
@@ -199,7 +214,10 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                 if (cascadeId && cascadeId !== lastActiveCascadeId) {
                     log.info(`USS activeCascade: switch → ${cascadeId.substring(0, 12)}`);
                     lastActiveCascadeId = cascadeId;
-                    quotaManager.fetchContextWindowIndependent(cascadeId);
+                    // Connect stream + initial fetch for immediate display.
+                    // Subsequent updates handled by STREAM→IDLE (no polling).
+                    quotaManager.connectStream(cascadeId);
+                    quotaManager.fetchContextWindowOnce(cascadeId);
                 }
             };
 
@@ -250,11 +268,11 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                 diag(`TRAJ onChange: ${totalKeys} keys, ${changedIds.length} changed, active=${lastActiveCascadeId?.substring(0,12)||'none'}`);
                 if (changedIds.length === 0) return;
 
-                // Case 1: Active conversation's data changed → refresh its context window
+                // Case 1: Active conversation's data changed → fetch fresh context
+                // Stream RUNNING event will follow shortly with correct metadata.
                 if (lastActiveCascadeId && changedIds.includes(lastActiveCascadeId)) {
-                    diag(`TRAJ UPDATE: active ${lastActiveCascadeId.substring(0,12)} changed`);
-                    log.info(`USS trajectories: active cascade updated → refreshing context`);
-                    quotaManager.fetchContextWindowIndependent(lastActiveCascadeId);
+                    diag(`TRAJ UPDATE: active ${lastActiveCascadeId.substring(0,12)} changed → fetching context`);
+                    quotaManager.fetchContextWindowOnce(lastActiveCascadeId);
                     return;
                 }
 
@@ -272,7 +290,8 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                     diag(`TRAJ FALLBACK: no active cascade, using ${target.substring(0,12)}`);
                     log.info(`USS trajectories (fallback): initial cascade → ${target.substring(0, 12)}`);
                     lastActiveCascadeId = target;
-                    quotaManager.fetchContextWindowIndependent(target);
+                    // Only connect stream — STREAM→IDLE will trigger context fetch
+                    quotaManager.connectStream(target);
                 } else {
                     diag(`TRAJ IGNORED: changed=[${changedIds.map(c=>c.substring(0,12)).join(',')}] none match active, no switch in fallback`);
                 }
@@ -294,50 +313,75 @@ function startConversationTracker(quotaManager: QuotaManager): void {
         }
     };
 
-    // ── uss-modelCredits listener ────────────────────────────
-    // Model credits update AFTER the AI response completes and tokens are consumed.
-    // This is a more reliable "response done" signal than trajectorySummaries.
-    const startModelCreditsListener = async () => {
+    // ── uss-userStatus listener ─────────────────────────────
+    // Fires when UserStatus changes (account switch, model updates, tier changes).
+    // Replaces fs.watch + polling as the event-driven account change trigger.
+    const startUserStatusListener = async () => {
         try {
             const topic: any = await Promise.race([
-                uss.subscribe('uss-modelCredits'),
+                uss.subscribe('uss-userStatus'),
                 timeout(5000),
             ]);
-            if (!topic) return;
+            if (!topic) {
+                log.info('USS userStatus: topic not available');
+                return;
+            }
 
-            // Track previous state to detect changes
-            let previousState: string | null = null;
-            const handleCreditsChange = () => {
+            let lastEmail = '';
+
+            const extractEmail = (state: any): string => {
+                if (!state || typeof state !== 'object') return '';
+                // State format: { sentinelKey: { value: base64_protobuf, eTag: bigint } }
+                for (const row of Object.values(state)) {
+                    if (!row || typeof row !== 'object') return '';
+                    const val = (row as any).value;
+                    if (typeof val !== 'string' || val.length < 10) continue;
+                    try {
+                        const bytes = Buffer.from(val, 'base64');
+                        // USS wraps UserStatus in a Row — field 1 = userStatus protobuf
+                        const userStatus = extractField(bytes, 1);
+                        if (userStatus) return extractStringField(userStatus, 7) || '';
+                        // Fallback: try direct extraction
+                        return extractStringField(bytes, 7) || '';
+                    } catch { /* ignore parse errors */ }
+                }
+                return '';
+            };
+
+            const handleChange = () => {
                 const state = topic.getState?.();
-                const stateStr = JSON.stringify(state);
-                if (previousState === stateStr) return; // No actual change
-                previousState = stateStr;
-
-                diag(`CREDITS onChange: active=${lastActiveCascadeId?.substring(0,12)||'none'}`);
-                if (lastActiveCascadeId) {
-                    log.info('USS modelCredits: credits changed → triggering context refresh');
-                    quotaManager.fetchContextWindowIndependent(lastActiveCascadeId);
+                const email = extractEmail(state);
+                log.info(`USS userStatus: onDidChange fired (email=${email || '?'}, prev=${lastEmail || '?'})`);
+                if (email && email !== lastEmail) {
+                    lastEmail = email;
+                    log.info(`USS userStatus: email changed → ${email}, triggering refresh`);
+                    quotaManager.refresh();
                 }
             };
 
-            previousState = JSON.stringify(topic.getState?.());
-            topic.onDidChange?.(() => handleCreditsChange());
-            log.info('USS uss-modelCredits: ✅ listening');
+            // Initial read
+            const initialState = topic.getState?.();
+            lastEmail = extractEmail(initialState);
+            log.info(`USS userStatus: ✅ listening (initial email=${lastEmail || '?'})`);
+
+            topic.onDidChange?.(() => handleChange());
         } catch (e: any) {
-            log.info(`USS uss-modelCredits: failed: ${e?.message}`);
+            log.info(`USS userStatus: failed: ${e?.message}`);
         }
     };
 
-    // Start ALL listeners:
-    // - activeCascade: real-time conversation switches
-    // - trajectorySummaries: real-time data updates (value changes on new messages)
-    // - modelCredits: response completion signal (credits consumed = response done)
+    // Start listeners:
+    // - activeCascade: real-time conversation switches + stream connect
+    // - trajectorySummaries: polling fallback for context updates
+    // - userStatus: account change detection (replaces fs.watch)
+    // Note: modelCredits listener REMOVED — streaming provides instant updates now
     startActiveCascadeTracking().then(ok => {
         if (!ok) {
             log.info('USS activeCascade: not available, trajectorySummaries will handle both switches and updates');
         }
-        // Always start — they handle in-conversation data updates
+        // Always start — handles in-conversation data updates as polling fallback
         startTrajectorySummariesListener();
-        startModelCreditsListener();
+        // Start userStatus listener for account change events
+        startUserStatusListener();
     });
 }

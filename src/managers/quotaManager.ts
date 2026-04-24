@@ -1,18 +1,18 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import { PollLock } from '../utils/pollLock';
-import { AccountQuota, LocalQuotaData, ServerInfo, ViewState } from '../types';
+import { AccountQuota, AccountCard, ModelCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
 import { AccountManager } from './accountManager';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
 import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { UsageStatsService } from '../services/usage';
 import { ContextWindowService, ContextWindowData } from '../services/contextWindow';
+import { AgentStateStreamService } from '../services/agentStateStream';
 import { StatusBarService } from '../services/statusBar';
+import { ContextDetailPanel } from '../providers/contextDetailPanel';
 import { EmailResolver } from '../services/emailResolver';
-import { DeepUsageStats } from '../types';
+import { shortModelName } from '../shared/helpers';
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
-import { STATE_DB_PATH } from '../constants';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('QuotaManager');
@@ -37,11 +37,14 @@ export class QuotaManager {
     private readonly tokenBaseService = new TokenBaseService();
     private readonly usageStatsService = new UsageStatsService();
     private readonly contextWindowService = new ContextWindowService();
+    private readonly agentStream = new AgentStateStreamService();
     private lastTokenBase: TokenBaseData | null = null;
     private lastWorkspaceContext: WorkspaceContextData | null = null;
     private lastUsageStats: DeepUsageStats | null = null;
     private lastContextWindow: ContextWindowData | null = null;
     private lastContextConversationId: string | null = null;
+    /** Last known active email — used by pushCachedData to maintain consistent UI */
+    private lastActiveEmail = '';
 
     private static readonly CTX_CACHE_KEY = 'ag.lastContextWindow';
     private currentUsageRange: string = '24h';
@@ -49,6 +52,10 @@ export class QuotaManager {
     // Server discovery cache — avoids redundant ps+lsof shell spawns
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
     private static readonly SERVER_CACHE_TTL = 60_000; // 60s
+
+    /** Suppress all refreshes during programmatic switch to prevent stale intermediate renders */
+    private _switchMuteUntil = 0;
+
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -58,25 +65,18 @@ export class QuotaManager {
         this.statusBar = new StatusBarService(context);
         // Ensure token renewal timer is cleaned up on extension deactivation
         context.subscriptions.push({ dispose: () => this.switchService.dispose() });
+        context.subscriptions.push({ dispose: () => this.agentStream.destroy() });
 
-        // Watch state.vscdb for external account switches (e.g. IDE profile menu)
-        let dbWatchDebounce: ReturnType<typeof setTimeout> | null = null;
-        try {
-            const watcher = fs.watch(STATE_DB_PATH, () => {
-                if (dbWatchDebounce) clearTimeout(dbWatchDebounce);
-                dbWatchDebounce = setTimeout(() => this.refresh(), 1000);
-            });
-            context.subscriptions.push({ dispose: () => watcher.close() });
-        } catch (e) {
-            log.warn('Could not watch state.vscdb for account changes:', e);
-        }
+        // Wire up stream → context window pipeline
+        this._initStreamListeners();
 
-        // Restore cached context window from globalState for instant first paint
-        this.lastContextWindow = this.context.globalState.get<ContextWindowData | null>(QuotaManager.CTX_CACHE_KEY, null);
-        if (this.lastContextWindow) {
-            this.lastContextConversationId = this.lastContextWindow.conversationId;
-            log.info(`Restored cached context window: ${this.lastContextConversationId?.substring(0, 12)}`);
-        }
+        // External account switch detection handled by USS userStatus topic listener
+        // in extension.ts (startUserStatusListener). No fs.watch needed.
+
+        // Context window: start fresh — USS determines when to fetch.
+        this.lastContextWindow = null;
+        this.lastContextConversationId = null;
+        this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
 
         // Initial fetch; subsequent refreshes driven by webview interval picker
         this.refresh();
@@ -90,23 +90,120 @@ export class QuotaManager {
     setViewProvider(provider: QuotaViewProvider) {
         this.viewProvider = provider;
         if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-            this.viewProvider.updateData(this.buildViewState(''));
+            this.viewProvider.updateData(this.buildViewState());
         }
     }
 
     // ── ViewState builder (DRY: used by all updateData calls) ──
 
-    private buildViewState(activeEmail: string): ViewState {
+    private buildViewState(): ViewState {
         return {
-            localData: this.lastLocalData,
-            selectedModels: this.getSelectedModels(),
-            trackedQuotas: this.lastTrackedQuotas,
-            activeEmail,
+            accountCards: this.buildAccountCards(),
+            pinnedModels: this.getPinnedModels(),
             tokenBase: this.lastTokenBase,
             workspaceContext: this.lastWorkspaceContext,
-            pinnedModels: this.getPinnedModels(),
             usageStats: this.getRangeFilteredStats(),
         };
+    }
+
+    /**
+     * SSOT: Build pre-processed, sorted, deduped account cards.
+     * All data logic lives HERE — renderer does zero processing.
+     */
+    private buildAccountCards(): AccountCard[] {
+        const ae = (this.lastActiveEmail || '').toLowerCase();
+        const cards: AccountCard[] = [];
+        const selectedModels = this.getSelectedModels();
+
+        // 1. Local LS card
+        const status = this.lastLocalData?.userStatus;
+        const localEmail = (status?.email || '').toLowerCase();
+
+        if (status) {
+            const rawModels = (status.cascadeModelConfigData?.clientModelConfigs || [])
+                .filter((m: any) => m.quotaInfo)
+                .sort((a: any, b: any) => (a.label || '').localeCompare(b.label || ''));
+
+            const models: ModelCard[] = rawModels.map((m: any) => ({
+                id: m.modelOrAlias?.model || m.label,
+                label: m.label || shortModelName(m.modelOrAlias?.model),
+                pct: m.quotaInfo.remainingFraction !== undefined
+                    ? Math.max(0, Math.min(100, Math.round(m.quotaInfo.remainingFraction * 100)))
+                    : 0,
+                resetTime: m.quotaInfo.resetTime || '',
+                isLocal: true,
+            }));
+
+            const bn = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
+            const ut = status.userTier || {} as any;
+            const ps = status.planStatus || {} as any;
+            const pi = ps.planInfo || {} as any;
+            const aiCreds = (ut.availableCredits || []).find((c: any) => c.creditType === 'GOOGLE_ONE_AI');
+
+            cards.push({
+                email: status.email || 'active-local',
+                isActive: !ae || ae === localEmail,
+                models,
+                bottleneck: bn,
+                tierName: ut.name || null,
+                tierId: ut.id || null,
+                aiCredits: aiCreds ? parseInt(aiCreds.creditAmount, 10) : null,
+                promptCredits: ps.availablePromptCredits ?? null,
+                promptCreditsMax: pi.monthlyPromptCredits || null,
+                flowCredits: ps.availableFlowCredits ?? null,
+                flowCreditsMax: pi.monthlyFlowCredits || null,
+                resetTime: bn?.resetTime || models[0]?.resetTime || '',
+                isError: false,
+                selectedModels,
+                isLocal: true,
+            });
+        }
+
+        // 2. Tracked accounts
+        // Dedup: ALWAYS skip tracked if its email matches the local card.
+        // Local card has richer data (labels, credits, checkboxes) regardless of active state.
+        // During switch A→B: local=A(stale), tracked A must still be deduped to avoid duplicate.
+        const dedupEmail = localEmail || '';
+
+        for (const tq of this.lastTrackedQuotas) {
+            const taEmail = (tq.account.email || '').toLowerCase();
+            if (dedupEmail && taEmail === dedupEmail) continue;
+
+            const models: ModelCard[] = (tq.models || []).map(m => ({
+                id: m.name,
+                label: shortModelName(m.name),
+                pct: m.percentage || 0,
+                resetTime: m.resetTimeRaw || m.resetTime || '',
+                isLocal: false,
+            }));
+
+            const bn = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
+
+            cards.push({
+                email: tq.account.email || 'Unknown',
+                name: tq.account.name,
+                isActive: !!(ae && ae === taEmail),
+                trackingId: tq.account.id,
+                models,
+                bottleneck: bn,
+                tierName: tq.tierName || tq.tier || null,
+                resetTime: bn?.resetTime || '',
+                isError: tq.isError || tq.isForbidden,
+                errorMessage: tq.isForbidden ? 'Access forbidden' : (tq.errorMessage || ''),
+                selectedModels: [],
+                isLocal: false,
+                aiCredits: null,
+                promptCredits: null,
+                promptCreditsMax: null,
+                flowCredits: null,
+                flowCreditsMax: null,
+            });
+        }
+
+        // 3. Sort: active first (stable)
+        cards.sort((a, b) => (a.isActive ? 0 : 1) - (b.isActive ? 0 : 1));
+
+        return cards;
     }
 
     getSelectedModels(): string[] {
@@ -119,6 +216,18 @@ export class QuotaManager {
 
     getFilteredUsageStats(range: string): DeepUsageStats | null {
         return this.usageStatsService.getFilteredStats(range);
+    }
+
+    getLastContextWindow(): ContextWindowData | null {
+        return this.lastContextWindow;
+    }
+
+    getActiveConversationId(): string | null {
+        return this.lastContextConversationId;
+    }
+
+    async getServerInfo(): Promise<ServerInfo | null> {
+        return this.resolveServer();
     }
 
     setUsageRange(range: string) {
@@ -151,7 +260,7 @@ export class QuotaManager {
         if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
     }
 
-     /** Push whatever is already in memory to the webview — zero network, instant render */
+    /** Push whatever is already in memory to the webview — zero network, instant render */
     pushCachedData() {
         if (!this.viewProvider) { log.info('pushCachedData: no viewProvider'); return; }
         const hasLocal = !!this.lastLocalData;
@@ -159,12 +268,13 @@ export class QuotaManager {
         log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}, hasCtx=${!!this.lastContextWindow}`);
 
         if (hasLocal || hasTracked) {
-            this.viewProvider.updateData(this.buildViewState(''));
+            this.viewProvider.updateData(this.buildViewState());
             // Push cached context window if available — NO re-fetch here
-            // Context window is fetched ONLY in refreshContextWindow() during the main refresh cycle.
             if (this.lastContextWindow) {
                 this.viewProvider.postContextWindow(this.lastContextWindow);
             }
+            // Also update status bar from cached local data to prevent stale "Server Not Found"
+            if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
         }
     }
 
@@ -179,78 +289,154 @@ export class QuotaManager {
         return info;
     }
 
-    /**
-     * Fetch context window data independently of the main refresh cycle.
-     * Called by USS tracker on conversation switch or data update.
-     *
-     * Strategy: check if LS has written new generator metadata entries
-     * (numTotalGeneratorMetadata increased). If not yet, retry with backoff.
-     * This is a definitive "new data exists" check — no token-count heuristics.
-     */
-    private _cwDebounce: ReturnType<typeof setTimeout> | null = null;
-    private _cwRetryTimer: ReturnType<typeof setTimeout> | null = null;
-    /** Last known generator metadata entry count per cascade — definitive change detector */
-    private _lastKnownMetaCount = new Map<string, number>();
+    // ── Stream Listener Setup ──
 
-    async fetchContextWindowIndependent(cascadeId: string) {
-        this.lastContextConversationId = cascadeId;
-        this.contextWindowService.invalidateCache(cascadeId);
+    private _initStreamListeners(): void {
+        // Live fetch on every stream delta → real-time sidebar updates during model execution.
+        // Race condition guard: skip if a newer delta arrived before our fetch completed.
+        let lastLiveTotalLength = 0;
 
-        // Debounce: collapse rapid USS events into a single fetch
-        if (this._cwDebounce) clearTimeout(this._cwDebounce);
-        if (this._cwRetryTimer) clearTimeout(this._cwRetryTimer);
-        this._cwDebounce = setTimeout(() => this._executeFetch(cascadeId, 0), 500);
+        this.agentStream.on('metaCount', async (event: { totalLength: number; conversationId: string }) => {
+            // Live fetch: grab the last entry and push to sidebar immediately
+            const server = this.cachedServer?.info;
+            if (!server || !event.conversationId || event.totalLength <= 0) {
+                diag(`LIVE-SKIP: no server or empty (server=${!!server} conv=${!!event.conversationId} len=${event.totalLength})`);
+                return;
+            }
+            // Only fetch for the active conversation
+            if (event.conversationId !== this.lastContextConversationId && this.lastContextConversationId) {
+                diag(`LIVE-SKIP: wrong conv (event=${event.conversationId.substring(0, 12)} active=${this.lastContextConversationId?.substring(0, 12)})`);
+                return;
+            }
+            // Race guard: skip if a newer delta already triggered a fetch
+            if (event.totalLength <= lastLiveTotalLength) return;
+            lastLiveTotalLength = event.totalLength;
+
+            try {
+                const data = await this.contextWindowService.fetchLastEntry(
+                    server,
+                    event.conversationId,
+                    event.totalLength,
+                    this.lastContextWindow?.title || 'Conversation',
+                );
+                // Stale check: if a newer delta arrived while we were fetching, discard
+                if (event.totalLength < lastLiveTotalLength) return;
+
+                if (data) {
+                    this._pushContextUpdate(data, event.conversationId, server);
+                } else {
+                    diag(`LIVE-SKIP: fetchLastEntry returned null for totalLen=${event.totalLength}`);
+                }
+            } catch (err) {
+                diag(`LIVE-ERR: ${(err as Error)?.message}`);
+            }
+        });
+
+        // RUNNING→IDLE = AI response completed → fetch context window IMMEDIATELY.
+        this.agentStream.on('statusChange', (event: { status: string; conversationId: string }) => {
+            if (!event.conversationId) return;
+            if (event.status === 'CASCADE_RUN_STATUS_IDLE' || event.status === 'CASCADE_RUN_STATUS_RUNNING') {
+                diag(`STREAM→${event.status.replace('CASCADE_RUN_STATUS_', '')}: fetching context for ${event.conversationId.substring(0, 12)}`);
+                this.contextWindowService.invalidateCache(event.conversationId);
+                this._executeFetch(event.conversationId);
+            }
+        });
+
+        // Stream can't reconnect (LS restarted with new port) → re-discover and reconnect
+        this.agentStream.on('serverStale', async (event: { cascadeId: string }) => {
+            diag(`STREAM→STALE: LS port changed, re-discovering for ${event.cascadeId?.substring(0, 12)}`);
+            try {
+                const fresh = await this.serverDiscovery.discover(this.getWorkspaceId()).catch(() => null);
+                if (fresh && event.cascadeId) {
+                    this.cachedServer = { info: fresh, ts: Date.now() };
+                    diag(`STREAM→STALE: re-discovered port=${fresh.port}, reconnecting stream`);
+                    this.agentStream.connect(fresh, event.cascadeId);
+                }
+            } catch (err) {
+                diag(`STREAM→STALE: re-discovery failed: ${(err as Error)?.message}`);
+            }
+        });
+
+        // Register manual refresh callback for the detail panel's Refresh button
+        ContextDetailPanel.setRefreshCallback(async () => {
+            if (this.lastContextConversationId) {
+                this.contextWindowService.invalidateCache(this.lastContextConversationId);
+                await this._executeFetch(this.lastContextConversationId);
+            }
+        });
     }
 
     /**
-     * Internal: execute fetch with retry logic.
-     *
-     * Why always-fetch instead of count-gating:
-     * LS only writes NEW generator metadata entries on planner responses, not every step.
-     * numTotalGeneratorMetadata can stay the same across multiple turns (e.g. short responses).
-     * But the LAST entry's estimatedTokensUsed may still update. So we always fetch and
-     * compare the resulting token count to decide if a retry is needed.
+     * Start or switch the agent state stream for a conversation.
+     * Called on conversation switch (USS activeCascade) and on initial load.
+     * Also does an initial polling fetch since stream snapshot has empty metadata.
      */
-    private async _executeFetch(cascadeId: string, attempt: number) {
-        const RETRY_DELAYS = [3000, 7000]; // retry at 3s, then 7s
-        const maxAttempts = 1 + RETRY_DELAYS.length; // initial + 2 retries = 3 total
-        const shortId = cascadeId.substring(0, 12);
-
-        diag(`fetchCWI attempt ${attempt}/${maxAttempts - 1}: ${shortId}`);
-        try {
-            this.contextWindowService.invalidateCache(cascadeId);
-            const serverInfo = await this.resolveServer();
-            if (!serverInfo) { diag('fetchCWI: no server'); return; }
-            diag(`fetchCWI: port=${serverInfo.port}`);
-
-            const prevTokens = this.lastContextWindow?.usedTokens ?? 0;
-            await this.refreshContextWindow(serverInfo, cascadeId);
-            const newTokens = this.lastContextWindow?.usedTokens ?? 0;
-
-            diag(`fetchCWI: tokens prev=${prevTokens} new=${newTokens}`);
-
-            if (newTokens !== prevTokens || prevTokens === 0) {
-                // Data changed or first fetch — done!
-                diag(`fetchCWI: SUCCESS — tokens updated ${prevTokens}→${newTokens}`);
-            } else if (attempt < maxAttempts - 1) {
-                // Tokens unchanged — LS may not have written yet. Retry.
-                const delay = RETRY_DELAYS[attempt];
-                diag(`fetchCWI: tokens unchanged, retry in ${delay}ms (attempt ${attempt + 1})`);
-                this._cwRetryTimer = setTimeout(() => this._executeFetch(cascadeId, attempt + 1), delay);
-            } else {
-                diag(`fetchCWI: retries exhausted, tokens=${newTokens}`);
-            }
-        } catch (err) {
-            diag(`fetchCWI FAILED: ${(err as Error)?.message}`);
-            log.info(`fetchCtxIndependent: FAILED ${(err as Error)?.message}`);
+    async connectStream(cascadeId: string): Promise<void> {
+        this.lastContextConversationId = cascadeId;
+        const serverInfo = await this.resolveServer();
+        if (serverInfo) {
+            this.agentStream.connect(serverInfo, cascadeId);
+            diag(`connectStream: started for ${cascadeId.substring(0, 12)} port=${serverInfo.port}`);
+        } else {
+            diag('connectStream: no server available');
         }
     }
 
+    /**
+     * One-shot context window fetch — used on conversation switch and stream triggers.
+     * No debounce, no retry, no polling. STREAM→IDLE handles subsequent updates.
+     */
+    async fetchContextWindowOnce(cascadeId: string) {
+        return this._executeFetch(cascadeId, true);
+    }
 
+    /**
+     * Internal: single fetch path for all context window requests (DRY).
+     * @param setActive - if true, sets this cascade as the active conversation
+     */
+    private async _executeFetch(cascadeId: string, setActive = false) {
+        if (setActive) {
+            this.lastContextConversationId = cascadeId;
+        }
+        const shortId = cascadeId.substring(0, 12);
+        diag(`fetchCW: ${shortId}`);
+        try {
+            this.contextWindowService.invalidateCache(cascadeId);
+            const serverInfo = await this.resolveServer();
+            if (!serverInfo) { diag('fetchCW: no server'); return; }
 
+            await this.refreshContextWindow(serverInfo, cascadeId);
+            diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0}`);
+        } catch (err) {
+            diag(`fetchCW FAILED: ${(err as Error)?.message}`);
+            log.info(`fetchCW: FAILED ${(err as Error)?.message}`);
+        }
+    }
 
+    /** DRY: push context window data to sidebar + detail panel + globalState */
+    private _pushContextUpdate(data: ContextWindowData, cascadeId: string, server: ServerInfo | null): void {
+        if (cascadeId !== this.lastContextConversationId) {
+            log.info(`Context window: conversation → ${cascadeId.substring(0, 12)}`);
+            this.lastContextConversationId = cascadeId;
+        }
+        this.lastContextWindow = data;
+        this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, data);
+        if (this.viewProvider) {
+            this.viewProvider.postContextWindow(data);
+        }
+        ContextDetailPanel.pushUpdate(data, server);
+        diag(`pushCW: tokens=${data.usedTokens} (${data.model})`);
+    }
 
     async refresh(activeEmailHint?: string) {
+        // During programmatic switch, suppress ALL refresh triggers (timer, DB watcher)
+        // to prevent premature renders from USS early-push. The definitive render
+        // comes from the explicit pushCachedData() after switchAccount confirms.
+        if (Date.now() < this._switchMuteUntil) {
+            log.info('refresh: SUPPRESSED (switch in progress)');
+            return;
+        }
+
         if (this._refreshInFlight) {
             if (activeEmailHint) {
                 this._pendingHint = activeEmailHint;
@@ -279,17 +465,21 @@ export class QuotaManager {
             if (this.viewProvider && !hasData) this.viewProvider.setLoading();
 
             // Discover workspace LS once — share with both quota fetch and token budget
+            const t0 = Date.now();
             const serverInfo = await this.resolveServer();
+            const tDiscover = Date.now() - t0;
 
             // Parallel: local server + all tracked accounts + active email + workspace context
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
             const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            const t1 = Date.now();
             const [localResult, trackedResult, tokenBase, workspaceContext] = await Promise.all([
                 serverInfo ? this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null) : Promise.resolve(null),
                 this.accountManager.refreshAllQuotas().catch(() => []),
                 this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
                 serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
+            const tFetch = Date.now() - t1;
 
             // Deep usage stats — pre-load from disk cache SYNCHRONOUSLY (~20ms for 4MB)
             // so it's included in the very first webview render. No shimmer needed.
@@ -302,7 +492,12 @@ export class QuotaManager {
                 log.info(`refresh: lastUsageStats already present (totalCalls=${this.lastUsageStats.totalCalls})`);
             }
 
+            const t2 = Date.now();
             const activeEmail = activeEmailHint ?? await this.getActiveEmail();
+            this.lastActiveEmail = activeEmail;
+            const tEmail = Date.now() - t2;
+
+            log.info(`refresh: TIMING discover=${tDiscover}ms fetch=${tFetch}ms email=${tEmail}ms total=${Date.now() - t0}ms`);
 
             // Local (active IDE account)
             if (localResult) {
@@ -323,7 +518,7 @@ export class QuotaManager {
             log.info(`refresh: localResult=${!!localResult}, trackedCount=${trackedResult.length}, hasProvider=${!!this.viewProvider}`);
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
-                    this.viewProvider.updateData(this.buildViewState(activeEmail));
+                    this.viewProvider.updateData(this.buildViewState());
                     log.info('refresh: updateData sent');
 
                     // Context window is USS-only — no polling fallback needed
@@ -392,18 +587,7 @@ export class QuotaManager {
 
             diag(`refreshCW: got data — title="${ctx.title?.substring(0,30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0,12)}`);
 
-            if (ctx.conversationId !== this.lastContextConversationId) {
-                log.info(`Context window: conversation → ${ctx.conversationId?.substring(0, 12)}`);
-                this.lastContextConversationId = ctx.conversationId;
-            }
-            this.lastContextWindow = ctx;
-            this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, ctx);
-            if (this.viewProvider) {
-                this.viewProvider.postContextWindow(ctx);
-                diag(`refreshCW: pushed to webview — tokens=${ctx.usedTokens}`);
-            } else {
-                diag('refreshCW: NO viewProvider — data not pushed');
-            }
+            this._pushContextUpdate(ctx, ctx.conversationId, serverInfo);
         } catch (err) {
             diag(`refreshCW FAILED: ${(err as Error)?.message}`);
             log.info(`refreshContextWindow FAILED: ${(err as Error)?.message}`);
@@ -431,7 +615,8 @@ export class QuotaManager {
 
             if (this.viewProvider) {
                 const activeEmail = await this.getActiveEmail();
-                this.viewProvider.updateData(this.buildViewState(activeEmail));
+                this.lastActiveEmail = activeEmail;
+                this.viewProvider.updateData(this.buildViewState());
             }
         } catch (error: any) {
             if (this.viewProvider) this.viewProvider.setError(error.message || 'Token refresh failed');
@@ -463,16 +648,39 @@ export class QuotaManager {
         );
         if (confirm !== 'Switch') return;
 
-        const success = await this.switchService.switchAccount({
+        // Mute DB watcher during switch — prevents stale renders from writeAuthStatusToDb.
+        // Definitive refresh comes from this.refresh() after switchAccount returns.
+        this._switchMuteUntil = Date.now() + 5000;
+
+        const result = await this.switchService.switchAccount({
             email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
         });
-        if (success) {
-            // Delay first refresh — LS needs ~1-2s to process registerGdmUser
-            // and fetch new models from backend. Immediate refresh sees stale data.
-            setTimeout(() => this.refresh(account.email), 1500);
+        if (result.confirmed) {
+            // LS confirmed new email. Fetch local data via CACHED server (0ms discovery + ~200ms HTTP).
+            this.lastActiveEmail = account.email;
+            log.info(`switchAccount: confirmed ${account.email}, fetching local data`);
 
-            // Second refresh (5s): USS fully propagated, re-read without hint.
-            setTimeout(() => this.refresh(), 5000);
+            try {
+                // Invalidate server cache — LS may have changed ports after switch,
+                // and cached server might point to an LS instance still serving old data.
+                this.cachedServer = null;
+                const serverInfo = await this.resolveServer();
+                if (serverInfo) {
+                    const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
+                    if (localData) {
+                        this.lastLocalData = localData;
+                        this.updateStatusBar(localData);
+                    }
+                }
+            } catch (e: any) {
+                log.warn('Post-switch local fetch failed:', e?.message);
+            }
+
+            // Instant render — local card with correct active email + tracked cards from cache
+            this.pushCachedData();
+
+            // Background full refresh for tracked quotas, token base, workspace context
+            setTimeout(() => this.refresh(), 2000);
         }
     }
 

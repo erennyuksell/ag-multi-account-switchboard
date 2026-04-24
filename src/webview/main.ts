@@ -82,6 +82,7 @@ const ACTIONS: Record<string, (t: HTMLElement) => void> = {
         vscode.postMessage({ type: 'setUsageRange', range });
     },
     'open-usage-panel':     () => vscode.postMessage({ type: 'openUsagePanel' }),
+    'open-context-detail':  () => vscode.postMessage({ type: 'openContextDetail' }),
 };
 
 document.addEventListener('click', (e: MouseEvent) => {

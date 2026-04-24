@@ -7,8 +7,13 @@
 import { ServerInfo } from '../types';
 import { callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
+import * as fs from 'fs';
 
 const log = createLogger('ContextWindow');
+const diagPath = '/tmp/ag-ctx-diag.log';
+function cwDiag(msg: string) {
+    try { fs.appendFileSync(diagPath, `[${new Date().toISOString()}] CW: ${msg}\n`); } catch {}
+}
 
 /** Known model context limits (tokens) */
 const MODEL_CONTEXT_LIMITS: Record<string, number> = {
@@ -69,6 +74,18 @@ export interface ContextWindowCategory {
     count: number;
 }
 
+export interface ContextBreakdownChild {
+    name: string;
+    numTokens: number;
+    children?: { name: string; numTokens: number }[];
+}
+
+export interface ContextBreakdownGroup {
+    name: string;
+    numTokens: number;
+    children?: ContextBreakdownChild[];
+}
+
 export interface ContextWindowData {
     conversationId: string;
     title: string;
@@ -78,6 +95,8 @@ export interface ContextWindowData {
     maxTokens: number;
     percentage: number;
     categories: ContextWindowCategory[];
+    /** Raw tokenBreakdown groups for the detail dashboard */
+    rawBreakdown?: ContextBreakdownGroup[];
     completionConfig: {
         maxOutputTokens: number;
         temperature: number;
@@ -98,11 +117,8 @@ export class ContextWindowService {
      */
     private resultCache = new Map<string, { data: ContextWindowData; ts: number }>();
     private static readonly CACHE_TTL = 8_000;          // 8s — fast refresh during active coding
-    private static readonly META_PAGE_SIZE = 644;        // max entries per API response (empirically verified)
+    private static readonly META_PAGE_SIZE = 150;         // small page → avoids API response truncation
     private static readonly MAX_CACHE_ENTRIES = 5;       // LRU eviction threshold
-
-    // getActiveContext removed — USS determines active conversation directly.
-    // No heuristic "sort by lastUserInputTime" needed.
 
     /**
      * Fetch context window for a SPECIFIC cascade ID (no heuristic selection).
@@ -157,44 +173,75 @@ export class ContextWindowService {
         cascadeId: string,
         title: string,
     ): Promise<ContextWindowData | null> {
-        // 1) GetCascadeTrajectory — gives numTotalGeneratorMetadata
-        //    Note: this endpoint does NOT include summary/title — that comes from the caller.
+        // PATH 1 (fast): GetCascadeTrajectory tells us the total → seek directly to last page.
+        // PATH 2 (checkpoint-safe): numTotalGeneratorMetadata missing → forward-paginate from 0.
+        //   Each batch replaces the previous; the LAST non-empty batch IS the tail.
         const trajResp = await this.callLs(serverInfo, 'GetCascadeTrajectory', { cascade_id: cascadeId });
-        if (!trajResp) {
-            log.info(`fetchAndCache: GetCascadeTrajectory returned null for ${cascadeId.substring(0, 12)}`);
-            return null;
+        const apiTotal = parseInt(trajResp?.numTotalGeneratorMetadata || '0', 10);
+
+        let metas: any[] = [];
+
+        if (apiTotal > 0) {
+            // Fast path — direct seek (1 extra call)
+            const offset = Math.max(0, apiTotal - ContextWindowService.META_PAGE_SIZE);
+            const resp = await this.callLs(serverInfo,
+                'GetCascadeTrajectoryGeneratorMetadata',
+                { cascade_id: cascadeId, generator_metadata_offset: offset });
+            metas = resp?.generatorMetadata || [];
+            cwDiag(`FETCH: fast path apiTotal=${apiTotal} offset=${offset} got=${metas.length} cascade=${cascadeId.substring(0, 12)}`);
+        } else {
+            // Checkpoint path — forward-paginate to find the true end
+            let offset = 0;
+            let calls = 0;
+            while (calls < 50) {  // safety cap
+                const resp = await this.callLs(serverInfo,
+                    'GetCascadeTrajectoryGeneratorMetadata',
+                    { cascade_id: cascadeId, generator_metadata_offset: offset });
+                const batch = resp?.generatorMetadata || [];
+                if (batch.length === 0) break;
+                metas = batch;  // only keep the LAST batch (= most recent entries)
+                offset += batch.length;
+                calls++;
+                if (batch.length < 100) break;  // partial batch = reached the end
+            }
+            cwDiag(`FETCH: paginated ${calls} calls, trueTotal=${offset} using last ${metas.length} cascade=${cascadeId.substring(0, 12)}`);
         }
 
-        const totalMeta = parseInt(trajResp.numTotalGeneratorMetadata || '0', 10);
-        if (totalMeta === 0) {
-            log.info('fetchAndCache: numTotalGeneratorMetadata=0');
-            return null;
-        }
-
-        // 2) Direct seek to last page
-        const offset = Math.max(0, totalMeta - ContextWindowService.META_PAGE_SIZE);
-        const resp = await this.callLs(serverInfo,
-            'GetCascadeTrajectoryGeneratorMetadata',
-            { cascade_id: cascadeId, generator_metadata_offset: offset });
-        const metas = resp?.generatorMetadata || [];
         if (metas.length === 0) {
-            log.info(`fetchAndCache: empty response at offset=${offset} (total=${totalMeta})`);
+            log.info(`fetchAndCache: no usable entries for ${cascadeId.substring(0, 12)}`);
             return null;
         }
 
-        // 3) Scan backwards for latest entry with real token data
+        // 3) Find latest entry with real token data (most recent = most accurate context)
         const lastMeta = this.scanForTokenData(metas);
         if (!lastMeta) {
             log.info(`fetchAndCache: no entry with token data in ${metas.length} entries`);
             return null;
         }
 
+        // If the freshest entry lacks model info (in-progress turn),
+        // inherit model/usage from the nearest previous entry that has it.
+        const chatModel = lastMeta.chatModel || {};
+        const responseModel = chatModel.responseModel || chatModel.usage?.model;
+        if (!responseModel || responseModel === 'unknown') {
+            for (let i = metas.length - 2; i >= Math.max(0, metas.length - 10); i--) {
+                const prev = metas[i]?.chatModel;
+                const prevModel = prev?.responseModel || prev?.usage?.model;
+                if (prevModel && prevModel !== 'unknown') {
+                    // Merge model info into the matched entry
+                    if (!chatModel.responseModel) chatModel.responseModel = prevModel;
+                    if (!chatModel.usage && prev?.usage) chatModel.usage = prev.usage;
+                    if (!chatModel.completionConfig && prev?.completionConfig) chatModel.completionConfig = prev.completionConfig;
+                    break;
+                }
+            }
+        }
+
         // 4) Build ContextWindowData
         const result = this.buildContextWindowData(cascadeId, title, lastMeta);
         if (result) {
             this.setCacheEntry(cascadeId, result);
-            const tokens = result.usedTokens;
-            log.info(`fetchAndCache: offset=${offset}, total=${totalMeta}, entries=${metas.length}, tokens=${tokens}`);
+            log.info(`fetchAndCache: entries=${metas.length}, tokens=${result.usedTokens}`);
         }
         return result;
     }
@@ -218,6 +265,7 @@ export class ContextWindowService {
 
         const maxTokens = this.getMaxContext(responseModel);
         const categories = this.parseCategories(cwm);
+        const rawBreakdown = this.extractRawBreakdown(cwm);
 
         return {
             conversationId: cascadeId,
@@ -228,6 +276,7 @@ export class ContextWindowService {
             maxTokens,
             percentage: Math.min(100, Math.round(totalTokens / maxTokens * 100)),
             categories,
+            rawBreakdown,
             completionConfig: {
                 maxOutputTokens: parseInt(config.maxTokens || '0', 10),
                 temperature: config.temperature || 0,
@@ -286,6 +335,24 @@ export class ContextWindowService {
             }));
     }
 
+    private extractRawBreakdown(cwm: any): ContextBreakdownGroup[] {
+        const groups = cwm?.tokenBreakdown?.groups;
+        if (!groups || groups.length === 0) return [];
+
+        return groups.map((g: any) => ({
+            name: g.name || 'Unknown',
+            numTokens: g.numTokens || 0,
+            children: (g.children || []).map((c: any) => ({
+                name: c.name || '',
+                numTokens: c.numTokens || 0,
+                children: (c.children || []).map((s: any) => ({
+                    name: s.name || '',
+                    numTokens: s.numTokens || 0,
+                })),
+            })),
+        }));
+    }
+
     private getMaxContext(model: string): number {
         // Try exact match first
         if (MODEL_CONTEXT_LIMITS[model]) return MODEL_CONTEXT_LIMITS[model];
@@ -317,36 +384,25 @@ export class ContextWindowService {
         return map[raw] || raw.replace('API_PROVIDER_', '');
     }
 
-    /** Scan metadata array backwards for the latest entry with real token data */
+    /**
+     * Find the most recent metadata entry with real token data (estimatedTokensUsed > 0).
+     * This is always the most accurate context window snapshot.
+     */
     private scanForTokenData(metas: any[]): any | null {
-        // Diagnostic: dump last 5 entries to understand what's available
-        const diagPath = '/tmp/ag-ctx-diag.log';
-        const diag = (msg: string) => { try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] SCAN: ${msg}\n`); } catch {} };
-
-        const last5 = metas.slice(-5);
-        for (let j = last5.length - 1; j >= 0; j--) {
-            const m = last5[j];
-            const usage = m?.chatModel?.usage;
-            const cwm = m?.chatModel?.chatStartMetadata?.contextWindowMetadata;
-            const inputTokens = parseInt(usage?.inputTokens || '0', 10);
-            const estimatedUsed = cwm?.estimatedTokensUsed || 0;
-            const hasUsage = !!usage;
-            const model = m?.chatModel?.responseModel || m?.chatModel?.usage?.model || '?';
-            diag(`entry[${metas.length - last5.length + j}]: model=${model} inputTokens=${inputTokens} estimatedUsed=${estimatedUsed} hasUsage=${hasUsage}`);
-        }
-
-        for (let i = metas.length - 1; i >= 0; i--) {
+        for (let i = metas.length - 1; i >= Math.max(0, metas.length - 100); i--) {
             const m = metas[i];
-            const usage = m?.chatModel?.usage;
             const cwm = m?.chatModel?.chatStartMetadata?.contextWindowMetadata;
-            if (usage
-                && parseInt(usage.inputTokens || '0', 10) > 0
-                && cwm?.estimatedTokensUsed > 0) {
-                diag(`MATCHED at index ${i}: tokens=${cwm.estimatedTokensUsed}`);
-                return m;
-            }
+            if (!cwm?.estimatedTokensUsed || cwm.estimatedTokensUsed <= 0) continue;
+
+            const groups = cwm?.tokenBreakdown?.groups;
+            const chatGroup = groups?.find((g: any) => g.name === 'Chat Messages');
+            const lastChild = chatGroup?.children?.[chatGroup.children.length - 1];
+            const childCount = chatGroup?.children?.length ?? 0;
+            cwDiag(`SCAN HIT: idx=${i}/${metas.length} tokens=${cwm.estimatedTokensUsed} chatChildren=${childCount} lastChild="${lastChild?.name || 'none'}" (scanned ${metas.length - i}, skipped ${metas.length - 1 - i})`);
+            return m;
         }
-        diag(`NO MATCH in ${metas.length} entries`);
+
+        cwDiag(`SCAN TOTAL MISS: no entry with token data in ${metas.length} entries`);
         return null;
     }
 
@@ -373,17 +429,51 @@ export class ContextWindowService {
     }
 
     /**
-     * Lightweight check: how many generator metadata entries exist for this cascade?
-     * Only calls GetCascadeTrajectory (1 API call, fast) — no metadata fetch.
-     * Used by quotaManager to detect when new entries appear (definitive "new data" signal).
+     * Lightweight live-fetch: get ONLY the last metadata entry for real-time context window
+     * updates during model execution. Called on every stream delta.
+     *
+     * NOTE: `streamTotalLength` is used ONLY as a signal that new data exists.
+     * The actual offset is derived from the API's own `numTotalGeneratorMetadata`
+     * because the stream counts ALL entry types (chat, system, metadata) while
+     * the API only counts generator metadata entries.
      */
-    async getMetaEntryCount(serverInfo: ServerInfo, cascadeId: string): Promise<number> {
-        try {
-            const resp = await this.callLs(serverInfo, 'GetCascadeTrajectory', { cascade_id: cascadeId });
-            return parseInt(resp?.numTotalGeneratorMetadata || '0', 10);
-        } catch {
-            return 0;
+    async fetchLastEntry(
+        serverInfo: ServerInfo,
+        cascadeId: string,
+        _streamTotalLength: number,
+        title: string,
+    ): Promise<ContextWindowData | null> {
+        // Get the API's own total — this is the authoritative count
+        const trajResp = await this.callLs(serverInfo, 'GetCascadeTrajectory', { cascade_id: cascadeId });
+        const apiTotal = parseInt(trajResp?.numTotalGeneratorMetadata || '0', 10);
+        if (apiTotal <= 0) return null;
+
+        const offset = Math.max(0, apiTotal - 1);
+        const resp = await this.callLs(serverInfo,
+            'GetCascadeTrajectoryGeneratorMetadata',
+            { cascade_id: cascadeId, generator_metadata_offset: offset });
+        const metas = resp?.generatorMetadata || [];
+        if (metas.length === 0) return null;
+
+        const lastMeta = this.scanForTokenData(metas);
+        if (!lastMeta) return null;
+
+        // Inherit model info from cached result if this entry lacks it
+        const chatModel = lastMeta.chatModel || {};
+        const responseModel = chatModel.responseModel || chatModel.usage?.model;
+        if ((!responseModel || responseModel === 'unknown') && this.resultCache.has(cascadeId)) {
+            const cached = this.resultCache.get(cascadeId)!;
+            if (!chatModel.responseModel && cached.data.model) {
+                chatModel.responseModel = cached.data.model;
+            }
         }
+
+        const result = this.buildContextWindowData(cascadeId, title, lastMeta);
+        if (result) {
+            this.setCacheEntry(cascadeId, result);
+            cwDiag(`LIVE: offset=${offset} tokens=${result.usedTokens} (${result.model})`);
+        }
+        return result;
     }
 
     /** Thin wrapper: callLsJson that resolves null on error (contextWindow is best-effort) */

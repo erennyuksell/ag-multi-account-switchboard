@@ -50,9 +50,9 @@ export function setupMessageHandler(): void {
                     const contentEl = $('content');
                     const scrollY = contentEl?.scrollTop ?? 0;
 
-                    setLastRenderArgs([msg.data, msg.selectedModels, msg.trackedAccounts || [], msg.activeEmail || '']);
+                    setLastRenderArgs([msg.accountCards || [], msg.pinnedModels || {}]);
                     if (msg.pinnedModels) setPinnedModels(msg.pinnedModels);
-                    renderAll(lastRenderArgs[0], lastRenderArgs[1], lastRenderArgs[2], lastRenderArgs[3] as string);
+                    renderAll(lastRenderArgs[0] as any[], lastRenderArgs[1] as Record<string, string>);
                     if (msg.tokenBase) {
                         renderTokenBudget(msg.tokenBase);
                     } else {

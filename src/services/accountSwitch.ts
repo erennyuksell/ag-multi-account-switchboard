@@ -77,7 +77,7 @@ export class AccountSwitchService {
         log.info('Token renewal stopped');
     }
 
-    async switchAccount(opts: SwitchAccountOptions): Promise<boolean> {
+    async switchAccount(opts: SwitchAccountOptions): Promise<{ confirmed: boolean }> {
         const { email, name, accessToken, refreshToken, expiryTimestamp } = opts;
 
         // Bump generation FIRST — aborts any in-flight polling from previous switch
@@ -88,7 +88,7 @@ export class AccountSwitchService {
             const uss = getUSS();
             if (!uss) {
                 vscode.window.showErrorMessage('antigravityUnifiedStateSync API not available.');
-                return false;
+                return { confirmed: false };
             }
 
             // 1. Instant name/email display via USS
@@ -110,19 +110,17 @@ export class AccountSwitchService {
                 isGcpTos: false,
             });
 
-            // 4. Trigger _sessionChangeEmitter for profile UI
-            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-
-            // 5. registerGdmUser on all LS → makes LS fetch models from backend
+            // 4. registerGdmUser on all LS → makes LS fetch models from backend
+            //    (handleAuthRefresh is called INSIDE pollRichUserStatus once LS has real data)
             await delay(500);
             await this.callRegisterGdmUserOnAllLS();
 
-            // 6. Adaptive poll: fetch rich UserStatus from LS, push incrementally
-            //    to USS as data arrives, stop when response stabilizes.
-            //    Generation guard ensures this aborts if a newer switch starts.
-            this.pollRichUserStatus(uss, generation).catch(err =>
-                log.warn('UserStatus poll failed:', err?.message || err)
-            );
+            // 6. Await email confirmation from LS — resolves when LS reports the new email.
+            //    Also returns JSON GetUserStatus for instant local card rendering.
+            const result = await this.pollRichUserStatus(uss, generation, email);
+            if (!result.confirmed) {
+                log.warn('Email confirmation timed out — LS may not have adopted the new email yet');
+            }
 
             // 7. Schedule proactive token renewal before expiry
             //    This is the critical fix: LS binary caches its token and doesn't
@@ -131,11 +129,11 @@ export class AccountSwitchService {
             this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
 
             vscode.window.showInformationMessage(`✅ Switched to ${email}`);
-            return true;
+            return result;
         } catch (err: any) {
             vscode.window.showErrorMessage(`Failed to switch account: ${err?.message || err}`);
             log.error('Switch failed:', err);
-            return false;
+            return { confirmed: false };
         }
     }
 
@@ -230,68 +228,133 @@ export class AccountSwitchService {
 
     /**
      * Adaptive poll: call GetUserStatus every INTERVAL, push to USS whenever
-     * new data arrives (response grows), stop when 2 consecutive stable reads
-     * or MAX_WAIT is reached. Fire-and-forget from the main flow.
+     * new data arrives (response grows), stop when email matches target AND
+     * 2 consecutive stable reads, or MAX_WAIT is reached.
+     *
+     * When the target email is detected in LS response, fires onSwitchSettled
+     * so quotaManager can trigger a refresh with real LS data.
      *
      * @param generation - Switch generation counter. If a newer switch starts,
      *   this.switchGeneration will increment and this loop will abort.
+     * @param targetEmail - Expected email after switch. Used for early exit.
      */
-    private async pollRichUserStatus(uss: USSApi, generation: number, maxWaitMs = 12000, intervalMs = 1000): Promise<void> {
-        const lsProcesses = await findLSEndpoints();
-        if (lsProcesses.length === 0) return;
+    private async pollRichUserStatus(
+        uss: USSApi,
+        generation: number,
+        targetEmail: string,
+        maxWaitMs = 12000,
+        intervalMs = 800,
+    ): Promise<{ confirmed: boolean }> {
+        let lsProcesses = await findLSEndpoints();
+        if (lsProcesses.length === 0) return { confirmed: false };
         const ca = loadLSCert();
-        const ls = lsProcesses[0];
+        let ls = lsProcesses[0];
 
-        let lastSize = 0;
-        let stableCount = 0;
+        let emailMatched = false;
+        const targetNorm = targetEmail.toLowerCase();
         const start = Date.now();
 
-        await delay(1000); // Let LS begin fetching from backend
+        await delay(300); // LS typically updates email within 100-200ms of registerGdmUser
 
         while (Date.now() - start < maxWaitMs) {
-            // Abort if a newer switch has started
             if (generation !== this.switchGeneration) {
                 log.info('Polling aborted — newer switch detected');
-                return;
+                return { confirmed: false };
             }
 
             try {
                 const body = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetUserStatus', ca);
-                let userStatus = body ? extractField(body, 1) : null;
+                const userStatus = body ? extractField(body, 1) : null;
 
                 if (userStatus && userStatus.length > 5) {
-                    // Also fetch profile picture (field 38, NOT in GetUserStatus)
-                    try {
-                        const profileBody = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetProfileData', ca);
-                        const profilePicUrl = profileBody ? extractStringField(profileBody, 1) : '';
-                        if (profilePicUrl.length > 10) {
-                            userStatus = Buffer.concat([userStatus, encodeString(38, profilePicUrl)]);
-                        }
-                    } catch (e: any) {
-                        log.warn('Profile picture fetch failed:', e?.message);
-                    }
+                    if (!emailMatched) {
+                        const lsEmail = extractStringField(userStatus, 7);
+                        if (lsEmail && lsEmail.toLowerCase() === targetNorm) {
+                            emailMatched = true;
+                            log.info(`Email match confirmed: ${lsEmail}`);
 
-                    if (userStatus.length > lastSize) {
-                        await this.pushUserStatusToUSS(uss, userStatus);
-                        await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-                        log.info(`UserStatus grew ${lastSize} → ${userStatus.length}B, pushed to USS`);
-                        lastSize = userStatus.length;
-                        stableCount = 0;
-                    } else {
-                        stableCount++;
-                        if (stableCount >= 2) {
-                            log.info(`UserStatus stable at ${lastSize}B — polling complete`);
-                            return;
+                            // Push first confirmed status to USS immediately
+                            await this.pushUserStatusToUSS(uss, userStatus);
+                            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+
+                            // Continue USS stabilization in background (profile pic, data growth)
+                            // Detached — doesn't block the switch return.
+                            this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs, maxWaitMs - (Date.now() - start))
+                                .catch(err => log.warn('USS stabilization error:', err?.message));
+
+                            return { confirmed: true };
                         }
                     }
                 }
             } catch (e: any) {
-                log.warn('UserStatus poll iteration failed:', e?.message);
+                const msg = e?.message || '';
+                // CSRF token regenerated after registerGdmUser — re-discover endpoints
+                if (msg.includes('401') || msg.includes('CSRF') || msg.includes('unauthenticated')) {
+                    log.info('Poll: CSRF invalid, re-discovering LS endpoints');
+                    lsProcesses = await findLSEndpoints();
+                    if (lsProcesses.length > 0) ls = lsProcesses[0];
+                } else {
+                    log.warn('UserStatus poll iteration failed:', msg);
+                }
             }
 
             await delay(intervalMs);
         }
-        log.info(`Polling timed out after ${maxWaitMs}ms (last=${lastSize}B)`);
+        log.info(`Polling timed out after ${maxWaitMs}ms (emailMatched=${emailMatched})`);
+        return { confirmed: emailMatched };
+    }
+
+    /**
+     * Background USS stabilization — pushes incremental UserStatus updates
+     * (profile pic, growing data) AFTER email is already confirmed.
+     * Detached from the main switch flow.
+     */
+    private async stabilizeUSS(
+        uss: USSApi, ls: any, ca: Buffer | undefined,
+        generation: number, initialSize: number,
+        intervalMs: number, remainingMs: number,
+    ): Promise<void> {
+        let lastSize = initialSize;
+        let stableCount = 0;
+        const start = Date.now();
+
+        while (Date.now() - start < remainingMs) {
+            if (generation !== this.switchGeneration) return;
+            await delay(intervalMs);
+
+            try {
+                const body = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetUserStatus', ca);
+                let userStatus = body ? extractField(body, 1) : null;
+                if (!userStatus || userStatus.length <= 5) continue;
+
+                // Fetch profile picture
+                try {
+                    const profileBody = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetProfileData', ca);
+                    const profilePicUrl = profileBody ? extractStringField(profileBody, 1) : '';
+                    if (profilePicUrl.length > 10) {
+                        userStatus = Buffer.concat([userStatus, encodeString(38, profilePicUrl)]);
+                    }
+                } catch (e: any) {
+                    log.warn('Profile picture fetch failed:', e?.message);
+                }
+
+                if (userStatus.length > lastSize) {
+                    await this.pushUserStatusToUSS(uss, userStatus);
+                    await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                    log.info(`USS stabilize: grew ${lastSize} → ${userStatus.length}B`);
+                    lastSize = userStatus.length;
+                    stableCount = 0;
+                } else {
+                    stableCount++;
+                    if (stableCount >= 2) {
+                        log.info(`USS stabilized at ${lastSize}B`);
+                        return;
+                    }
+                }
+            } catch (e: any) {
+                log.warn('USS stabilize iteration failed:', e?.message);
+            }
+        }
     }
 
     // ==================== USS IPC ====================

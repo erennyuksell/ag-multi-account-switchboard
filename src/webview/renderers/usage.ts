@@ -238,7 +238,7 @@ export function renderContextWindow(data: any): void {
     if (data.title) {
         html += `<div class="ctx-convo-title" title="${escHtml(data.title)}">${escHtml(data.title)}</div>`;
     }
-    html += `<div class="ctx-token-line">${fmtBig(data.usedTokens)} <span class="ctx-token-sep">/</span> ${fmtBig(data.maxTokens)}</div>`;
+    html += `<div class="ctx-token-line">${fmtBig(data.usedTokens)} <span class="ctx-token-sep">/</span> ${fmtBig(data.maxTokens)}<button class="ctx-see-all-btn" data-action="open-context-detail">See All →</button></div>`;
     html += `<div class="ctx-token-label">tokens used</div>`;
     html += '</div>';
 

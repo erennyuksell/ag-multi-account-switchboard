@@ -1,0 +1,536 @@
+/**
+ * Context Detail Panel CSS — isolated styles for the editor-tab dashboard.
+ * Only loaded by ContextDetailPanel's WebviewPanel.
+ */
+
+/* ─── Container ─── */
+.cd-container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 28px;
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+}
+
+/* ─── Header ─── */
+.cd-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+}
+.cd-header-left { flex: 1; min-width: 0; }
+.cd-title {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+.cd-subtitle {
+    font-size: 13px;
+    color: var(--vscode-foreground);
+    opacity: 0.85;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.cd-meta {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, #858585);
+}
+.cd-updated {
+    opacity: 0.7;
+}
+.cd-header-right {
+    text-align: right;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+}
+.cd-token-total {
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+.cd-token-total.pct-g { color: var(--vscode-terminal-ansiGreen, #4ec9b0); }
+.cd-token-total.pct-y { color: var(--vscode-editorWarning-foreground, #cca700); }
+.cd-token-total.pct-r { color: var(--vscode-editorError-foreground, #f48771); }
+.cd-token-sep { opacity: 0.4; font-weight: 400; }
+.cd-pct {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Export button */
+.cd-export-btn {
+    margin-top: 4px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none;
+    padding: 5px 14px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+.cd-export-btn:hover { opacity: 0.85; }
+.cd-export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.cd-refresh-btn {
+    margin-top: 4px;
+    background: transparent;
+    color: var(--vscode-descriptionForeground, #858585);
+    border: 1px solid rgba(128,128,128,0.2);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.cd-refresh-btn:hover { color: var(--vscode-foreground); border-color: rgba(128,128,128,0.4); }
+.cd-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ─── Usage Bar ─── */
+.cd-bar-container {
+    margin-bottom: 24px;
+}
+.cd-bar {
+    display: flex;
+    height: 8px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: rgba(128,128,128,0.1);
+    gap: 1px;
+}
+.cd-bar-seg {
+    height: 100%;
+    min-width: 2px;
+    transition: width 0.4s ease;
+}
+
+/* ─── Expand/Collapse Toolbar ─── */
+.cd-toolbar {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+.cd-toolbar button {
+    background: none;
+    border: 1px solid rgba(128,128,128,0.2);
+    color: var(--vscode-descriptionForeground, #858585);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.cd-toolbar button:hover {
+    color: var(--vscode-foreground);
+    border-color: var(--vscode-descriptionForeground, #858585);
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+}
+.cd-toolbar-sep {
+    width: 1px;
+    background: rgba(128,128,128,0.2);
+    margin: 2px 4px;
+}
+
+/* Filter chips */
+.cd-filter-chip {
+    background: none;
+    border: 1px solid rgba(128,128,128,0.2);
+    color: var(--vscode-descriptionForeground, #858585);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.cd-filter-chip:hover {
+    color: var(--vscode-foreground);
+    border-color: rgba(128,128,128,0.4);
+}
+.cd-filter-chip.active {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-background);
+}
+
+/* ─── Tree View ─── */
+.cd-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 24px;
+}
+
+/* Group */
+.cd-group {
+    border-radius: 6px;
+    overflow: hidden;
+}
+.cd-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    user-select: none;
+    border-radius: 6px;
+    transition: background 0.12s;
+}
+.cd-group-header:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+}
+.cd-group-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
+.cd-group-name { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+.cd-group-count {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    background: rgba(128,128,128,0.12);
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+.cd-group-tokens {
+    font-size: 12px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 52px;
+    text-align: right;
+}
+.cd-group-pct {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 28px;
+    text-align: right;
+}
+
+/* Token bar */
+.cd-token-bar {
+    width: 80px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(128,128,128,0.1);
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.cd-token-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.4s ease;
+}
+
+/* Expand icon */
+.cd-expand-icon {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+    transition: transform 0.2s;
+}
+.cd-expand-spacer { width: 14px; flex-shrink: 0; }
+.cd-group.expanded > .cd-group-header > .cd-expand-icon { transform: rotate(90deg); }
+.cd-child.expanded > .cd-child-header > .cd-expand-icon { transform: rotate(90deg); }
+
+/* Group children — instant toggle (no max-height transition for perf) */
+.cd-group-children {
+    display: none;
+}
+.cd-group.expanded > .cd-group-children {
+    display: block;
+}
+
+/* ─── Child Row ─── */
+.cd-child {
+    border-radius: 4px;
+}
+.cd-child-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px 6px 28px;
+    cursor: pointer;
+    user-select: none;
+    border-radius: 4px;
+    transition: background 0.12s;
+    font-size: 12px;
+    position: relative;
+}
+.cd-child-header:hover {
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+}
+/* Active/selected state when preview is open */
+.cd-child.previewing > .cd-child-header {
+    background: rgba(79, 156, 247, 0.08);
+}
+.cd-child-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+}
+.cd-child-tokens {
+    font-size: 11px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 44px;
+    text-align: right;
+}
+.cd-child-pct {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 24px;
+    text-align: right;
+}
+
+/* Weight tiers — visual hierarchy for token importance */
+.cd-child.weight-heavy > .cd-child-header .cd-child-name {
+    font-weight: 600;
+}
+.cd-child.weight-heavy > .cd-child-header .cd-child-tokens {
+    color: var(--vscode-foreground);
+    font-weight: 700;
+}
+.cd-child.weight-light > .cd-child-header {
+    opacity: 0.45;
+}
+.cd-child.weight-light > .cd-child-header:hover {
+    opacity: 0.75;
+}
+
+/* Viewable row indicator — subtle chevron on hover */
+.cd-child.viewable > .cd-child-header::after {
+    content: '›';
+    font-size: 14px;
+    color: var(--vscode-descriptionForeground, #858585);
+    opacity: 0;
+    flex-shrink: 0;
+    margin-left: 4px;
+    transition: opacity 0.15s;
+}
+.cd-child.viewable > .cd-child-header:hover::after {
+    opacity: 0.6;
+}
+.cd-child.viewable.previewing > .cd-child-header::after {
+    content: '‹';
+    opacity: 0.6;
+}
+
+/* Sub-children — instant toggle */
+.cd-child-subs {
+    display: none;
+}
+.cd-child.expanded > .cd-child-subs {
+    display: block;
+}
+
+.cd-sub {
+    border-radius: 3px;
+}
+.cd-sub-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 12px 3px 48px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-radius: 3px;
+}
+.cd-sub-row:hover {
+    background: rgba(128,128,128,0.06);
+}
+.cd-sub.previewing > .cd-sub-row {
+    background: rgba(79, 156, 247, 0.08);
+}
+.cd-sub-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--vscode-editor-font-family, monospace);
+}
+.cd-sub-tokens {
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 40px;
+    text-align: right;
+    color: var(--vscode-descriptionForeground, #858585);
+}
+.cd-sub-pct {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    min-width: 24px;
+    text-align: right;
+}
+
+/* ─── Detail Slot (preview + loading) ─── */
+/* Empty = invisible + zero space. :not(:empty) adds visual styling. */
+.cd-detail {
+    display: none;
+}
+.cd-detail:not(:empty) {
+    display: block;
+    padding: 8px 12px 8px 28px;
+    border-left: 2px solid rgba(79, 156, 247, 0.25);
+    margin-left: 28px;
+}
+.cd-sub > .cd-detail:not(:empty) {
+    padding-left: 12px;
+    margin-left: 48px;
+}
+
+/* Preview content inside detail slot */
+.cd-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.cd-preview-meta {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-variant-numeric: tabular-nums;
+}
+.cd-preview-time {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+}
+.cd-preview-body {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--vscode-foreground);
+    background: rgba(0,0,0,0.12);
+    padding: 10px 12px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    margin: 0;
+}
+.cd-preview-output {
+    margin-top: 8px;
+    color: var(--vscode-terminal-ansiGreen, #4ec9b0);
+}
+.cd-preview-empty {
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground, #858585);
+    font-style: italic;
+    padding: 8px 0;
+}
+
+/* ─── Loading Indicator ─── */
+.cd-loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground, #858585);
+}
+.cd-loading-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--vscode-descriptionForeground, #858585);
+    animation: cd-pulse 1s ease-in-out infinite;
+}
+@keyframes cd-pulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+}
+
+/* ─── Config Section ─── */
+.cd-config {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+}
+.cd-config-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--vscode-descriptionForeground, #858585);
+    margin-bottom: 8px;
+}
+.cd-config-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+}
+.cd-config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(128,128,128,0.05);
+}
+.cd-config-label {
+    font-size: 10px;
+    color: var(--vscode-descriptionForeground, #858585);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.cd-config-value {
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ─── Empty State ─── */
+.cd-empty {
+    text-align: center;
+    padding: 60px 24px;
+    color: var(--vscode-descriptionForeground, #858585);
+}
+.cd-empty .em-icon { font-size: 36px; margin-bottom: 12px; opacity: 0.4; }
+.cd-empty .em-title { font-size: 15px; font-weight: 600; color: var(--vscode-foreground); margin-bottom: 6px; }
+.cd-empty .em-sub { font-size: 12px; line-height: 1.5; }
+
+/* ─── Sidebar See All Button ─── */
+.ctx-see-all-btn {
+    background: none;
+    border: 1px solid rgba(128,128,128,0.2);
+    color: var(--vscode-descriptionForeground, #858585);
+    font-family: inherit;
+    font-size: 10px;
+    padding: 1px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.ctx-see-all-btn:hover {
+    color: var(--vscode-foreground);
+    border-color: var(--vscode-descriptionForeground, #858585);
+    background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05));
+}

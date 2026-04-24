@@ -51,15 +51,48 @@ export interface SwitchAccountOptions {
     expiryTimestamp: number;
 }
 
-/** Unified state object passed to viewProvider.updateData() — replaces 9 positional params */
+// ==================== Account Card Types (SSOT for sidebar render) ====================
+
+/** Single model's quota — unified from both local LS and remote API */
+export interface ModelCard {
+    id: string;
+    label: string;
+    pct: number;
+    resetTime: string;
+    isLocal: boolean;
+}
+
+/**
+ * Pre-processed account card — renderer does ZERO logic.
+ * Built by quotaManager.buildAccountCards(), consumed by webview renderAll().
+ */
+export interface AccountCard {
+    email: string;
+    name?: string;
+    isActive: boolean;
+    trackingId?: string;        // only for tracked accounts (switch/copy/remove)
+    models: ModelCard[];
+    bottleneck: ModelCard | null;
+    tierName: string | null;
+    tierId?: string | null;
+    aiCredits: number | null;
+    promptCredits: number | null;
+    promptCreditsMax: number | null;
+    flowCredits: number | null;
+    flowCreditsMax: number | null;
+    resetTime: string;
+    isError: boolean;
+    errorMessage?: string;
+    selectedModels: string[];   // status bar toggles (only relevant for local)
+    isLocal: boolean;
+}
+
+/** Unified state object passed to viewProvider.updateData() */
 export interface ViewState {
-    localData: LocalQuotaData | null;
-    selectedModels: string[];
-    trackedQuotas: AccountQuota[];
-    activeEmail: string;
+    accountCards: AccountCard[];
+    pinnedModels: Record<string, string>;
     tokenBase: any | null;
     workspaceContext: any | null;
-    pinnedModels: Record<string, string>;
     usageStats: DeepUsageStats | null;
 }
 
@@ -125,8 +158,22 @@ export interface ClientModelConfig {
 /** Local LS GetUserStatus response shape */
 export interface LocalQuotaData {
     userStatus?: {
+        email?: string;
         cascadeModelConfigData?: {
             clientModelConfigs?: ClientModelConfig[];
+        };
+        userTier?: {
+            id?: string;
+            name?: string;
+            availableCredits?: Array<{ creditType: string; creditAmount: string }>;
+        };
+        planStatus?: {
+            availablePromptCredits?: number;
+            availableFlowCredits?: number;
+            planInfo?: {
+                monthlyPromptCredits?: number;
+                monthlyFlowCredits?: number;
+            };
         };
     };
 }
