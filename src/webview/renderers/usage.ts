@@ -116,10 +116,13 @@ function renderCompactDashboard(el: HTMLElement, stats: any): void {
     let html = '';
 
     // ─── Activity Heatmap ───
+    const totalTokensAll = stats.totalTokens || 1;
+    const costPerToken = totalCost / totalTokensAll;
+
     html += '<div class="deep-section">';
     if (state === '24h') {
         html += '<div class="deep-section-hdr">Activity Pattern <span class="deep-section-badge">Hourly</span></div>';
-        html += renderHourlyHeatmap(stats.hourly);
+        html += renderHourlyHeatmap(stats.hourly, costPerToken);
     } else {
         html += '<div class="deep-section-hdr">Activity <span class="deep-section-badge">' + rangeLabel(state) + '</span></div>';
         html += renderDailyGrid(stats.daily, false);

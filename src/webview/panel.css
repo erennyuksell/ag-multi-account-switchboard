@@ -1267,9 +1267,15 @@ body {
     font-weight: 600;
     color: rgba(255,255,255,.9);
     font-variant-numeric: tabular-nums;
+    text-align: right;
 }
 .deep-mcol-tip-cost {
     color: #4ade80 !important;
+}
+.deep-mcol-tip-dotlabel {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
 }
 .deep-mcol-tip-dot {
     width: 6px;

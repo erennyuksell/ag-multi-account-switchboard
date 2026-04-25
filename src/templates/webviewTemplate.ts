@@ -135,12 +135,12 @@ export function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.
                 </div>
                 <!-- Active Context Window -->
                 <div id="contextWindowContent" class="ctx-window-wrap"></div>
-                <!-- Workspace Context: .agent/ items from LS index (not filesystem) -->
+                <!-- Workspace Context: .agent/ & .agents/ items from LS index (not filesystem) -->
                 <div class="wc-section">
                     <div class="wc-section-hdr">
                         <span class="wc-section-icon">🗂️</span>
                         <span class="wc-section-label">Workspace Context</span>
-                        <span class="wc-section-badge">.agent/</span>
+                        <span class="wc-section-badge">.agent(s)/</span>
                     </div>
                     <div id="workspaceContextContent" class="wc-content">
                         <div class="wc-empty">Loading workspace context...</div>

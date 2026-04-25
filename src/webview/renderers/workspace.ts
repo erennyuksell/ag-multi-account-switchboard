@@ -15,7 +15,7 @@ export function renderWorkspaceContext(wc: any): void {
     const workflows = (wc && wc.workflows) ? wc.workflows : [];
 
     if (!wc || (rAon.length + rMd.length + rMan.length + skills.length + workflows.length === 0)) {
-        el.innerHTML = '<div class="wc-empty">No .agent/ items indexed for this workspace.</div>';
+        el.innerHTML = '<div class="wc-empty">No .agent/ or .agents/ items indexed for this workspace.</div>';
         return;
     }
 

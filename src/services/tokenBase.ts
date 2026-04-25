@@ -8,6 +8,12 @@ import * as path from 'path';
 
 const log = createLogger('TokenBase');
 
+/** Matches both .agent/ and .agents/ directory paths */
+const AGENT_DIR_RE = /\.agents?\//;
+/** Captures .agent(s)/... relative path from a full URI */
+const AGENT_PATH_CAPTURE = /(\.agents?\/.+)/;
+const isAgentPath = (s: string) => AGENT_DIR_RE.test(s);
+
 // ==================== Workspace Context Types ====================
 
 export interface WorkspaceContextItem {
@@ -151,7 +157,7 @@ function parseContextScope(buf: Buffer): Array<{ uri: string; relPath: string; s
         const uriField = dataFields.find(f => f.field === 5 && f.bytes);
         if (!uriField?.bytes) continue;
         const uri = uriField.bytes.toString('utf-8');
-        if (!uri.includes('.agent/')) continue;
+        if (!isAgentPath(uri)) continue;
 
         const sizeBytes = dataFields.find(f => f.field === 4)?.varint ?? 0;
         const pathWrapper = dataFields.find(f => f.field === 6 && f.bytes)?.bytes;
@@ -162,7 +168,7 @@ function parseContextScope(buf: Buffer): Array<{ uri: string; relPath: string; s
             relPath = pf.find(f => f.field === 2)?.bytes?.toString('utf-8') ?? '';
         }
         if (!relPath) {
-            const m = uri.match(/(\.agent\/.+)/);
+            const m = uri.match(AGENT_PATH_CAPTURE);
             relPath = m ? m[1] : '';
         }
 
@@ -202,15 +208,15 @@ function categorizeAgentItems(
 
     for (const { relPath, sizeBytes } of items) {
         const parts = relPath.split('/');
-        // .agent/rules/FILENAME.md  (depth 3)
+        // .agent/rules/FILENAME.md or .agents/rules/FILENAME.md  (depth 3)
         if (parts[1] === 'rules' && parts.length === 3 && relPath.endsWith('.md')) {
             allRules.push({ name: parts[2].replace(/\.md$/, ''), path: relPath, sizeBytes, trigger: 'always_on' });
         }
-        // .agent/skills/SKILLNAME  (depth 3, no extension = directory)
+        // .agent/skills/SKILLNAME or .agents/skills/SKILLNAME  (depth 3, no extension = directory)
         else if (parts[1] === 'skills' && parts.length === 3 && !parts[2].includes('.')) {
             skills.push({ name: parts[2], path: relPath, sizeBytes, trigger: 'always_on' });
         }
-        // .agent/workflows/FILENAME.md  (depth 3)
+        // .agent/workflows/FILENAME.md or .agents/workflows/FILENAME.md  (depth 3)
         else if (parts[1] === 'workflows' && parts.length === 3 && relPath.endsWith('.md')) {
             workflows.push({ name: parts[2].replace(/\.md$/, ''), path: relPath, sizeBytes, trigger: 'always_on' });
         }

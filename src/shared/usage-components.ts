@@ -60,7 +60,7 @@ export function renderDailyBars(daily: DailyBucket[], costPerToken: number = 0):
 //  Hourly Heatmap (24-hour pattern)
 // ═══════════════════════════════════════════
 
-export function renderHourlyHeatmap(hourly: HourlyBucket[]): string {
+export function renderHourlyHeatmap(hourly: HourlyBucket[], costPerToken: number = 0): string {
     if (!hourly || hourly.length === 0) return '';
 
     const maxTokens = Math.max(...hourly.map(h => h.input + h.output + h.cache), 1);
@@ -75,7 +75,18 @@ export function renderHourlyHeatmap(hourly: HourlyBucket[]): string {
         const isPeak = h.hour === peakHour.hour;
         const cls = isPeak ? ' deep-heatmap-peak' : '';
         const tipCls = h.hour <= 2 ? ' tip-right' : h.hour >= 22 ? ' tip-left' : '';
-        html += `<div class="deep-heatmap-cell${cls}${tipCls}" style="--intensity:${intensity.toFixed(3)}" data-tip="${String(h.hour).padStart(2, '0')}:00 — ${fmtNum(total)} tokens&#10;${h.calls} calls">`;
+        let tipText = `${String(h.hour).padStart(2, '0')}:00`;
+        tipText += `&#10;Tokens: ${fmtBig(total)}`;
+        tipText += `&#10;Calls: ${fmtNum(h.calls)}`;
+        if (total > 0) {
+            tipText += `&#10;Input: ${fmtBig(h.input)}`;
+            tipText += `&#10;Cache: ${fmtBig(h.cache)}`;
+            tipText += `&#10;Output: ${fmtBig(h.output)}`;
+        }
+        if (costPerToken > 0 && total > 0) {
+            tipText += `&#10;Cost: ~${fmtDollar(total * costPerToken)}`;
+        }
+        html += `<div class="deep-heatmap-cell${cls}${tipCls}" style="--intensity:${intensity.toFixed(3)}" data-tip="${tipText}">`;
         html += '<span class="deep-heatmap-hour">' + h.hour + '</span>';
         html += '</div>';
     }
@@ -501,11 +512,11 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
             html += '<div class="deep-mcol-tip-row"><span>Cost</span><span class="deep-mcol-tip-cost">' + fmtDollar(m.cost) + '</span></div>';
             html += '<div class="deep-mcol-tip-row"><span>Calls</span><span>' + fmtNum(m.calls) + '</span></div>';
             html += '<div class="deep-mcol-tip-sep"></div>';
-            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dot" style="background:#4f9cf7"></span><span>Input</span><span>' + fmtBig(m.input) + '</span></div>';
-            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dot" style="background:#a78bfa"></span><span>Cache</span><span>' + fmtBig(m.cache) + '</span></div>';
-            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dot" style="background:#4ade80"></span><span>Output</span><span>' + fmtBig(m.output) + '</span></div>';
+            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dotlabel"><span class="deep-mcol-tip-dot" style="background:#4f9cf7"></span>Input</span><span>' + fmtBig(m.input) + '</span></div>';
+            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dotlabel"><span class="deep-mcol-tip-dot" style="background:#a78bfa"></span>Cache</span><span>' + fmtBig(m.cache) + '</span></div>';
+            html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dotlabel"><span class="deep-mcol-tip-dot" style="background:#4ade80"></span>Output</span><span>' + fmtBig(m.output) + '</span></div>';
             if (m.reasoning > 0) {
-                html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dot" style="background:#f59e0b"></span><span>Reasoning</span><span>' + fmtBig(m.reasoning) + '</span></div>';
+                html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dotlabel"><span class="deep-mcol-tip-dot" style="background:#f59e0b"></span>Reasoning</span><span>' + fmtBig(m.reasoning) + '</span></div>';
             }
             if (m.topModels.length > 0) {
                 html += '<div class="deep-mcol-tip-sep"></div>';
