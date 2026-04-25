@@ -1,0 +1,53 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea for making the extension better? I'd love to hear it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case or pain point.
+      placeholder: "I often need to compare quota usage across accounts side by side, but currently..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Related area
+      options:
+        - Account Management
+        - Quota Display
+        - Token Budget
+        - Context Window
+        - Usage Stats / Analytics
+        - UI / UX
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you're currently using?
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, mockups, or references.

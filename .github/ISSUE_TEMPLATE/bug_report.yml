@@ -1,0 +1,94 @@
+name: Bug Report
+description: Something isn't working as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Please fill out the details below so I can reproduce and fix the issue.
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension Version
+      description: "Check the extension panel or `Extensions > AG Multi-Account Switchboard`"
+      placeholder: "e.g. 3.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: ide-version
+    attributes:
+      label: IDE Version
+      description: "Help > About (copy the full version string)"
+      placeholder: "e.g. Antigravity 1.98.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature-area
+    attributes:
+      label: Which feature is affected?
+      options:
+        - Account Switching
+        - Quota Monitoring
+        - Token Budget
+        - Context Window
+        - Usage Stats
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: "When I switch accounts, the previous account disappears from the list..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can I reproduce this?
+      placeholder: |
+        1. Open the panel
+        2. Click switch on Account B
+        3. Account A disappears from the list
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: "Paste any relevant output from `Output > AG Switchboard` channel"
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, screen recordings, or anything else that might help.
