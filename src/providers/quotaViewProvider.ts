@@ -143,6 +143,11 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    /** Generic message passthrough to webview */
+    postMessage(msg: Record<string, any>) {
+        this._view?.webview.postMessage(msg);
+    }
+
     private handleUsageRange(range: string) {
         this.quotaManager.setUsageRange(range);
         const filtered = this.quotaManager.getFilteredUsageStats(range);

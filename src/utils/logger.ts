@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 
 /** Log levels ordered by severity */
 export enum LogLevel {
@@ -18,6 +19,9 @@ const LEVEL_LABELS: Record<LogLevel, string> = {
 let outputChannel: vscode.OutputChannel | null = null;
 let minLevel: LogLevel = LogLevel.DEBUG;
 
+/** Physical file path — when set, every log line is also appended here. */
+let fileSinkPath: string | null = null;
+
 /**
  * Initialize the shared OutputChannel.
  * Call once during extension activation.
@@ -26,6 +30,17 @@ export function initLogger(context: vscode.ExtensionContext, level: LogLevel = L
     outputChannel = vscode.window.createOutputChannel('AG Panel', { log: true });
     context.subscriptions.push(outputChannel);
     minLevel = level;
+}
+
+/**
+ * Set file sink path — all subsequent log lines are also appended to this file.
+ * Pass null to disable. Truncates on first set (fresh per session).
+ */
+export function setFileSink(path: string | null): void {
+    fileSinkPath = path;
+    if (path) {
+        try { fs.writeFileSync(path, ''); } catch { /* non-fatal */ }
+    }
 }
 
 /**
@@ -48,10 +63,12 @@ export function createLogger(module: string) {
         const suffix = args.length > 0 ? ' ' + args.map(a => a instanceof Error ? a.message : String(a)).join(' ') : '';
         const line = `[${timestamp}] [${label}] [${module}] ${msg}${suffix}`;
 
-        // Write to OutputChannel (visible in Output panel → "AG Panel")
         outputChannel?.appendLine(line);
 
-        // Also forward to DevTools console for debugging
+        if (fileSinkPath) {
+            try { fs.appendFileSync(fileSinkPath, line + '\n'); } catch { /* non-fatal */ }
+        }
+
         switch (level) {
             case LogLevel.DEBUG: console.debug(line); break;
             case LogLevel.INFO: console.log(line); break;
@@ -67,3 +84,4 @@ export function createLogger(module: string) {
         error: (msg: string, ...args: unknown[]) => write(LogLevel.ERROR, msg, ...args),
     };
 }
+

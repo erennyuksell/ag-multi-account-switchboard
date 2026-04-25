@@ -288,7 +288,7 @@ export function renderCascadeList(cascades: CascadeBucket[], limit: number = 20,
 // ═══════════════════════════════════════════
 
 /** Per-1M-token pricing — updated April 2026 */
-type PricingEntry = { input: number; output: number; cache: number; reasoning: number };
+export type PricingEntry = { input: number; output: number; cache: number; reasoning: number };
 
 /** External pricing resolver — injected by extension at boot (e.g. LiteLLM catalog) */
 let externalResolver: ((displayName: string) => PricingEntry | null) | null = null;
@@ -333,7 +333,7 @@ export function getPricing(): Record<string, PricingEntry> {
     return { ...pricing };
 }
 
-function matchPricing(displayName: string): PricingEntry {
+export function matchPricing(displayName: string): PricingEntry {
     // 1. External resolver (LiteLLM dynamic catalog — highest priority after settings override)
     if (externalResolver) {
         const external = externalResolver(displayName);
@@ -419,17 +419,10 @@ export function renderCompactModelBreakdown(models: ModelBucket[], totalTokens: 
 
 /** Estimate cost for a single month bucket using per-model pricing */
 function estimateMonthCost(m: MonthlyBucket): number {
-    // Use top-level token ratios with matchPricing for overall cost
     let totalCost = 0;
     for (const tm of m.topModels) {
         const p = matchPricing(tm.displayName);
-        // Approximate: distribute input/cache/output proportionally
-        const ratio = m.total > 0 ? tm.tokens / m.total : 0;
-        const inp = m.input * ratio;
-        const cache = m.cache * ratio;
-        const out = m.output * ratio;
-        const reas = m.reasoning * ratio;
-        const cost = (inp * p.input + cache * p.cache + out * p.output + reas * p.reasoning) / 1_000_000;
+        const cost = (tm.inp * p.input + tm.cache * p.cache + tm.out * p.output + tm.reas * p.reasoning) / 1_000_000;
         tm.cost = cost;
         totalCost += cost;
     }

@@ -228,6 +228,10 @@ export interface MonthlyModelEntry {
     displayName: string;
     tokens: number;
     cost: number;
+    inp: number;
+    out: number;
+    cache: number;
+    reas: number;
 }
 
 /** Calendar month bucket (filter-independent) */

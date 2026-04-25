@@ -6,23 +6,17 @@ import { UsageStatsPanel } from './providers/usageStatsPanel';
 import { ContextDetailPanel } from './providers/contextDetailPanel';
 import { updatePricing, setExternalPricingResolver } from './shared/usage-components';
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
-import { initLogger, createLogger } from './utils/logger';
+import { initLogger, createLogger, setFileSink } from './utils/logger';
 import { extractField, extractStringField } from './utils/protobuf';
 
 const log = createLogger('Extension');
 
-// File-based diagnostic for USS/CW debugging (temp)
-const diagPath = '/tmp/ag-ctx-diag.log';
-function diag(msg: string) {
-    try {
-        const fs = require('fs');
-        fs.appendFileSync(diagPath, `[${new Date().toISOString()}] ${msg}\n`);
-    } catch {}
-}
+
 
 export async function activate(context: vscode.ExtensionContext) {
     // Initialize OutputChannel logger FIRST — all modules use this
     initLogger(context);
+    setFileSink('/tmp/ag-panel.log');
 
     // --- Boot managers ---
     const accountManager = new AccountManager(context);
@@ -214,9 +208,9 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                 if (cascadeId && cascadeId !== lastActiveCascadeId) {
                     log.info(`USS activeCascade: switch → ${cascadeId.substring(0, 12)}`);
                     lastActiveCascadeId = cascadeId;
-                    // Connect stream + initial fetch for immediate display.
-                    // Subsequent updates handled by STREAM→IDLE (no polling).
-                    quotaManager.connectStream(cascadeId);
+                    // Set active + immediate fetch for display on conversation switch.
+                    // Subsequent live updates handled by USS trajectorySummaries.
+                    quotaManager.setActiveConversation(cascadeId);
                     quotaManager.fetchContextWindowOnce(cascadeId);
                 }
             };
@@ -252,7 +246,7 @@ function startConversationTracker(quotaManager: QuotaManager): void {
 
             const handleChange = () => {
                 const state = topic.getState?.();
-                if (!state) { diag('TRAJ onChange: state is null'); return; }
+                if (!state) { log.info('TRAJ onChange: state is null'); return; }
 
                 const totalKeys = Object.keys(state).length;
                 const changedIds: string[] = [];
@@ -265,21 +259,21 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                     }
                     previousValues.set(cascadeId, val);
                 }
-                diag(`TRAJ onChange: ${totalKeys} keys, ${changedIds.length} changed, active=${lastActiveCascadeId?.substring(0,12)||'none'}`);
+                log.info(`TRAJ onChange: ${totalKeys} keys, ${changedIds.length} changed, active=${lastActiveCascadeId?.substring(0,12)||'none'}`);
                 if (changedIds.length === 0) return;
 
                 // Case 1: Active conversation's data changed → fetch fresh context
                 // Stream RUNNING event will follow shortly with correct metadata.
                 if (lastActiveCascadeId && changedIds.includes(lastActiveCascadeId)) {
-                    diag(`TRAJ UPDATE: active ${lastActiveCascadeId.substring(0,12)} changed → fetching context`);
-                    quotaManager.fetchContextWindowOnce(lastActiveCascadeId);
+                    log.info(`SIGNAL:USS trajSummaries active=${lastActiveCascadeId.substring(0,12)} changed`);
+                    quotaManager.debouncedContextFetch(lastActiveCascadeId);
                     return;
                 }
 
                 // Case 2: activeCascade tracker is running → do NOT switch conversations here.
                 // The activeCascade tracker is the authority on which conversation is active.
                 if (activeCascadeTrackerRunning) {
-                    diag(`TRAJ IGNORED: changed=[${changedIds.map(c=>c.substring(0,12)).join(',')}] activeCascade tracker is authority`);
+                    log.info(`TRAJ IGNORED: changed=[${changedIds.map(c=>c.substring(0,12)).join(',')}] activeCascade tracker is authority`);
                     return;
                 }
 
@@ -287,13 +281,14 @@ function startConversationTracker(quotaManager: QuotaManager): void {
                 // Only switch if we have no active cascade at all (first conversation)
                 if (!lastActiveCascadeId && changedIds.length > 0) {
                     const target = changedIds[0];
-                    diag(`TRAJ FALLBACK: no active cascade, using ${target.substring(0,12)}`);
+                    log.info(`TRAJ FALLBACK: no active cascade, using ${target.substring(0,12)}`);
                     log.info(`USS trajectories (fallback): initial cascade → ${target.substring(0, 12)}`);
                     lastActiveCascadeId = target;
-                    // Only connect stream — STREAM→IDLE will trigger context fetch
-                    quotaManager.connectStream(target);
+                    // Set active + fetch — USS trajectorySummaries will handle live updates
+                    quotaManager.setActiveConversation(target);
+                    quotaManager.fetchContextWindowOnce(target);
                 } else {
-                    diag(`TRAJ IGNORED: changed=[${changedIds.map(c=>c.substring(0,12)).join(',')}] none match active, no switch in fallback`);
+                    log.info(`TRAJ IGNORED: changed=[${changedIds.map(c=>c.substring(0,12)).join(',')}] none match active, no switch in fallback`);
                 }
             };
 

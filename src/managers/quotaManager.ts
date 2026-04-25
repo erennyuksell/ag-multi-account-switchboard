@@ -7,7 +7,7 @@ import { AccountSwitchService } from '../services/accountSwitch';
 import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
 import { UsageStatsService } from '../services/usage';
 import { ContextWindowService, ContextWindowData } from '../services/contextWindow';
-import { AgentStateStreamService } from '../services/agentStateStream';
+import { LiveStream } from '../services/liveStream';
 import { StatusBarService } from '../services/statusBar';
 import { ContextDetailPanel } from '../providers/contextDetailPanel';
 import { EmailResolver } from '../services/emailResolver';
@@ -19,7 +19,7 @@ const log = createLogger('QuotaManager');
 
 const diagPath = '/tmp/ag-ctx-diag.log';
 function diag(msg: string) {
-    try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] QM: ${msg}\n`); } catch {}
+    try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] QM: ${msg}\n`); } catch { }
 }
 
 export class QuotaManager {
@@ -37,7 +37,7 @@ export class QuotaManager {
     private readonly tokenBaseService = new TokenBaseService();
     private readonly usageStatsService = new UsageStatsService();
     private readonly contextWindowService = new ContextWindowService();
-    private readonly agentStream = new AgentStateStreamService();
+
     private lastTokenBase: TokenBaseData | null = null;
     private lastWorkspaceContext: WorkspaceContextData | null = null;
     private lastUsageStats: DeepUsageStats | null = null;
@@ -53,6 +53,12 @@ export class QuotaManager {
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
     private static readonly SERVER_CACHE_TTL = 60_000; // 60s
 
+    // Cascade (Global) LS cache — separate from workspace LS.
+    // Context window + LiveStream must use the Global LS for live data.
+    // Global LS port is stable across IDE reloads; 10 min TTL avoids redundant ps+lsof.
+    private cachedCascadeServer: { info: ServerInfo | null; ts: number } | null = null;
+    private static readonly CASCADE_SERVER_TTL = 600_000; // 10 min
+
     /** Suppress all refreshes during programmatic switch to prevent stale intermediate renders */
     private _switchMuteUntil = 0;
 
@@ -65,10 +71,18 @@ export class QuotaManager {
         this.statusBar = new StatusBarService(context);
         // Ensure token renewal timer is cleaned up on extension deactivation
         context.subscriptions.push({ dispose: () => this.switchService.dispose() });
-        context.subscriptions.push({ dispose: () => this.agentStream.destroy() });
+        context.subscriptions.push({ dispose: () => this.liveStream.destroy() });
 
-        // Wire up stream → context window pipeline
-        this._initStreamListeners();
+        // Live stream → real-time context offset during AI response
+        this._initLiveStreamListener();
+
+        // Register manual refresh callback for the detail panel's Refresh button
+        ContextDetailPanel.setRefreshCallback(async () => {
+            if (this.lastContextConversationId) {
+                this.contextWindowService.invalidateCache(this.lastContextConversationId);
+                await this._executeFetch(this.lastContextConversationId);
+            }
+        });
 
         // External account switch detection handled by USS userStatus topic listener
         // in extension.ts (startUserStatusListener). No fs.watch needed.
@@ -289,28 +303,90 @@ export class QuotaManager {
         return info;
     }
 
-    // ── Stream Listener Setup ──
+    /**
+     * Resolve the Global (cascade) LS for context window & LiveStream.
+     *
+     * The IDE runs two LS processes:
+     *   - Workspace LS (--workspace_id, --enable_lsp) → code completions, quota, workspace context
+     *   - Global LS (no workspace_id) → cascade/chat inference, generator metadata
+     *
+     * Context window data lives on the Global LS. This method discovers and caches it.
+     */
+    private async resolveCascadeServer(cascadeId: string): Promise<ServerInfo | null> {
+        if (this.cachedCascadeServer && this.cachedCascadeServer.info && Date.now() - this.cachedCascadeServer.ts < QuotaManager.CASCADE_SERVER_TTL) {
+            return this.cachedCascadeServer.info;
+        }
+        const wsServer = await this.resolveServer();
+        const info = await this.serverDiscovery.discoverCascadeServer(cascadeId, wsServer).catch(() => null);
+        // Only cache successful discoveries — null means the cascade doesn't exist
+        // yet (brand new conversation). Next attempt should re-discover.
+        if (info) {
+            this.cachedCascadeServer = { info, ts: Date.now() };
+        }
+        diag(`resolveCascadeServer: port=${info?.port ?? 'null'} (wsPort=${wsServer?.port ?? 'null'})`);
+        return info;
+    }
 
-    private _initStreamListeners(): void {
-        // Live fetch on every stream delta → real-time sidebar updates during model execution.
-        // Race condition guard: skip if a newer delta arrived before our fetch completed.
-        let lastLiveTotalLength = 0;
+    // ── Debounced Context Fetch (USS-driven) ──
 
-        this.agentStream.on('metaCount', async (event: { totalLength: number; conversationId: string }) => {
-            // Live fetch: grab the last entry and push to sidebar immediately
+    private _ctxDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /**
+     * Debounced context window fetch — called by USS trajectorySummaries.
+     * Coalesces rapid-fire events (USS often fires 2x) into a single fetch.
+     */
+    debouncedContextFetch(cascadeId: string): void {
+        if (this._ctxDebounceTimer) clearTimeout(this._ctxDebounceTimer);
+        this._ctxDebounceTimer = setTimeout(() => {
+            this._ctxDebounceTimer = null;
+            this._executeFetch(cascadeId);
+        }, 1500);
+    }
+
+    /**
+     * Set the active conversation for context tracking.
+     * Called on conversation switch (USS activeCascade).
+     * Also starts live stream for real-time offset hints.
+     */
+    setActiveConversation(cascadeId: string): void {
+        this.lastContextConversationId = cascadeId;
+        // Invalidate cascade server cache on conversation switch
+        // so we re-discover the correct Global LS for the new cascade.
+        this.cachedCascadeServer = null;
+        diag(`setActiveConversation: ${cascadeId.substring(0, 12)}`);
+        // Start live stream on Global LS — it has live cascade data.
+        this.resolveCascadeServer(cascadeId).then(cascadeServer => {
+            const server = cascadeServer;
+            if (server) {
+                diag(`setActiveConversation: connecting liveStream port=${server.port}`);
+                this.liveStream.connect(server, cascadeId);
+            } else {
+                // Fallback to workspace LS
+                this.resolveServer().then(ws => {
+                    if (ws) {
+                        diag(`setActiveConversation: liveStream fallback to wsLS port=${ws.port}`);
+                        this.liveStream.connect(ws, cascadeId);
+                    } else {
+                        diag('setActiveConversation: no server for liveStream');
+                    }
+                }).catch(() => {});
+            }
+        }).catch(err => diag(`setActiveConversation: resolveCascadeServer failed: ${(err as Error)?.message}`));
+    }
+
+    // ── Live Stream (real-time totalLength for context offset) ──
+
+    private readonly liveStream = new LiveStream();
+    private _lastLiveTotalLength = 0;
+
+    private _initLiveStreamListener(): void {
+        this.liveStream.on('totalLength', async (event: { totalLength: number; conversationId: string }) => {
             const server = this.cachedServer?.info;
-            if (!server || !event.conversationId || event.totalLength <= 0) {
-                diag(`LIVE-SKIP: no server or empty (server=${!!server} conv=${!!event.conversationId} len=${event.totalLength})`);
-                return;
-            }
-            // Only fetch for the active conversation
-            if (event.conversationId !== this.lastContextConversationId && this.lastContextConversationId) {
-                diag(`LIVE-SKIP: wrong conv (event=${event.conversationId.substring(0, 12)} active=${this.lastContextConversationId?.substring(0, 12)})`);
-                return;
-            }
-            // Race guard: skip if a newer delta already triggered a fetch
-            if (event.totalLength <= lastLiveTotalLength) return;
-            lastLiveTotalLength = event.totalLength;
+            if (!server || !event.conversationId) return;
+            if (event.conversationId !== this.lastContextConversationId) return;
+            // Race guard: only fetch if totalLength is increasing
+            if (event.totalLength <= this._lastLiveTotalLength) return;
+            this._lastLiveTotalLength = event.totalLength;
 
             try {
                 const data = await this.contextWindowService.fetchLastEntry(
@@ -319,67 +395,13 @@ export class QuotaManager {
                     event.totalLength,
                     this.lastContextWindow?.title || 'Conversation',
                 );
-                // Stale check: if a newer delta arrived while we were fetching, discard
-                if (event.totalLength < lastLiveTotalLength) return;
-
+                // Stale check: skip if newer delta arrived while fetching
+                if (event.totalLength < this._lastLiveTotalLength) return;
                 if (data) {
                     this._pushContextUpdate(data, event.conversationId, server);
-                } else {
-                    diag(`LIVE-SKIP: fetchLastEntry returned null for totalLen=${event.totalLength}`);
                 }
-            } catch (err) {
-                diag(`LIVE-ERR: ${(err as Error)?.message}`);
-            }
+            } catch { /* live fetch failed, USS will handle it */ }
         });
-
-        // RUNNING→IDLE = AI response completed → fetch context window IMMEDIATELY.
-        this.agentStream.on('statusChange', (event: { status: string; conversationId: string }) => {
-            if (!event.conversationId) return;
-            if (event.status === 'CASCADE_RUN_STATUS_IDLE' || event.status === 'CASCADE_RUN_STATUS_RUNNING') {
-                diag(`STREAM→${event.status.replace('CASCADE_RUN_STATUS_', '')}: fetching context for ${event.conversationId.substring(0, 12)}`);
-                this.contextWindowService.invalidateCache(event.conversationId);
-                this._executeFetch(event.conversationId);
-            }
-        });
-
-        // Stream can't reconnect (LS restarted with new port) → re-discover and reconnect
-        this.agentStream.on('serverStale', async (event: { cascadeId: string }) => {
-            diag(`STREAM→STALE: LS port changed, re-discovering for ${event.cascadeId?.substring(0, 12)}`);
-            try {
-                const fresh = await this.serverDiscovery.discover(this.getWorkspaceId()).catch(() => null);
-                if (fresh && event.cascadeId) {
-                    this.cachedServer = { info: fresh, ts: Date.now() };
-                    diag(`STREAM→STALE: re-discovered port=${fresh.port}, reconnecting stream`);
-                    this.agentStream.connect(fresh, event.cascadeId);
-                }
-            } catch (err) {
-                diag(`STREAM→STALE: re-discovery failed: ${(err as Error)?.message}`);
-            }
-        });
-
-        // Register manual refresh callback for the detail panel's Refresh button
-        ContextDetailPanel.setRefreshCallback(async () => {
-            if (this.lastContextConversationId) {
-                this.contextWindowService.invalidateCache(this.lastContextConversationId);
-                await this._executeFetch(this.lastContextConversationId);
-            }
-        });
-    }
-
-    /**
-     * Start or switch the agent state stream for a conversation.
-     * Called on conversation switch (USS activeCascade) and on initial load.
-     * Also does an initial polling fetch since stream snapshot has empty metadata.
-     */
-    async connectStream(cascadeId: string): Promise<void> {
-        this.lastContextConversationId = cascadeId;
-        const serverInfo = await this.resolveServer();
-        if (serverInfo) {
-            this.agentStream.connect(serverInfo, cascadeId);
-            diag(`connectStream: started for ${cascadeId.substring(0, 12)} port=${serverInfo.port}`);
-        } else {
-            diag('connectStream: no server available');
-        }
     }
 
     /**
@@ -402,12 +424,17 @@ export class QuotaManager {
         diag(`fetchCW: ${shortId}`);
         try {
             this.contextWindowService.invalidateCache(cascadeId);
-            const serverInfo = await this.resolveServer();
+            // Use Global LS for context window — it has live cascade data.
+            // Falls back to workspace LS if cascade server not found.
+            const cascadeServer = await this.resolveCascadeServer(cascadeId);
+            const serverInfo = cascadeServer ?? await this.resolveServer();
             if (!serverInfo) { diag('fetchCW: no server'); return; }
 
             await this.refreshContextWindow(serverInfo, cascadeId);
-            diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0}`);
+            diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0} (port=${serverInfo.port})`);
         } catch (err) {
+            // Invalidate cascade cache on failure — server may have restarted
+            this.cachedCascadeServer = null;
             diag(`fetchCW FAILED: ${(err as Error)?.message}`);
             log.info(`fetchCW: FAILED ${(err as Error)?.message}`);
         }
@@ -425,6 +452,10 @@ export class QuotaManager {
             this.viewProvider.postContextWindow(data);
         }
         ContextDetailPanel.pushUpdate(data, server);
+        // Live context status bar update
+        if (data.usedTokens > 0 && data.maxTokens > 0) {
+            this.statusBar.updateContext(data.usedTokens, data.maxTokens, data.model);
+        }
         diag(`pushCW: tokens=${data.usedTokens} (${data.model})`);
     }
 
@@ -535,6 +566,9 @@ export class QuotaManager {
                 this.usageStatsService.fetchDeepStats(serverInfo, isSubsequentCall, (backfilledStats) => {
                     this.lastUsageStats = backfilledStats;
                     this.pushCachedData();
+                }, (done, total) => {
+                    // Push scan progress to webview
+                    this.viewProvider?.postMessage({ type: 'scanProgress', done, total });
                 }).then(deep => {
                     if (deep) { this.lastUsageStats = deep; this.pushCachedData(); }
                 }).catch(err => {
@@ -566,12 +600,12 @@ export class QuotaManager {
 
     /** Fetch context window for a specific conversation and push to webview */
     private async refreshContextWindow(serverInfo: ServerInfo, cascadeId: string): Promise<void> {
-        diag(`refreshCW: fetching for ${cascadeId.substring(0,12)}`);
+        diag(`refreshCW: fetching for ${cascadeId.substring(0, 12)}`);
         try {
             const ctx = await this.contextWindowService.getContextForCascade(serverInfo, cascadeId);
 
             if (!ctx) {
-                diag(`refreshCW: ctx is null for ${cascadeId.substring(0,12)}`);
+                diag(`refreshCW: ctx is null for ${cascadeId.substring(0, 12)}`);
                 // If this is the ACTIVE conversation and ctx is null (new/empty conversation),
                 // clear stale data so the widget doesn't show the previous conversation's info.
                 if (cascadeId === this.lastContextConversationId) {
@@ -585,7 +619,7 @@ export class QuotaManager {
                 return;
             }
 
-            diag(`refreshCW: got data — title="${ctx.title?.substring(0,30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0,12)}`);
+            diag(`refreshCW: got data — title="${ctx.title?.substring(0, 30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0, 12)}`);
 
             this._pushContextUpdate(ctx, ctx.conversationId, serverInfo);
         } catch (err) {
@@ -667,6 +701,11 @@ export class QuotaManager {
                 const serverInfo = await this.resolveServer();
                 if (serverInfo) {
                     const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
+                    // ── FORENSIC: log what fetchLocalQuota actually returned ──
+                    const lqEmail = localData?.userStatus?.email || '(none)';
+                    const lqModels = localData?.userStatus?.cascadeModelConfigData?.clientModelConfigs?.length ?? 0;
+                    const lqTier = localData?.userStatus?.userTier?.name || '(none)';
+                    log.info(`FORENSIC postSwitch: email=${lqEmail} models=${lqModels} tier=${lqTier} expected=${account.email}`);
                     if (localData) {
                         this.lastLocalData = localData;
                         this.updateStatusBar(localData);
@@ -681,6 +720,16 @@ export class QuotaManager {
 
             // Background full refresh for tracked quotas, token base, workspace context
             setTimeout(() => this.refresh(), 2000);
+        } else {
+            // Recovery: LS wasn't available during switch, but USS state was set
+            // (token + email pushed at steps 1-4). When LS comes back, it will
+            // pick up the new token from USS. Clear the mute guard so the
+            // USS userStatus listener can naturally trigger a refresh.
+            log.warn(`switchAccount: unconfirmed for ${account.email} — recovery: clearing mute guard`);
+            this.lastActiveEmail = account.email;
+            this._switchMuteUntil = 0;
+            this.cachedServer = null;
+            // USS listener already detected email change → refresh will fire when unmuted
         }
     }
 

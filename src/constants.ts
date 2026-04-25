@@ -48,8 +48,8 @@ export const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
 import * as path from 'path';
 import * as os from 'os';
 
-const isMac     = process.platform === 'darwin';
-const isLinux   = process.platform === 'linux';
+const isMac = process.platform === 'darwin';
+const isLinux = process.platform === 'linux';
 const isWindows = process.platform === 'win32';
 
 /** Path to Antigravity's local state SQLite DB (used for active-account detection) */

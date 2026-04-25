@@ -53,6 +53,8 @@ export class UsageStatsService {
         forceRefresh = false,
         /** Called when background backfill completes with updated stats */
         onBackfillComplete?: (stats: DeepUsageStats) => void,
+        /** Called during scan with (done, total) for progress UI */
+        onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
         // 1. Instant return from memory cache (fastest) — skip if forceRefresh
         if (this.deepStatsCache && !forceRefresh) return this.deepStatsCache;
@@ -84,7 +86,7 @@ export class UsageStatsService {
             return null;
         }
         try {
-            return await this.twoPhaseFullFetch(serverInfo, onBackfillComplete);
+            return await this.twoPhaseFullFetch(serverInfo, onBackfillComplete, onProgress);
         } finally {
             this.processLock.release();
         }
@@ -98,6 +100,7 @@ export class UsageStatsService {
     private async twoPhaseFullFetch(
         serverInfo: ServerInfo,
         onBackfillComplete?: (stats: DeepUsageStats) => void,
+        onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
         try {
             const allIds = this.discoverConversationIds();
@@ -114,7 +117,7 @@ export class UsageStatsService {
             // Phase 1: Fetch HOT conversations + trajectory summaries (titles + stepCounts)
             const [summaries, hotData] = await Promise.all([
                 this.fetchTrajectorySummaries(serverInfo),
-                this.fetchConversationData(serverInfo, hot),
+                this.fetchConversationData(serverInfo, hot, onProgress ? (d) => onProgress(d, allIds.length) : undefined),
             ]);
 
             this.currentTitleMap = summaries.titleMap;
@@ -135,7 +138,8 @@ export class UsageStatsService {
             // Returning partial Phase 1 data caused flip-flop ($3 → $177 → $203).
             // Await full result so the UI transitions once: loading → correct data.
             log.info(`Phase 2: fetching ${cold.length} cold conversations...`);
-            const coldData = await this.fetchConversationData(serverInfo, cold);
+            const hotDone = hot.length;
+            const coldData = await this.fetchConversationData(serverInfo, cold, onProgress ? (d) => onProgress(hotDone + d, allIds.length) : undefined);
             const merged = { ...hotData, ...coldData };
             this.currentPerConvo = merged;
 
@@ -280,6 +284,7 @@ export class UsageStatsService {
     private async fetchConversationData(
         serverInfo: ServerInfo,
         conversationIds: string[],
+        onProgress?: (done: number) => void,
     ): Promise<Record<string, ConvoTokenData>> {
         const result: Record<string, ConvoTokenData> = {};
         const rpc = new RpcDirectClient(serverInfo);
@@ -298,6 +303,7 @@ export class UsageStatsService {
 
         // Sliding-window pool: no batch-boundary idle time.
         // Each slot is reused the moment a conversation completes.
+        let processed = 0;
         await concurrentPool(
             conversationIds,
             async (cid) => {
@@ -335,10 +341,18 @@ export class UsageStatsService {
                 const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
                 const merged = [...metaEntries, ...stepEntries];
 
-                // Full fingerprint dedup across both sources
+                // Fingerprint: token counts + timestamp truncated to SECONDS.
+                //
+                // WHY truncate? Metadata and steps APIs return the SAME token event but
+                // with different microsecond-precision timestamps:
+                //   meta: 2026-04-24T18:46:13.25647Z
+                //   step: 2026-04-24T18:46:13.26777Z
+                // Full-precision TS would fail to dedup these. Truncating to seconds
+                // is safe because token counts (inp:out:cache) provide collision resistance.
                 const seen = new Set<string>();
                 const entries = merged.filter(e => {
-                    const fp = `${e.inp}:${e.out}:${e.cache}:${e.model}:${e.ts}`;
+                    const tsSec = e.ts?.substring(0, 19) || ''; // truncate to YYYY-MM-DDTHH:MM:SS
+                    const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
                     if (seen.has(fp)) return false;
                     seen.add(fp);
                     return true;
@@ -353,9 +367,65 @@ export class UsageStatsService {
                 }
             },
             BATCH_CONCURRENCY,
-            // Heartbeat: keep the process lock alive during long fetches
-            () => this.processLock.heartbeat(),
+            // Heartbeat + progress: keep lock alive and update UI during long fetches
+            (_result, _index) => {
+                this.processLock.heartbeat();
+                processed++;
+                if (onProgress) onProgress(processed);
+            },
         );
+
+        // Retry pass: conversations with known stepCounts but 0 extracted entries.
+        // Large conversations timeout under parallel load; retry serially.
+        if (this.currentStepCounts) {
+            const missed = conversationIds.filter(cid =>
+                !(cid in result) && (this.currentStepCounts?.get(cid) ?? 0) > 0,
+            );
+            if (missed.length > 0) {
+                log.info(`Retry: ${missed.length} conversations had stepCounts but 0 entries — retrying serially`);
+                await concurrentPool(
+                    missed,
+                    async (cid) => {
+                        const [metaResult, stepsResult] = await Promise.allSettled([
+                            (async () => {
+                                const allMeta = await paginateAll(async (offset) => {
+                                    const resp = await callLsJson(serverInfo, EP.METADATA,
+                                        { cascade_id: cid, generator_metadata_offset: offset }, FETCH_TIMEOUT_MS * 2).catch(() => null);
+                                    return resp?.generatorMetadata || resp?.generator_metadata || [];
+                                });
+                                return allMeta.length > 0 ? allMeta : null;
+                            })(),
+                            (async () => {
+                                const allSteps = await paginateAll(async (offset) => {
+                                    const resp = await callLsJson(serverInfo, EP.STEPS,
+                                        { cascade_id: cid, step_offset: offset }, STEPS_TIMEOUT * 2).catch(() => null);
+                                    return resp?.steps || [];
+                                });
+                                return allSteps.length > 0 ? allSteps : null;
+                            })(),
+                        ]);
+                        const meta = metaResult.status === 'fulfilled' ? metaResult.value : null;
+                        const steps = stepsResult.status === 'fulfilled' ? stepsResult.value : null;
+                        const metaEntries = meta ? this.extractEntries({ generatorMetadata: meta }) : [];
+                        const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
+                        const merged = [...metaEntries, ...stepEntries];
+                        const seen = new Set<string>();
+                        const entries = merged.filter(e => {
+                            const tsSec = e.ts?.substring(0, 19) || '';
+                            const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
+                            if (seen.has(fp)) return false;
+                            seen.add(fp);
+                            return true;
+                        });
+                        if (entries.length > 0) {
+                            result[cid] = { entries };
+                            log.info(`RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries recovered`);
+                        }
+                    },
+                    1, // Serial — no contention
+                );
+            }
+        }
 
         return result;
     }
@@ -392,7 +462,7 @@ export class UsageStatsService {
             switch (range) {
                 // Rolling presets (relative to now)
                 case '24h': cutoff = new Date(now.getTime() - 86400000); break;
-                case '7d':  cutoff = new Date(now.getTime() - 7 * 86400000); break;
+                case '7d': cutoff = new Date(now.getTime() - 7 * 86400000); break;
                 case '30d': cutoff = new Date(now.getTime() - 30 * 86400000); break;
 
                 // Calendar presets (midnight-aligned)

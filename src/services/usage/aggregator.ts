@@ -13,6 +13,7 @@ import {
     CascadeBucket, MonthlyBucket, MonthlyModelEntry,
     ProviderBucket, WeekdayBucket,
 } from '../../types';
+import { matchPricing } from '../../shared/usage-components';
 
 // ─── Model Display Name Resolution ───
 
@@ -245,16 +246,23 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
         const md = monthlyMap[key];
         const monthIdx = parseInt(key.slice(5, 7), 10) - 1;
         const total = md.input + md.output + md.cache;
-        const topModels: MonthlyModelEntry[] = Object.entries(md.models)
-            .sort((a, b) => b[1].tokens - a[1].tokens)
+        const allModels = Object.entries(md.models)
+            .sort((a, b) => b[1].tokens - a[1].tokens);
+        // Cost from ALL models (not just top 5)
+        let monthCost = 0;
+        for (const [name, d] of allModels) {
+            const p = matchPricing(name);
+            monthCost += (d.inp * p.input + d.cache * p.cache + d.out * p.output + d.reas * p.reasoning) / 1_000_000;
+        }
+        const topModels: MonthlyModelEntry[] = allModels
             .slice(0, 5)
-            .map(([name, d]) => ({ displayName: name, tokens: d.tokens, cost: 0 }));
+            .map(([name, d]) => ({ displayName: name, tokens: d.tokens, cost: 0, inp: d.inp, out: d.out, cache: d.cache, reas: d.reas }));
         monthly.push({
             key, label: MNAMES[monthIdx],
             input: md.input, output: md.output,
             cache: md.cache, cacheWrite: md.cacheWrite,
             reasoning: md.reasoning, calls: md.calls,
-            total, cost: 0, topModels,
+            total, cost: monthCost, topModels,
         });
     }
 

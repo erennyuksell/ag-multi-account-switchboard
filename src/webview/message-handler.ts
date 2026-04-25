@@ -92,6 +92,14 @@ export function setupMessageHandler(): void {
                 renderContextWindow(msg.data || null);
                 break;
             }
+
+            case 'scanProgress': {
+                const statusEl = document.querySelector('.shimmer-status') as HTMLElement;
+                if (statusEl && msg.total > 0) {
+                    statusEl.textContent = `Scanning conversations… ${msg.done}/${msg.total}`;
+                }
+                break;
+            }
         }
     });
 }

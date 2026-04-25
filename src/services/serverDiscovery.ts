@@ -45,7 +45,7 @@ export class ServerDiscoveryService {
                     try {
                         await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
                         return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
-                    } catch { /* try next port */ }
+                    } catch { /* HTTPS port returns 400 for HTTP → falls through */ }
                 }
             }
         } catch {
@@ -53,6 +53,66 @@ export class ServerDiscoveryService {
         }
 
         return null;
+    }
+
+    /**
+     * Discover the LS instance that handles cascade/chat operations.
+     *
+     * The IDE runs TWO LS processes:
+     *   1. Workspace LS (--workspace_id, --enable_lsp) → code completions, quota
+     *   2. Global LS (no workspace_id) → cascade/chat inference, generator metadata
+     *
+     * Context window data (GetCascadeTrajectory, generator metadata) lives on the
+     * GLOBAL LS. Standard discover() finds the workspace LS, which returns empty
+     * trajectory data for cascades it doesn't manage.
+     *
+     * Strategy: try ALL LS instances, probe each with GetCascadeTrajectory for the
+     * given cascadeId, and return the one that has actual data (numTotalGeneratorMetadata > 0).
+     * Falls back to the workspace LS if no cascade-specific LS is found.
+     */
+    async discoverCascadeServer(cascadeId: string, workspaceServer?: ServerInfo | null): Promise<ServerInfo | null> {
+        try {
+            const candidates = isWindows
+                ? await this.findCandidatesWindows()
+                : await this.findCandidatesUnix();
+
+            // Prioritize Global LS (no wsId) over Workspace LS (has wsId).
+            // The Global LS holds live cascade/chat inference data;
+            // Workspace LS only has a stale snapshot.
+            const globalCandidates = candidates.filter(c => !c.wsId);
+
+            // Track the first reachable Global LS — even if it has no data for this
+            // cascade yet (brand new conversation), it's still the correct target
+            // because inference runs on the Global LS.
+            let firstReachableGlobal: ServerInfo | null = null;
+
+            for (const cand of globalCandidates) {
+                const ports = await this.getListeningPorts(cand.pid);
+                if (ports.length === 0) continue;
+
+                for (const port of ports) {
+                    try {
+                        const info: ServerInfo = { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
+                        const resp = await callLsJson(info, 'GetCascadeTrajectory', { cascade_id: cascadeId }, 3000);
+                        const metaCount = parseInt(resp?.numTotalGeneratorMetadata || '0', 10);
+                        // Remember the first reachable Global LS (even if metaCount=0)
+                        if (!firstReachableGlobal) firstReachableGlobal = info;
+                        if (metaCount > 0) {
+                            return info; // Found live data
+                        }
+                    } catch { /* port doesn't respond */ }
+                }
+            }
+
+            // Brand new cascade: Global LS is reachable but has no metadata yet.
+            // Return it anyway — data will appear once inference starts.
+            if (firstReachableGlobal) return firstReachableGlobal;
+        } catch {
+            // Discovery failed
+        }
+
+        // Fallback: return workspace server only if no Global LS is reachable
+        return workspaceServer ?? null;
     }
 
     /** macOS / Linux: use ps to find candidates */

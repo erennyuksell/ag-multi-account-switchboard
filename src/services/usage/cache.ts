@@ -35,7 +35,8 @@ export class StatsCache {
                 if (!entries || entries.length === 0) continue;
                 const seen = new Set<string>();
                 const clean = entries.filter(e => {
-                    const fp = `${e.inp}:${e.out}:${e.cache}:${e.model}:${e.ts}`;
+                    const tsSec = e.ts?.substring(0, 19) || '';
+                    const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
                     if (seen.has(fp)) return false;
                     seen.add(fp);
                     return true;

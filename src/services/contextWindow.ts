@@ -12,7 +12,7 @@ import * as fs from 'fs';
 const log = createLogger('ContextWindow');
 const diagPath = '/tmp/ag-ctx-diag.log';
 function cwDiag(msg: string) {
-    try { fs.appendFileSync(diagPath, `[${new Date().toISOString()}] CW: ${msg}\n`); } catch {}
+    try { fs.appendFileSync(diagPath, `[${new Date().toISOString()}] CW: ${msg}\n`); } catch { }
 }
 
 /** Known model context limits (tokens) */

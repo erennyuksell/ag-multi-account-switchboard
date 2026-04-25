@@ -7,7 +7,7 @@ import {
 } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
 import { writeToStateDb } from '../utils/dbWriter';
-import { findLSEndpoints, loadLSCert, callLSEndpoint } from '../utils/lsClient';
+import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
 
 const log = createLogger('AccountSwitch');
 
@@ -110,25 +110,41 @@ export class AccountSwitchService {
                 isGcpTos: false,
             });
 
-            // 4. registerGdmUser on all LS → makes LS fetch models from backend
-            //    (handleAuthRefresh is called INSIDE pollRichUserStatus once LS has real data)
-            await delay(500);
-            await this.callRegisterGdmUserOnAllLS();
+            // 4. handleAuthRefresh FIRST — fires IDE's createSession + sessionChangeEmitter.
+            //    This propagates the new token context to LS via USS IPC notification,
+            //    ensuring LS is aware of the new session BEFORE we call registerGdmUser.
+            try {
+                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                log.info('handleAuthRefresh completed — session context propagated to LS');
+            } catch (e: any) {
+                log.warn('handleAuthRefresh failed (non-fatal):', e?.message);
+            }
 
-            // 6. Await email confirmation from LS — resolves when LS reports the new email.
-            //    Also returns JSON GetUserStatus for instant local card rendering.
-            const result = await this.pollRichUserStatus(uss, generation, email);
+            // 5. Readiness Gate — wait for LS to confirm its USS IPC reconnect.
+            //    Returns discovered endpoints so downstream functions don't need
+            //    to re-discover (Gate-Once-Pass-Down pattern).
+            //    handleAuthRefresh can temporarily kill LS — the gate retries
+            //    endpoint discovery inside its loop until LS comes back.
+            const { ready, endpoints } = await this.awaitLSReadiness();
+
+            // 6. registerGdmUser — uses gate-provided endpoints (no independent discovery)
+            await this.callRegisterGdmUser(endpoints);
+
+            // 7. Await email confirmation from LS
+            const result = await this.pollRichUserStatus(uss, generation, email, endpoints);
             if (!result.confirmed) {
                 log.warn('Email confirmation timed out — LS may not have adopted the new email yet');
             }
 
-            // 7. Schedule proactive token renewal before expiry
-            //    This is the critical fix: LS binary caches its token and doesn't
-            //    auto-refresh after our programmatic switch. We must proactively
-            //    refresh and re-register before the token expires.
+            // 8. Schedule proactive token renewal before expiry
             this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
 
-            vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+            // 9. Toast reflects actual state — don't mislead the user
+            if (result.confirmed) {
+                vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+            } else {
+                vscode.window.showWarningMessage(`⚠️ Switching to ${email} — model update may take a moment`);
+            }
             return result;
         } catch (err: any) {
             vscode.window.showErrorMessage(`Failed to switch account: ${err?.message || err}`);
@@ -196,7 +212,7 @@ export class AccountSwitchService {
                 });
             }
 
-            await this.callRegisterGdmUserOnAllLS();
+            await this.callRegisterGdmUser(await findLSEndpoints());
 
             log.info(`✅ Token renewed for ${this.activeEmail}, next in ~${Math.round((refreshed.expires_in || 3600) / 60) - 10}m`);
 
@@ -208,20 +224,79 @@ export class AccountSwitchService {
         }
     }
 
+    // ==================== LS Readiness Gate ====================
+
+    /**
+     * Readiness Gate — confirms LS has a working USS IPC channel.
+     *
+     * After IDE reload, the LS process reconnects to the new extension_server_port
+     * asynchronously. Until this reconnect completes, registerGdmUser calls are
+     * accepted (HTTP 200) but INEFFECTIVE — LS can't fetch the new token from USS,
+     * so it silently uses stale credentials.
+     *
+     * This gate polls GetUserStatus; a non-empty response with an email field
+     * proves the IPC channel is live. This is the Kubernetes Readiness Probe
+     * pattern — don't send traffic until the target is ready.
+     *
+     * Gate-Once-Pass-Down: returns discovered endpoints so downstream functions
+     * (registerGdmUser, pollRichUserStatus) don't need independent discovery.
+     * Endpoint discovery is INSIDE the retry loop — handles LS temporarily
+     * going down after handleAuthRefresh.
+     */
+    private async awaitLSReadiness(maxWaitMs = 8000, intervalMs = 400): Promise<{ ready: boolean; endpoints: LsEndpoint[] }> {
+        const ca = loadLSCert();
+        const start = Date.now();
+
+        while (Date.now() - start < maxWaitMs) {
+            const endpoints = await findLSEndpoints();
+            if (endpoints.length === 0) {
+                log.info(`LS readiness gate: no endpoints yet (${Date.now() - start}ms), retrying...`);
+                await delay(intervalMs);
+                continue;
+            }
+            const ls = endpoints[0];
+
+            try {
+                const body = await callLSEndpoint(
+                    ls,
+                    '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+                    ca,
+                );
+                const userStatus = body ? extractField(body, 1) : null;
+                if (userStatus && userStatus.length > 5) {
+                    const email = extractStringField(userStatus, 7);
+                    if (email) {
+                        log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
+                        return { ready: true, endpoints };
+                    }
+                }
+            } catch (e: any) {
+                log.info(`LS readiness gate: probe failed (${e?.message}), waiting...`);
+            }
+            await delay(intervalMs);
+        }
+        log.warn(`LS readiness gate: TIMEOUT after ${maxWaitMs}ms — proceeding best-effort`);
+        return { ready: false, endpoints: [] };
+    }
+
     // ==================== LS HTTP Communication ====================
 
-    private async callRegisterGdmUserOnAllLS(): Promise<void> {
-        const lsProcesses = await findLSEndpoints();
-        if (lsProcesses.length === 0) {
-            log.warn('No active LS processes found');
+    /**
+     * Call RegisterGdmUser on provided LS endpoints.
+     * Endpoints come from awaitLSReadiness (Gate-Once-Pass-Down) —
+     * no independent discovery needed.
+     */
+    private async callRegisterGdmUser(lsEndpoints: LsEndpoint[]): Promise<void> {
+        if (lsEndpoints.length === 0) {
+            log.warn('registerGdmUser: no LS endpoints provided (gate returned empty)');
             return;
         }
         const ca = loadLSCert();
         const results = await Promise.allSettled(
-            lsProcesses.map(ls => callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/RegisterGdmUser', ca))
+            lsEndpoints.map(ls => callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/RegisterGdmUser', ca))
         );
         results.forEach((r, i) => {
-            const ls = lsProcesses[i];
+            const ls = lsEndpoints[i];
             log.info(`registerGdmUser on port=${ls.port}: ${r.status === 'fulfilled' ? 'OK' : (r as PromiseRejectedResult).reason}`);
         });
     }
@@ -238,14 +313,19 @@ export class AccountSwitchService {
      *   this.switchGeneration will increment and this loop will abort.
      * @param targetEmail - Expected email after switch. Used for early exit.
      */
+    /**
+     * @param initialEndpoints - Endpoints from awaitLSReadiness gate.
+     *   Falls back to independent discovery if these go stale (CSRF rotation).
+     */
     private async pollRichUserStatus(
         uss: USSApi,
         generation: number,
         targetEmail: string,
+        initialEndpoints: LsEndpoint[],
         maxWaitMs = 12000,
         intervalMs = 800,
     ): Promise<{ confirmed: boolean }> {
-        let lsProcesses = await findLSEndpoints();
+        let lsProcesses = initialEndpoints.length > 0 ? initialEndpoints : await findLSEndpoints();
         if (lsProcesses.length === 0) return { confirmed: false };
         const ca = loadLSCert();
         let ls = lsProcesses[0];
@@ -253,6 +333,7 @@ export class AccountSwitchService {
         let emailMatched = false;
         const targetNorm = targetEmail.toLowerCase();
         const start = Date.now();
+        let pollCount = 0;
 
         await delay(300); // LS typically updates email within 100-200ms of registerGdmUser
 
@@ -262,16 +343,21 @@ export class AccountSwitchService {
                 return { confirmed: false };
             }
 
+            pollCount++;
             try {
                 const body = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetUserStatus', ca);
                 const userStatus = body ? extractField(body, 1) : null;
 
+                // ── FORENSIC: log every poll iteration ──
+                const elapsed = Date.now() - start;
+                const lsEmail = userStatus ? extractStringField(userStatus, 7) : '';
+                log.info(`FORENSIC poll#${pollCount} @${elapsed}ms: bodyLen=${body?.length ?? 0} statusLen=${userStatus?.length ?? 0} email=${lsEmail || '(empty)'} target=${targetEmail} matched=${emailMatched}`);
+
                 if (userStatus && userStatus.length > 5) {
                     if (!emailMatched) {
-                        const lsEmail = extractStringField(userStatus, 7);
                         if (lsEmail && lsEmail.toLowerCase() === targetNorm) {
                             emailMatched = true;
-                            log.info(`Email match confirmed: ${lsEmail}`);
+                            log.info(`FORENSIC EMAIL_MATCH @${elapsed}ms: statusLen=${userStatus.length}B — THIS is pushed to USS`);
 
                             // Push first confirmed status to USS immediately
                             await this.pushUserStatusToUSS(uss, userStatus);
@@ -288,6 +374,7 @@ export class AccountSwitchService {
                 }
             } catch (e: any) {
                 const msg = e?.message || '';
+                log.info(`FORENSIC poll#${pollCount} ERROR: ${msg}`);
                 // CSRF token regenerated after registerGdmUser — re-discover endpoints
                 if (msg.includes('401') || msg.includes('CSRF') || msg.includes('unauthenticated')) {
                     log.info('Poll: CSRF invalid, re-discovering LS endpoints');
