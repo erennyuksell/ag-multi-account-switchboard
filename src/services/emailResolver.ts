@@ -48,7 +48,7 @@ export class EmailResolver {
                 try {
                     const parsed = JSON.parse(result);
                     return parsed.email || '';
-                } catch {
+                } catch { /* expected: protobuf extraction may fail for unknown format */
                     log.warn('Invalid JSON in antigravityAuthStatus');
                 }
             }

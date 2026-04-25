@@ -35,14 +35,14 @@ export async function getWindowsProcessLines(grep: string): Promise<string[]> {
     try {
         const { stdout } = await execAsync(ps, { timeout: 8000 });
         return stdout.split('\n').map(l => l.trim()).filter(Boolean);
-    } catch {
+    } catch { /* expected: base64 decode may fail for non-protobuf data */
         try {
             const { stdout } = await execAsync(wmic, { timeout: 5000 });
             // wmic /format:value emits "CommandLine=<value>" lines
             return stdout.split('\n')
                 .map(l => l.replace(/^CommandLine=/i, '').trim())
                 .filter(Boolean);
-        } catch {
+        } catch { /* expected: CSRF extraction heuristic — try next pattern */
             return [];
         }
     }
@@ -84,7 +84,7 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
             const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
             return port && csrf ? [{ port: +port, csrf, wsId }] : [];
         });
-    } catch {
+    } catch { /* expected: JSON parse failure — raw text response */
         return [];
     }
 }

@@ -493,7 +493,7 @@ export class AccountSwitchService {
             if (!uss) return false;
             await uss.OAuthPreferences.getOAuthTokenInfo();
             return true;
-        } catch {
+        } catch { /* expected: process scan may fail during LS restart */
             return false;
         }
     }

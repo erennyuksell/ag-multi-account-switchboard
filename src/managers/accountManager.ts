@@ -125,7 +125,7 @@ export class AccountManager {
         let tokens: StoredTokens;
         try {
             tokens = JSON.parse(json);
-        } catch {
+        } catch { /* expected: token refresh can fail for revoked accounts */
             throw new Error(`Corrupted token data for ${email}`);
         }
 
@@ -202,7 +202,7 @@ export class AccountManager {
         try {
             const tokens: StoredTokens = JSON.parse(json);
             return tokens.refresh_token;
-        } catch {
+        } catch { /* expected: token retrieval may fail for expired accounts */
             log.warn(`Corrupted token data for ${account.email}`);
             return null;
         }

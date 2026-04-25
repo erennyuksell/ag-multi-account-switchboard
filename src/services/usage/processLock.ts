@@ -66,7 +66,7 @@ export class ProcessLock {
             }
             this.held = false;
             log.info('Lock released');
-        } catch {
+        } catch { /* expected: lock file read may fail if deleted */
             this.held = false;
         }
     }
@@ -92,7 +92,7 @@ export class ProcessLock {
             if (!fs.existsSync(LOCK_FILE)) return null;
             const raw = fs.readFileSync(LOCK_FILE, 'utf-8');
             return JSON.parse(raw) as LockData;
-        } catch {
+        } catch { /* expected: lock file delete may fail if already removed */
             return null;
         }
     }
@@ -110,7 +110,7 @@ export class ProcessLock {
         try {
             process.kill(lock.pid, 0); // signal 0 = existence check
             return false;
-        } catch {
+        } catch { /* expected: stale lock cleanup — PID no longer exists */
             return true; // process doesn't exist
         }
     }

@@ -1,3 +1,5 @@
+import type { TokenBaseData, WorkspaceContextData } from './services/tokenBase';
+
 /** Tracked account metadata (stored in globalState) */
 export interface TrackedAccount {
     id: string;
@@ -95,9 +97,24 @@ export interface AccountCard {
 export interface ViewState {
     accountCards: AccountCard[];
     pinnedModels: Record<string, string>;
-    tokenBase: any | null;
-    workspaceContext: any | null;
+    tokenBase: TokenBaseData | null;
+    workspaceContext: WorkspaceContextData | null;
     usageStats: DeepUsageStats | null;
+}
+
+// ==================== USS Topic Types ====================
+
+/** Reverse-engineered USS row shape: { value: base64_protobuf, eTag: bigint } */
+export interface USSRow {
+    value: string;
+    eTag: bigint;
+    $typeName?: string;
+}
+
+/** USS topic subscription (reverse-engineered from IDE internals) */
+export interface USSTopic {
+    getState(): Record<string, USSRow> | null;
+    onDidChange(handler: () => void): { dispose(): void };
 }
 
 // ==================== IDE Internal Types ====================

@@ -47,7 +47,7 @@ export class ServerDiscoveryService {
                     } catch { /* HTTPS port returns 400 for HTTP → falls through */ }
                 }
             }
-        } catch {
+        } catch { /* expected: exec may fail if ps/grep not available */
             // No matching processes found
         }
 
@@ -106,7 +106,7 @@ export class ServerDiscoveryService {
             // Brand new cascade: Global LS is reachable but has no metadata yet.
             // Return it anyway — data will appear once inference starts.
             if (firstReachableGlobal) return firstReachableGlobal;
-        } catch {
+        } catch { /* expected: HTTP probe may fail if port not listening */
             // Discovery failed
         }
 
@@ -182,7 +182,7 @@ export class ServerDiscoveryService {
                 }
             }
             return ports;
-        } catch {
+        } catch { /* expected: discovery may fail under heavy load */
             return [];
         }
     }

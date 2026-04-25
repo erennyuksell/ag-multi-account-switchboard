@@ -51,7 +51,7 @@ export class StatsCache {
             }
 
             return data;
-        } catch {
+        } catch { /* expected: cache file may be corrupted or missing */
             return null;
         }
     }

@@ -109,7 +109,7 @@ export function isDiagEnabled(): boolean {
     try {
         _diagCached = vscode.workspace.getConfiguration('ag-switchboard')
             .get<boolean>('diagnosticMode', false);
-    } catch {
+    } catch { /* expected: env parse failure — use fallback */
         _diagCached = false;
     }
     _diagCacheTs = now;

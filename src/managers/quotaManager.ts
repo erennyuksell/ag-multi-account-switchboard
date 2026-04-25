@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { PollLock } from '../utils/pollLock';
-import { AccountQuota, AccountCard, ModelCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
+import { AccountQuota, AccountCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
 import { AccountManager } from './accountManager';
+import { buildAccountCards } from './accountCardBuilder';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
 import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
@@ -11,10 +12,9 @@ import { LiveStream } from '../services/liveStream';
 import { StatusBarService } from '../services/statusBar';
 import { ContextDetailPanel } from '../providers/contextDetailPanel';
 import { EmailResolver } from '../services/emailResolver';
-import { shortModelName } from '../shared/helpers';
+
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
 import { createLogger } from '../utils/logger';
-import { parseUserTier, parsePlanStatus } from '../utils/lsTypes';
 
 const log = createLogger('QuotaManager');
 
@@ -24,10 +24,10 @@ export class QuotaManager {
     private lastLocalData: LocalQuotaData | null = null;
     private lastTrackedQuotas: AccountQuota[] = [];
     private viewProvider: QuotaViewProvider | null = null;
-    private _refreshInFlight = false;
+    private refreshInFlight = false;
     /** Email hint from a switch that arrived during an in-flight refresh */
-    private _pendingHint: string | undefined;
-    private _pendingManualRefresh = false;
+    private pendingHint: string | undefined;
+    private pendingManualRefresh = false;
     private readonly serverDiscovery = new ServerDiscoveryService();
     private readonly switchService: AccountSwitchService;
     private readonly tokenBaseService = new TokenBaseService();
@@ -43,26 +43,19 @@ export class QuotaManager {
     private lastActiveEmail = '';
 
     private static readonly CTX_CACHE_KEY = 'ag.lastContextWindow';
-    private currentUsageRange: string = '24h';
+    private static readonly CASCADE_ID_LOG_LEN = 12;
+    private static readonly POST_SWITCH_REFRESH_DELAY = 2000;
+    private static readonly DEBOUNCE_MS = 1500;
+    private currentUsageRange = '24h';
 
-    // Server discovery cache — avoids redundant ps+lsof shell spawns
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
-    private static readonly SERVER_CACHE_TTL = 60_000; // 60s
+    private static readonly SERVER_CACHE_TTL = 60_000;
 
-    // Cascade (Global) LS cache — separate from workspace LS.
-    // Context window + LiveStream must use the Global LS for live data.
-    // Global LS port is stable across IDE reloads; 10 min TTL avoids redundant ps+lsof.
+    // Global LS port is stable across IDE reloads; separate from workspace LS cache.
     private cachedCascadeServer: { info: ServerInfo | null; ts: number } | null = null;
-    private static readonly CASCADE_SERVER_TTL = 600_000; // 10 min
-
-    /**
-     * Lifecycle-scoped switch guard — suppresses refresh() for the EXACT duration
-     * of a switch operation. Replaces the old time-based _switchMuteUntil (5s hardcoded)
-     * which could expire before slow switches completed (readiness gate 8s + poll 12s).
-     * Uses AbortController so double-click aborts the previous switch cleanly.
-     */
-    private _switchController: AbortController | null = null;
-
+    private static readonly CASCADE_SERVER_TTL = 600_000;
+    /** Lifecycle-scoped switch guard. AbortController so double-click aborts previous switch. */
+    private switchController: AbortController | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -70,33 +63,23 @@ export class QuotaManager {
     ) {
         this.switchService = new AccountSwitchService(context, accountManager.getAuthService());
         this.statusBar = new StatusBarService(context);
-        // Ensure token renewal timer is cleaned up on extension deactivation
         context.subscriptions.push({ dispose: () => this.switchService.dispose() });
         context.subscriptions.push({ dispose: () => this.liveStream.destroy() });
-        context.subscriptions.push({ dispose: () => this._switchController?.abort() });
+        context.subscriptions.push({ dispose: () => this.switchController?.abort() });
 
-        // Live stream → real-time context offset during AI response
-        this._initLiveStreamListener();
+        this.initLiveStreamListener();
 
-        // Register manual refresh callback for the detail panel's Refresh button
         ContextDetailPanel.setRefreshCallback(async () => {
             if (this.lastContextConversationId) {
                 this.contextWindowService.invalidateCache(this.lastContextConversationId);
-                await this._executeFetch(this.lastContextConversationId);
+                await this.executeFetch(this.lastContextConversationId);
             }
         });
 
-        // External account switch detection handled by USS userStatus topic listener
-        // in extension.ts (startUserStatusListener). No fs.watch needed.
-
-        // Context window: start fresh — USS determines when to fetch.
         this.lastContextWindow = null;
         this.lastContextConversationId = null;
         this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
-
-        // Initial fetch; subsequent refreshes driven by webview interval picker
         this.refresh();
-
     }
 
     getSwitchService(): AccountSwitchService {
@@ -114,121 +97,21 @@ export class QuotaManager {
 
     private buildViewState(): ViewState {
         return {
-            accountCards: this.buildAccountCards(),
+            accountCards: this.getAccountCards(),
             pinnedModels: this.getPinnedModels(),
             tokenBase: this.lastTokenBase,
             workspaceContext: this.lastWorkspaceContext,
             usageStats: this.getRangeFilteredStats(),
         };
     }
-
-    /**
-     * SSOT: Build pre-processed, sorted, deduped account cards.
-     * All data logic lives HERE — renderer does zero processing.
-     */
-    private buildAccountCards(): AccountCard[] {
-        const ae = (this.lastActiveEmail || '').toLowerCase();
-        const cards: AccountCard[] = [];
-        const selectedModels = this.getSelectedModels();
-
-        // 1. Local LS card
-        const status = this.lastLocalData?.userStatus;
-        const localEmail = (status?.email || '').toLowerCase();
-
-        if (status) {
-            const rawModels = (status.cascadeModelConfigData?.clientModelConfigs || [])
-                .filter((m: any) => m.quotaInfo)
-                .sort((a: any, b: any) => (a.label || '').localeCompare(b.label || ''));
-
-            const models: ModelCard[] = rawModels.map((m: any) => ({
-                id: m.modelOrAlias?.model || m.label,
-                label: m.label || shortModelName(m.modelOrAlias?.model),
-                pct: m.quotaInfo.remainingFraction !== undefined
-                    ? Math.max(0, Math.min(100, Math.round(m.quotaInfo.remainingFraction * 100)))
-                    : 0,
-                resetTime: m.quotaInfo.resetTime || '',
-                isLocal: true,
-            }));
-
-            const bn = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
-            const ut = parseUserTier(status.userTier);
-            const ps = parsePlanStatus(status.planStatus);
-            const aiCreds = ut.availableCredits.find(c => c.creditType === 'GOOGLE_ONE_AI');
-
-            // Detect identity transition: intent email ≠ LS-reported email
-            // This happens during the switch lifecycle when LS hasn't adopted the new account yet
-            const isTransitioning = !!(
-                ae && localEmail &&
-                ae !== localEmail &&
-                this._switchController  // Only during active switch lifecycle
-            );
-
-            cards.push({
-                email: status.email || 'active-local',
-                isActive: !ae || ae === localEmail,
-                isTransitioning,
-                pendingEmail: isTransitioning ? this.lastActiveEmail : undefined,
-                models,
-                bottleneck: bn,
-                tierName: ut.name,
-                tierId: ut.id,
-                aiCredits: aiCreds ? parseInt(aiCreds.creditAmount, 10) : null,
-                promptCredits: ps.availablePromptCredits,
-                promptCreditsMax: ps.planInfo.monthlyPromptCredits,
-                flowCredits: ps.availableFlowCredits,
-                flowCreditsMax: ps.planInfo.monthlyFlowCredits,
-                resetTime: bn?.resetTime || models[0]?.resetTime || '',
-                isError: false,
-                selectedModels,
-                isLocal: true,
-            });
-        }
-
-        // 2. Tracked accounts
-        // Dedup: ALWAYS skip tracked if its email matches the local card.
-        // Local card has richer data (labels, credits, checkboxes) regardless of active state.
-        // During switch A→B: local=A(stale), tracked A must still be deduped to avoid duplicate.
-        const dedupEmail = localEmail || '';
-
-        for (const tq of this.lastTrackedQuotas) {
-            const taEmail = (tq.account.email || '').toLowerCase();
-            if (dedupEmail && taEmail === dedupEmail) continue;
-
-            const models: ModelCard[] = (tq.models || []).map(m => ({
-                id: m.name,
-                label: shortModelName(m.name),
-                pct: m.percentage || 0,
-                resetTime: m.resetTimeRaw || m.resetTime || '',
-                isLocal: false,
-            }));
-
-            const bn = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
-
-            cards.push({
-                email: tq.account.email || 'Unknown',
-                name: tq.account.name,
-                isActive: !!(ae && ae === taEmail),
-                trackingId: tq.account.id,
-                models,
-                bottleneck: bn,
-                tierName: tq.tierName || tq.tier || null,
-                resetTime: bn?.resetTime || '',
-                isError: tq.isError || tq.isForbidden,
-                errorMessage: tq.isForbidden ? 'Access forbidden' : (tq.errorMessage || ''),
-                selectedModels: [],
-                isLocal: false,
-                aiCredits: null,
-                promptCredits: null,
-                promptCreditsMax: null,
-                flowCredits: null,
-                flowCreditsMax: null,
-            });
-        }
-
-        // 3. Sort: active first (stable)
-        cards.sort((a, b) => (a.isActive ? 0 : 1) - (b.isActive ? 0 : 1));
-
-        return cards;
+    private getAccountCards(): AccountCard[] {
+        return buildAccountCards(
+            this.lastLocalData,
+            this.lastTrackedQuotas,
+            this.lastActiveEmail,
+            !!this.switchController,
+            this.getSelectedModels(),
+        );
     }
 
     getSelectedModels(): string[] {
@@ -344,228 +227,155 @@ export class QuotaManager {
         return null;
     }
 
-    // ── Debounced Context Fetch (USS-driven) ──
+    // ── Debounced Context Fetch ──────────────────────────────────
 
-    private _ctxDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    private ctxDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-    /**
-     * Debounced context window fetch — called by USS trajectorySummaries.
-     * Coalesces rapid-fire events (USS often fires 2x) into a single fetch.
-     */
+    /** Coalesces rapid-fire USS events into a single fetch. */
     debouncedContextFetch(cascadeId: string): void {
-        if (this._ctxDebounceTimer) clearTimeout(this._ctxDebounceTimer);
-        this._ctxDebounceTimer = setTimeout(() => {
-            this._ctxDebounceTimer = null;
-            this._executeFetch(cascadeId);
-        }, 1500);
+        if (this.ctxDebounceTimer) clearTimeout(this.ctxDebounceTimer);
+        this.ctxDebounceTimer = setTimeout(() => {
+            this.ctxDebounceTimer = null;
+            this.executeFetch(cascadeId);
+        }, QuotaManager.DEBOUNCE_MS);
     }
 
-    /**
-     * Set the active conversation for context tracking.
-     * Called on conversation switch (USS activeCascade).
-     * Also starts live stream for real-time offset hints.
-     */
+    /** Set active conversation + start live stream. Called on USS activeCascade switch. */
     setActiveConversation(cascadeId: string): void {
         this.lastContextConversationId = cascadeId;
-        // Global LS is a singleton — its port/CSRF survives conversation switches.
-        // Do NOT invalidate cachedCascadeServer here; only invalidate on actual
-        // connection failure (lazy invalidation in _executeFetch catch block).
-        // Forcing re-discovery on every switch caused intermittent failures
-        // (ps/lsof timing races) leading to the stale-context oscillation bug.
-        // Reset live stream totalLength counter — new conversation starts from 0.
-        // Without this, events from the new conversation are blocked by the
-        // previous conversation's higher totalLength (guard at line ~399).
-        this._lastLiveTotalLength = 0;
-        log.diag(`setActiveConversation: ${cascadeId.substring(0, 12)}`);
-        // Start live stream on Global LS — it has live cascade data.
-        this.resolveCascadeServer(cascadeId).then(cascadeServer => {
-            const server = cascadeServer;
+        // Do NOT invalidate cachedCascadeServer — Global LS is a singleton.
+        // Forcing re-discovery on every switch caused ps/lsof timing races.
+        this.lastLiveTotalLength = 0;
+        log.diag(`setActiveConversation: ${cascadeId.substring(0, QuotaManager.CASCADE_ID_LOG_LEN)}`);
+        this.resolveCascadeServer(cascadeId).then(server => {
             if (server) {
-                log.diag(`setActiveConversation: connecting liveStream port=${server.port}`);
                 this.liveStream.connect(server, cascadeId);
             } else {
-                // Fallback to workspace LS
                 this.resolveServer().then(ws => {
-                    if (ws) {
-                        log.diag(`setActiveConversation: liveStream fallback to wsLS port=${ws.port}`);
-                        this.liveStream.connect(ws, cascadeId);
-                    } else {
-                        log.diag('setActiveConversation: no server for liveStream');
-                    }
-                }).catch((e: unknown) => log.warn('LiveStream fallback connect failed:', (e as Error)?.message));
+                    if (ws) this.liveStream.connect(ws, cascadeId);
+                }).catch((e: unknown) => log.warn('LiveStream fallback failed:', (e as Error)?.message));
             }
-        }).catch(err => log.diag(`setActiveConversation: resolveCascadeServer failed: ${(err as Error)?.message}`));
+        }).catch(err => log.diag(`setActiveConversation: ${(err as Error)?.message}`));
     }
 
-    // ── Live Stream (real-time totalLength for context offset) ──
+    // ── Live Stream ──────────────────────────────────────────────
 
     private readonly liveStream = new LiveStream();
-    private _lastLiveTotalLength = 0;
+    private lastLiveTotalLength = 0;
 
-    private _initLiveStreamListener(): void {
+    private initLiveStreamListener(): void {
         this.liveStream.on('totalLength', async (event: { totalLength: number; conversationId: string }) => {
             const server = this.cachedServer?.info;
             if (!server || !event.conversationId) return;
             if (event.conversationId !== this.lastContextConversationId) return;
-            // Race guard: only fetch if totalLength is increasing
-            if (event.totalLength <= this._lastLiveTotalLength) return;
-            this._lastLiveTotalLength = event.totalLength;
+            if (event.totalLength <= this.lastLiveTotalLength) return;
+            this.lastLiveTotalLength = event.totalLength;
 
             try {
                 const data = await this.contextWindowService.fetchLastEntry(
-                    server,
-                    event.conversationId,
-                    event.totalLength,
+                    server, event.conversationId, event.totalLength,
                     this.lastContextWindow?.title || 'Conversation',
                 );
-                // Stale check: skip if newer delta arrived while fetching
-                if (event.totalLength < this._lastLiveTotalLength) return;
-                if (data) {
-                    this._pushContextUpdate(data, event.conversationId, server);
-                }
-            } catch (e: unknown) { log.info(`[EXPECTED] liveStream delta fetch: ${(e as Error)?.message}`); }
+                if (event.totalLength < this.lastLiveTotalLength) return; // newer delta arrived
+                if (data) this.pushContextUpdate(data, event.conversationId, server);
+            } catch (e: unknown) { log.diag(`liveStream delta: ${(e as Error)?.message}`); }
         });
     }
 
-    /**
-     * One-shot context window fetch — used on conversation switch and stream triggers.
-     * No debounce, no retry, no polling. STREAM→IDLE handles subsequent updates.
-     */
+    /** One-shot context window fetch — used on conversation switch. */
     async fetchContextWindowOnce(cascadeId: string) {
-        return this._executeFetch(cascadeId, true);
+        return this.executeFetch(cascadeId, true);
     }
 
-    /**
-     * Internal: single fetch path for all context window requests (DRY).
-     * @param setActive - if true, sets this cascade as the active conversation
-     */
-    private async _executeFetch(cascadeId: string, setActive = false) {
-        if (setActive) {
-            this.lastContextConversationId = cascadeId;
-        }
-        const shortId = cascadeId.substring(0, 12);
-        log.diag(`fetchCW: ${shortId}`);
+    private async executeFetch(cascadeId: string, setActive = false) {
+        if (setActive) this.lastContextConversationId = cascadeId;
+        const shortId = cascadeId.substring(0, QuotaManager.CASCADE_ID_LOG_LEN);
         try {
             this.contextWindowService.invalidateCache(cascadeId);
-            // Use Global LS for context window — it has live cascade data.
-            // Do NOT fall back to workspace LS: it only has a stale snapshot
-            // that can be hours old, causing the "5-hour-old context" oscillation bug.
+            // Global LS only — workspace LS has stale snapshots (hours old)
             const cascadeServer = await this.resolveCascadeServer(cascadeId);
             if (!cascadeServer) {
-                log.info(`fetchCW: cascade server unavailable for ${shortId} — skipping (no WS LS fallback)`);
+                log.info(`fetchCW: unavailable for ${shortId}`);
                 return;
             }
-            const serverInfo = cascadeServer;
-
-            await this.refreshContextWindow(serverInfo, cascadeId);
-            log.diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0} (port=${serverInfo.port})`);
+            await this.refreshContextWindow(cascadeServer, cascadeId);
         } catch (err) {
-            // Invalidate cascade cache on failure — server may have restarted
             this.cachedCascadeServer = null;
-            log.diag(`fetchCW FAILED: ${(err as Error)?.message}`);
             log.info(`fetchCW: FAILED ${(err as Error)?.message}`);
         }
     }
 
-    /** DRY: push context window data to sidebar + detail panel + globalState */
-    private _pushContextUpdate(data: ContextWindowData, cascadeId: string, server: ServerInfo | null): void {
-        // Staleness guard: never overwrite newer data with older data.
-        // This prevents workspace LS stale snapshots from clobbering fresh global LS data.
+    /** Push context window data to all surfaces. Rejects stale data. */
+    private pushContextUpdate(data: ContextWindowData, cascadeId: string, server: ServerInfo | null): void {
+        // Never overwrite newer data with older — prevents stale LS snapshot clobbering
         if (this.lastContextWindow && data.lastUpdated && this.lastContextWindow.lastUpdated) {
             if (data.lastUpdated < this.lastContextWindow.lastUpdated && cascadeId === this.lastContextConversationId) {
-                log.info(`pushCW: REJECTED stale data (incoming=${data.lastUpdated} < current=${this.lastContextWindow.lastUpdated})`);
                 return;
             }
         }
         if (cascadeId !== this.lastContextConversationId) {
-            log.info(`Context window: conversation → ${cascadeId.substring(0, 12)}`);
             this.lastContextConversationId = cascadeId;
         }
         this.lastContextWindow = data;
         this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, data);
-        if (this.viewProvider) {
-            this.viewProvider.postContextWindow(data);
-        }
+        if (this.viewProvider) this.viewProvider.postContextWindow(data);
         ContextDetailPanel.pushUpdate(data, server);
-        // Live context status bar update
         if (data.usedTokens > 0 && data.maxTokens > 0) {
             this.statusBar.updateContext(data.usedTokens, data.maxTokens, data.model);
         }
-        log.diag(`pushCW: tokens=${data.usedTokens} (${data.model})`);
     }
 
     async refresh(activeEmailHint?: string) {
-        // During programmatic switch, suppress ALL refresh triggers (USS listener, DB watcher)
-        // to prevent premature renders. Lifecycle-scoped: active for the EXACT duration of
-        // switchAccount(), guaranteed cleanup via finally block.
-        if (this._switchController && !this._switchController.signal.aborted) {
+        // Suppress refresh during active switch lifecycle to prevent premature renders
+        if (this.switchController && !this.switchController.signal.aborted) {
             log.info('refresh: SUPPRESSED (switch lifecycle active)');
             return;
         }
 
-        if (this._refreshInFlight) {
+        if (this.refreshInFlight) {
             if (activeEmailHint) {
-                this._pendingHint = activeEmailHint;
-                log.info(`refresh: QUEUED (hint=${activeEmailHint})`);
+                this.pendingHint = activeEmailHint;
             } else {
-                // Queue the manual refresh so it runs after the current one
-                this._pendingManualRefresh = true;
-                log.info('refresh: QUEUED (manual, will run after current finishes)');
+                this.pendingManualRefresh = true;
             }
+            log.diag(`refresh: QUEUED (hint=${activeEmailHint || 'manual'})`);
             return;
         }
 
-        // Multi-instance safety: prevent duplicate refresh across VS Code windows
         const lock = new PollLock();
         if (!await lock.tryAcquire()) {
-            log.info('refresh: SKIPPED (another instance holds the lock)');
+            log.diag('refresh: SKIPPED (lock held by another instance)');
             return;
         }
 
-        this._refreshInFlight = true;
-        log.info('refresh: STARTED');
+        this.refreshInFlight = true;
+        const startTime = Date.now();
         try {
-            // Only show loading spinner when there is truly no data to display.
-            // If stale data exists, keep it visible while refreshing in the background.
             const hasData = !!(this.lastLocalData || this.lastTrackedQuotas.length > 0);
             if (this.viewProvider && !hasData) this.viewProvider.setLoading();
 
-            // Discover workspace LS once — share with both quota fetch and token budget
-            const t0 = Date.now();
             const serverInfo = await this.resolveServer();
-            const tDiscover = Date.now() - t0;
 
-            // Parallel: local server + all tracked accounts + active email + workspace context
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
             const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-            const t1 = Date.now();
             const [localResult, trackedResult, tokenBase, workspaceContext] = await Promise.all([
                 serverInfo ? this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null) : Promise.resolve(null),
                 this.accountManager.refreshAllQuotas().catch(() => []),
                 this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
                 serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
-            const tFetch = Date.now() - t1;
 
-            // Deep usage stats — pre-load from disk cache SYNCHRONOUSLY (~20ms for 4MB)
-            // so it's included in the very first webview render. No shimmer needed.
+            // Pre-load disk cache synchronously so first render includes usage stats
             if (!this.lastUsageStats) {
-                log.info('refresh: lastUsageStats is null, loading disk cache...');
                 const cachedStats = this.usageStatsService.loadFromDiskCacheSync();
-                log.info(`refresh: loadFromDiskCacheSync returned ${cachedStats ? 'data (totalCalls=' + cachedStats.totalCalls + ')' : 'null'}`);
                 if (cachedStats) this.lastUsageStats = cachedStats;
-            } else {
-                log.info(`refresh: lastUsageStats already present (totalCalls=${this.lastUsageStats.totalCalls})`);
             }
 
-            const t2 = Date.now();
             const activeEmail = activeEmailHint ?? await this.getActiveEmail();
             this.lastActiveEmail = activeEmail;
-            const tEmail = Date.now() - t2;
 
-            log.info(`refresh: TIMING discover=${tDiscover}ms fetch=${tFetch}ms email=${tEmail}ms total=${Date.now() - t0}ms`);
+            log.info(`refresh: ${Date.now() - startTime}ms local=${!!localResult} tracked=${trackedResult.length}`);
 
-            // Local (active IDE account)
             if (localResult) {
                 this.lastLocalData = localResult;
                 this.updateStatusBar(localResult);
@@ -574,60 +384,47 @@ export class QuotaManager {
                 this.statusBar.setError('$(error) Antigravity: Server Not Found', 'Could not connect to local Antigravity server');
             }
 
-            // Tracked accounts
             this.lastTrackedQuotas = trackedResult;
             this.lastTokenBase = tokenBase;
             this.lastWorkspaceContext = workspaceContext;
 
-            // Push to webview IMMEDIATELY — loading state ends here
-            // Deep stats are fetched in background AFTER render (Tier 1 optimization)
-            log.info(`refresh: localResult=${!!localResult}, trackedCount=${trackedResult.length}, hasProvider=${!!this.viewProvider}`);
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
                     this.viewProvider.updateData(this.buildViewState());
-                    log.info('refresh: updateData sent');
-
-                    // Context window is USS-only — no polling fallback needed
                 } else {
                     this.viewProvider.setError('Antigravity IDE server not found and no tracked accounts.');
-                    log.info('refresh: setError sent (no data)');
                 }
             }
 
-            // Deep usage stats — fire-and-forget AFTER render (non-blocking)
-            // Cold conversations backfill silently in background via callback.
+            // Deep usage stats — fire-and-forget after initial render
             if (serverInfo) {
                 const isSubsequentCall = !!this.lastUsageStats;
                 this.usageStatsService.fetchDeepStats(serverInfo, isSubsequentCall, (backfilledStats) => {
                     this.lastUsageStats = backfilledStats;
                     this.pushCachedData();
                 }, (done, total) => {
-                    // Push scan progress to webview
                     this.viewProvider?.postMessage({ type: 'scanProgress', done, total });
                 }).then(deep => {
                     if (deep) { this.lastUsageStats = deep; this.pushCachedData(); }
                 }).catch(err => {
-                    log.info(`fetchDeepStats FAILED: ${err?.message}`);
+                    log.diag(`fetchDeepStats: ${err?.message}`);
                 });
             }
         } catch (error: any) {
             const msg = error.message || 'Unknown error';
-            log.info(`refresh: CAUGHT ERROR: ${msg}`);
+            log.info(`refresh: ERROR: ${msg}`);
             if (this.viewProvider) this.viewProvider.setError(msg);
             this.statusBar.setError('$(error) Antigravity: Error', msg);
         } finally {
-            this._refreshInFlight = false;
+            this.refreshInFlight = false;
             await lock.release();
-            log.info('refresh: FINISHED');
-            const hint = this._pendingHint;
-            const manualPending = this._pendingManualRefresh;
-            this._pendingHint = undefined;
-            this._pendingManualRefresh = false;
+            const hint = this.pendingHint;
+            const manualPending = this.pendingManualRefresh;
+            this.pendingHint = undefined;
+            this.pendingManualRefresh = false;
             if (hint) {
-                log.info(`refresh: DRAINING QUEUED (hint=${hint})`);
                 this.refresh(hint);
             } else if (manualPending) {
-                log.info('refresh: DRAINING QUEUED (manual)');
                 this.refresh();
             }
         }
@@ -635,12 +432,12 @@ export class QuotaManager {
 
     /** Fetch context window for a specific conversation and push to webview */
     private async refreshContextWindow(serverInfo: ServerInfo, cascadeId: string): Promise<void> {
-        log.diag(`refreshCW: fetching for ${cascadeId.substring(0, 12)}`);
+        log.diag(`refreshCW: fetching for ${cascadeId.substring(0, QuotaManager.CASCADE_ID_LOG_LEN)}`);
         try {
             const ctx = await this.contextWindowService.getContextForCascade(serverInfo, cascadeId);
 
             if (!ctx) {
-                log.diag(`refreshCW: ctx is null for ${cascadeId.substring(0, 12)}`);
+                log.diag(`refreshCW: ctx is null for ${cascadeId.substring(0, QuotaManager.CASCADE_ID_LOG_LEN)}`);
                 // If this is the ACTIVE conversation and ctx is null (new/empty conversation),
                 // clear stale data so the widget doesn't show the previous conversation's info.
                 if (cascadeId === this.lastContextConversationId) {
@@ -654,9 +451,9 @@ export class QuotaManager {
                 return;
             }
 
-            log.diag(`refreshCW: got data — title="${ctx.title?.substring(0, 30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0, 12)}`);
+            log.diag(`refreshCW: got data — title="${ctx.title?.substring(0, 30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0, QuotaManager.CASCADE_ID_LOG_LEN)}`);
 
-            this._pushContextUpdate(ctx, ctx.conversationId, serverInfo);
+            this.pushContextUpdate(ctx, ctx.conversationId, serverInfo);
         } catch (err) {
             log.diag(`refreshCW FAILED: ${(err as Error)?.message}`);
             log.info(`refreshContextWindow FAILED: ${(err as Error)?.message}`);
@@ -665,8 +462,8 @@ export class QuotaManager {
 
     /** Refresh ONLY token budget + workspace context — no account quota fetching */
     async refreshTokenOnly() {
-        if (this._refreshInFlight) return;
-        this._refreshInFlight = true;
+        if (this.refreshInFlight) return;
+        this.refreshInFlight = true;
         try {
             if (this.viewProvider) this.viewProvider.setLoading();
 
@@ -690,7 +487,7 @@ export class QuotaManager {
         } catch (error: any) {
             if (this.viewProvider) this.viewProvider.setError(error.message || 'Token refresh failed');
         } finally {
-            this._refreshInFlight = false;
+            this.refreshInFlight = false;
         }
     }
 
@@ -701,9 +498,7 @@ export class QuotaManager {
             vscode.window.showErrorMessage('Account not found');
             return;
         }
-
-        // Force-refresh to get a token with max TTL → IDE's auto-refresh
-        // has the full ~60 min window to trigger before expiry
+        // Force-refresh for max TTL token
         const tokens = await this.accountManager.getValidTokensForAccount(account.email, true);
         if (!tokens) {
             vscode.window.showErrorMessage(`No valid tokens for ${account.email}. Please re-add the account.`);
@@ -711,39 +506,28 @@ export class QuotaManager {
         }
 
         const confirm = await vscode.window.showWarningMessage(
-            `Switch IDE account to ${account.email}?`,
-            { modal: true },
-            'Switch'
+            `Switch IDE account to ${account.email}?`, { modal: true }, 'Switch',
         );
         if (confirm !== 'Switch') return;
 
-        // Lifecycle Guard: abort any previous in-flight switch (double-click protection)
-        // and create a new scope for this switch. Refresh is suppressed for the EXACT
-        // duration of this try/finally block — no hardcoded timeout that can expire early.
-        this._switchController?.abort();
-        this._switchController = new AbortController();
+        // Abort previous switch (double-click protection)
+        this.switchController?.abort();
+        this.switchController = new AbortController();
 
         try {
             const result = await this.switchService.switchAccount({
-                email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
+                email: account.email, name: account.name, accessToken: tokens.access_token,
+                refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
             });
             if (result.confirmed) {
-                // LS confirmed new email. Fetch local data via CACHED server (0ms discovery + ~200ms HTTP).
                 this.lastActiveEmail = account.email;
-                log.info(`switchAccount: confirmed ${account.email}, fetching local data`);
+                log.info(`switchAccount: confirmed ${account.email}`);
 
                 try {
-                    // Invalidate server cache — LS may have changed ports after switch,
-                    // and cached server might point to an LS instance still serving old data.
                     this.cachedServer = null;
                     const serverInfo = await this.resolveServer();
                     if (serverInfo) {
                         const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
-                        // ── FORENSIC: log what fetchLocalQuota actually returned ──
-                        const lqEmail = localData?.userStatus?.email || '(none)';
-                        const lqModels = localData?.userStatus?.cascadeModelConfigData?.clientModelConfigs?.length ?? 0;
-                        const lqTier = localData?.userStatus?.userTier?.name || '(none)';
-                        log.info(`FORENSIC postSwitch: email=${lqEmail} models=${lqModels} tier=${lqTier} expected=${account.email}`);
                         if (localData) {
                             this.lastLocalData = localData;
                             this.updateStatusBar(localData);
@@ -753,23 +537,16 @@ export class QuotaManager {
                     log.warn('Post-switch local fetch failed:', e?.message);
                 }
 
-                // Instant render — local card with correct active email + tracked cards from cache
                 this.pushCachedData();
-
-                // Background full refresh for tracked quotas, token base, workspace context
-                setTimeout(() => this.refresh(), 2000);
+                setTimeout(() => this.refresh(), QuotaManager.POST_SWITCH_REFRESH_DELAY);
             } else {
-                // Recovery: LS wasn't available during switch, but USS state was set
-                // (token + email pushed at steps 1-4). When LS comes back, it will
-                // pick up the new token from USS. Guard clears in finally → USS listener
-                // can naturally trigger a refresh.
-                log.warn(`switchAccount: unconfirmed for ${account.email} — recovery path`);
+                // USS state was set but LS unavailable — will recover on next LS restart
+                log.warn(`switchAccount: unconfirmed for ${account.email}`);
                 this.lastActiveEmail = account.email;
                 this.cachedServer = null;
             }
         } finally {
-            // GUARANTEED cleanup — refresh unblocked regardless of success/failure/exception
-            this._switchController = null;
+            this.switchController = null;
         }
     }
 
@@ -784,14 +561,12 @@ export class QuotaManager {
         vscode.window.showInformationMessage('🔑 Token copied to clipboard');
     }
 
-    // --- Private ---
+    // ── Private Helpers ─────────────────────────────────────────
 
-    /** Build workspace_id matching the language server's --workspace_id arg format */
+    /** Workspace ID matching LS --workspace_id format: slashes+hyphens → underscores */
     private getWorkspaceId(): string | undefined {
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) return undefined;
-        // Format must match LS's --workspace_id: slashes AND hyphens → underscores
-        // e.g. /Users/eren/denetmenapp-web → file_Users_eren_denetmenapp_web
         const uri = folders[0].uri;
         if (uri.scheme === 'file') {
             return 'file_' + uri.path.replace(/\//g, '_').replace(/^_/, '').replace(/-/g, '_');
