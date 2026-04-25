@@ -85,6 +85,10 @@ export interface AccountCard {
     errorMessage?: string;
     selectedModels: string[];   // status bar toggles (only relevant for local)
     isLocal: boolean;
+    /** True during account switch — LS hasn't adopted new identity yet */
+    isTransitioning?: boolean;
+    /** Target email during transition (the email being switched TO) */
+    pendingEmail?: string;
 }
 
 /** Unified state object passed to viewProvider.updateData() */

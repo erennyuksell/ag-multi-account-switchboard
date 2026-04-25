@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { ClientModelConfig, LocalQuotaData } from '../types';
+import { fmtBig, formatDurationMs } from '../shared/helpers';
 
 export class StatusBarService {
     private readonly statusBarItem: vscode.StatusBarItem;
@@ -113,7 +114,7 @@ export class StatusBarService {
             const timeStr = isValid
                 ? resetDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
                 : 'Unknown';
-            const timeLeft = isValid ? formatTimeLeft(resetDate.getTime() - Date.now()) : '';
+            const timeLeft = isValid ? `(${formatDurationMs(resetDate.getTime() - Date.now())} left)` : '';
 
             md.appendMarkdown(`${quotaIcon(pct)} **${m.label}** (${pct === null ? 'N/A' : pct.toFixed(0) + '%'})${sel}\n\n`);
             md.appendMarkdown(`*Resets:* ${timeStr} ${timeLeft}\n\n---\n\n`);
@@ -124,8 +125,8 @@ export class StatusBarService {
             const ctxPct = Math.min((this.ctxUsed / this.ctxMax) * 100, 100);
             const shortModel = this.ctxModel.split('/').pop() || this.ctxModel;
             md.appendMarkdown(`**Context Window** — ${shortModel}\n\n`);
-            md.appendMarkdown(`**${ctxPct.toFixed(1)}%** used · ${formatTokens(this.ctxUsed)} / ${formatTokens(this.ctxMax)} tokens\n\n`);
-            md.appendMarkdown(`**Free:** ${formatTokens(this.ctxMax - this.ctxUsed)} tokens\n\n`);
+            md.appendMarkdown(`**${ctxPct.toFixed(1)}%** used · ${fmtBig(this.ctxUsed)} / ${fmtBig(this.ctxMax)} tokens\n\n`);
+            md.appendMarkdown(`**Free:** ${fmtBig(this.ctxMax - this.ctxUsed)} tokens\n\n`);
         }
 
         this.statusBarItem.tooltip = md;
@@ -134,12 +135,7 @@ export class StatusBarService {
 
 // ==================== Standalone Helpers ====================
 
-/** Format token count: 147580 → "147.6K" */
-function formatTokens(n: number): string {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-    return String(n);
-}
+
 
 function getQuotaPercent(m: ClientModelConfig): number | null {
     if (m.quotaInfo?.remainingFraction === undefined) return null;
@@ -153,14 +149,4 @@ function quotaIcon(pct: number | null): string {
     return '🟡';
 }
 
-function formatTimeLeft(ms: number): string {
-    if (ms <= 0) return '(Reset)';
-    const h = Math.floor(ms / 3_600_000);
-    const min = Math.floor((ms % 3_600_000) / 60_000);
-    if (h >= 24) {
-        const d = Math.floor(h / 24);
-        const rh = h % 24;
-        return rh > 0 ? `(${d}d ${rh}h left)` : `(${d}d left)`;
-    }
-    return h > 0 ? `(${h}h ${min}m left)` : `(${min}m left)`;
-}
+

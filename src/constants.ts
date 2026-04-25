@@ -41,16 +41,21 @@ export const POLL_INTERVAL_MS = 60 * 1000;
 export const TOKEN_REFRESH_BUFFER_SECS = 300; // refresh 5 min before expiry
 export const OAUTH_CALLBACK_TIMEOUT_MS = 120_000; // 2 min
 
+/** gRPC service path for all Language Server endpoints — SSOT */
+export const LS_SERVICE_PATH = '/exa.language_server_pb.LanguageServerService';
+
 /** Fallback GCP project ID used when loadCodeAssist does not return one */
 export const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
+
+import * as vscode from 'vscode';
 
 // Platform-aware paths
 import * as path from 'path';
 import * as os from 'os';
 
-const isMac = process.platform === 'darwin';
-const isLinux = process.platform === 'linux';
-const isWindows = process.platform === 'win32';
+export const isMac = process.platform === 'darwin';
+export const isLinux = process.platform === 'linux';
+export const isWindows = process.platform === 'win32';
 
 /** Path to Antigravity's local state SQLite DB (used for active-account detection) */
 export const STATE_DB_PATH = isMac
@@ -85,3 +90,28 @@ export const LS_PROCESS_GREP = isMac
         : isWindows
             ? 'language_server_win'
             : 'language_server';
+
+/** Unified CSRF token extraction regex — SSOT for process discovery */
+export const CSRF_TOKEN_RE = /--csrf_token[\s=]+([\w-]+)/;
+
+/**
+ * Configuration-gated diagnostic file logging.
+ * When false (default), diag() functions are no-ops → zero disk I/O overhead.
+ * Enable via: Settings → ag-switchboard.diagnosticMode → true
+ *
+ * Cached per-check to avoid repeated configuration reads.
+ */
+let _diagCached: boolean | null = null;
+let _diagCacheTs = 0;
+export function isDiagEnabled(): boolean {
+    const now = Date.now();
+    if (_diagCached !== null && now - _diagCacheTs < 5000) return _diagCached;
+    try {
+        _diagCached = vscode.workspace.getConfiguration('ag-switchboard')
+            .get<boolean>('diagnosticMode', false);
+    } catch {
+        _diagCached = false;
+    }
+    _diagCacheTs = now;
+    return _diagCached!;
+}

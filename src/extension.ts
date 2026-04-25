@@ -6,8 +6,9 @@ import { UsageStatsPanel } from './providers/usageStatsPanel';
 import { ContextDetailPanel } from './providers/contextDetailPanel';
 import { updatePricing, setExternalPricingResolver } from './shared/usage-components';
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
-import { initLogger, createLogger, setFileSink } from './utils/logger';
+import { initLogger, createLogger, setFileSink, setDiagSink } from './utils/logger';
 import { extractField, extractStringField } from './utils/protobuf';
+import { getUSS } from './utils/uss';
 
 const log = createLogger('Extension');
 
@@ -17,6 +18,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize OutputChannel logger FIRST — all modules use this
     initLogger(context);
     setFileSink('/tmp/ag-panel.log');
+    setDiagSink('/tmp/ag-ctx-diag.log');
 
     // --- Boot managers ---
     const accountManager = new AccountManager(context);
@@ -150,7 +152,7 @@ function applyPricingFromSettings(): void {
  * Fallback: trajectorySummaries eTag tracking (less reliable but functional).
  */
 function startConversationTracker(quotaManager: QuotaManager): void {
-    const uss: any = (vscode as any).antigravityUnifiedStateSync;
+    const uss = getUSS() as any;
     if (!uss?.subscribe) {
         log.info('USS API: not available — conversation tracking disabled');
         return;

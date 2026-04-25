@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { GoogleAuthService } from './googleAuth';
 import { SwitchAccountOptions, USSApi } from '../types';
+import { getUSS } from '../utils/uss';
 import {
     encodeString, encodeVarintField,
     encodeMessage, extractField, extractStringField,
@@ -8,6 +9,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { writeToStateDb } from '../utils/dbWriter';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
+import { LS_SERVICE_PATH } from '../constants';
 
 const log = createLogger('AccountSwitch');
 
@@ -259,7 +261,7 @@ export class AccountSwitchService {
             try {
                 const body = await callLSEndpoint(
                     ls,
-                    '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+                    `${LS_SERVICE_PATH}/GetUserStatus`,
                     ca,
                 );
                 const userStatus = body ? extractField(body, 1) : null;
@@ -293,7 +295,7 @@ export class AccountSwitchService {
         }
         const ca = loadLSCert();
         const results = await Promise.allSettled(
-            lsEndpoints.map(ls => callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/RegisterGdmUser', ca))
+            lsEndpoints.map(ls => callLSEndpoint(ls, `${LS_SERVICE_PATH}/RegisterGdmUser`, ca))
         );
         results.forEach((r, i) => {
             const ls = lsEndpoints[i];
@@ -345,7 +347,7 @@ export class AccountSwitchService {
 
             pollCount++;
             try {
-                const body = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetUserStatus', ca);
+                const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetUserStatus`, ca);
                 const userStatus = body ? extractField(body, 1) : null;
 
                 // ── FORENSIC: log every poll iteration ──
@@ -410,13 +412,13 @@ export class AccountSwitchService {
             await delay(intervalMs);
 
             try {
-                const body = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetUserStatus', ca);
+                const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetUserStatus`, ca);
                 let userStatus = body ? extractField(body, 1) : null;
                 if (!userStatus || userStatus.length <= 5) continue;
 
                 // Fetch profile picture
                 try {
-                    const profileBody = await callLSEndpoint(ls, '/exa.language_server_pb.LanguageServerService/GetProfileData', ca);
+                    const profileBody = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetProfileData`, ca);
                     const profilePicUrl = profileBody ? extractStringField(profileBody, 1) : '';
                     if (profilePicUrl.length > 10) {
                         userStatus = Buffer.concat([userStatus, encodeString(38, profilePicUrl)]);
@@ -501,10 +503,7 @@ export class AccountSwitchService {
 // These are pure functions / stateless utilities extracted from the class
 // to reduce class size and improve testability.
 
-/** Typed accessor for USS — returns null if API not available */
-function getUSS(): USSApi | null {
-    return (vscode as any).antigravityUnifiedStateSync ?? null;
-}
+
 
 function delay(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));

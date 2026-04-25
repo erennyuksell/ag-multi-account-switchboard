@@ -140,6 +140,17 @@ body {
     letter-spacing: .3px; flex-shrink: 0;
     line-height: 1.4;
 }
+.transition-tag {
+    font-size: 10px; font-weight: 500;
+    color: var(--vscode-charts-yellow, #e2c541);
+    opacity: 0.85;
+    animation: pulse-transition 1.8s ease-in-out infinite;
+    flex-shrink: 0;
+}
+@keyframes pulse-transition {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.4; }
+}
 .acct-credits {
     display: flex; gap: 4px; flex-wrap: wrap;
     margin-top: 1px;

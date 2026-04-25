@@ -14,13 +14,9 @@ import { EmailResolver } from '../services/emailResolver';
 import { shortModelName } from '../shared/helpers';
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
 import { createLogger } from '../utils/logger';
+import { parseUserTier, parsePlanStatus } from '../utils/lsTypes';
 
 const log = createLogger('QuotaManager');
-
-const diagPath = '/tmp/ag-ctx-diag.log';
-function diag(msg: string) {
-    try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] QM: ${msg}\n`); } catch { }
-}
 
 export class QuotaManager {
     private readonly statusBar: StatusBarService;
@@ -59,8 +55,13 @@ export class QuotaManager {
     private cachedCascadeServer: { info: ServerInfo | null; ts: number } | null = null;
     private static readonly CASCADE_SERVER_TTL = 600_000; // 10 min
 
-    /** Suppress all refreshes during programmatic switch to prevent stale intermediate renders */
-    private _switchMuteUntil = 0;
+    /**
+     * Lifecycle-scoped switch guard — suppresses refresh() for the EXACT duration
+     * of a switch operation. Replaces the old time-based _switchMuteUntil (5s hardcoded)
+     * which could expire before slow switches completed (readiness gate 8s + poll 12s).
+     * Uses AbortController so double-click aborts the previous switch cleanly.
+     */
+    private _switchController: AbortController | null = null;
 
 
     constructor(
@@ -72,6 +73,7 @@ export class QuotaManager {
         // Ensure token renewal timer is cleaned up on extension deactivation
         context.subscriptions.push({ dispose: () => this.switchService.dispose() });
         context.subscriptions.push({ dispose: () => this.liveStream.destroy() });
+        context.subscriptions.push({ dispose: () => this._switchController?.abort() });
 
         // Live stream → real-time context offset during AI response
         this._initLiveStreamListener();
@@ -149,23 +151,32 @@ export class QuotaManager {
             }));
 
             const bn = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
-            const ut = status.userTier || {} as any;
-            const ps = status.planStatus || {} as any;
-            const pi = ps.planInfo || {} as any;
-            const aiCreds = (ut.availableCredits || []).find((c: any) => c.creditType === 'GOOGLE_ONE_AI');
+            const ut = parseUserTier(status.userTier);
+            const ps = parsePlanStatus(status.planStatus);
+            const aiCreds = ut.availableCredits.find(c => c.creditType === 'GOOGLE_ONE_AI');
+
+            // Detect identity transition: intent email ≠ LS-reported email
+            // This happens during the switch lifecycle when LS hasn't adopted the new account yet
+            const isTransitioning = !!(
+                ae && localEmail &&
+                ae !== localEmail &&
+                this._switchController  // Only during active switch lifecycle
+            );
 
             cards.push({
                 email: status.email || 'active-local',
                 isActive: !ae || ae === localEmail,
+                isTransitioning,
+                pendingEmail: isTransitioning ? this.lastActiveEmail : undefined,
                 models,
                 bottleneck: bn,
-                tierName: ut.name || null,
-                tierId: ut.id || null,
+                tierName: ut.name,
+                tierId: ut.id,
                 aiCredits: aiCreds ? parseInt(aiCreds.creditAmount, 10) : null,
-                promptCredits: ps.availablePromptCredits ?? null,
-                promptCreditsMax: pi.monthlyPromptCredits || null,
-                flowCredits: ps.availableFlowCredits ?? null,
-                flowCreditsMax: pi.monthlyFlowCredits || null,
+                promptCredits: ps.availablePromptCredits,
+                promptCreditsMax: ps.planInfo.monthlyPromptCredits,
+                flowCredits: ps.availableFlowCredits,
+                flowCreditsMax: ps.planInfo.monthlyFlowCredits,
                 resetTime: bn?.resetTime || models[0]?.resetTime || '',
                 isError: false,
                 selectedModels,
@@ -316,15 +327,21 @@ export class QuotaManager {
         if (this.cachedCascadeServer && this.cachedCascadeServer.info && Date.now() - this.cachedCascadeServer.ts < QuotaManager.CASCADE_SERVER_TTL) {
             return this.cachedCascadeServer.info;
         }
-        const wsServer = await this.resolveServer();
-        const info = await this.serverDiscovery.discoverCascadeServer(cascadeId, wsServer).catch(() => null);
-        // Only cache successful discoveries — null means the cascade doesn't exist
-        // yet (brand new conversation). Next attempt should re-discover.
+        // Do NOT pass wsServer as fallback — WS LS has stale cascade snapshots.
+        const info = await this.serverDiscovery.discoverCascadeServer(cascadeId, null).catch(() => null);
         if (info) {
             this.cachedCascadeServer = { info, ts: Date.now() };
+            return info;
         }
-        diag(`resolveCascadeServer: port=${info?.port ?? 'null'} (wsPort=${wsServer?.port ?? 'null'})`);
-        return info;
+        // Stale-while-revalidate: if fresh discovery failed but we have a
+        // previously cached server (expired TTL), use it rather than returning null.
+        // Global LS rarely changes port — stale cache is almost always correct.
+        if (this.cachedCascadeServer?.info) {
+            log.info(`resolveCascadeServer: fresh discovery failed, using stale cache (port=${this.cachedCascadeServer.info.port}, age=${Date.now() - this.cachedCascadeServer.ts}ms)`);
+            return this.cachedCascadeServer.info;
+        }
+        log.diag(`resolveCascadeServer: not found (no cache)`);
+        return null;
     }
 
     // ── Debounced Context Fetch (USS-driven) ──
@@ -350,28 +367,34 @@ export class QuotaManager {
      */
     setActiveConversation(cascadeId: string): void {
         this.lastContextConversationId = cascadeId;
-        // Invalidate cascade server cache on conversation switch
-        // so we re-discover the correct Global LS for the new cascade.
-        this.cachedCascadeServer = null;
-        diag(`setActiveConversation: ${cascadeId.substring(0, 12)}`);
+        // Global LS is a singleton — its port/CSRF survives conversation switches.
+        // Do NOT invalidate cachedCascadeServer here; only invalidate on actual
+        // connection failure (lazy invalidation in _executeFetch catch block).
+        // Forcing re-discovery on every switch caused intermittent failures
+        // (ps/lsof timing races) leading to the stale-context oscillation bug.
+        // Reset live stream totalLength counter — new conversation starts from 0.
+        // Without this, events from the new conversation are blocked by the
+        // previous conversation's higher totalLength (guard at line ~399).
+        this._lastLiveTotalLength = 0;
+        log.diag(`setActiveConversation: ${cascadeId.substring(0, 12)}`);
         // Start live stream on Global LS — it has live cascade data.
         this.resolveCascadeServer(cascadeId).then(cascadeServer => {
             const server = cascadeServer;
             if (server) {
-                diag(`setActiveConversation: connecting liveStream port=${server.port}`);
+                log.diag(`setActiveConversation: connecting liveStream port=${server.port}`);
                 this.liveStream.connect(server, cascadeId);
             } else {
                 // Fallback to workspace LS
                 this.resolveServer().then(ws => {
                     if (ws) {
-                        diag(`setActiveConversation: liveStream fallback to wsLS port=${ws.port}`);
+                        log.diag(`setActiveConversation: liveStream fallback to wsLS port=${ws.port}`);
                         this.liveStream.connect(ws, cascadeId);
                     } else {
-                        diag('setActiveConversation: no server for liveStream');
+                        log.diag('setActiveConversation: no server for liveStream');
                     }
-                }).catch(() => {});
+                }).catch((e: unknown) => log.warn('LiveStream fallback connect failed:', (e as Error)?.message));
             }
-        }).catch(err => diag(`setActiveConversation: resolveCascadeServer failed: ${(err as Error)?.message}`));
+        }).catch(err => log.diag(`setActiveConversation: resolveCascadeServer failed: ${(err as Error)?.message}`));
     }
 
     // ── Live Stream (real-time totalLength for context offset) ──
@@ -400,7 +423,7 @@ export class QuotaManager {
                 if (data) {
                     this._pushContextUpdate(data, event.conversationId, server);
                 }
-            } catch { /* live fetch failed, USS will handle it */ }
+            } catch (e: unknown) { log.info(`[EXPECTED] liveStream delta fetch: ${(e as Error)?.message}`); }
         });
     }
 
@@ -421,27 +444,39 @@ export class QuotaManager {
             this.lastContextConversationId = cascadeId;
         }
         const shortId = cascadeId.substring(0, 12);
-        diag(`fetchCW: ${shortId}`);
+        log.diag(`fetchCW: ${shortId}`);
         try {
             this.contextWindowService.invalidateCache(cascadeId);
             // Use Global LS for context window — it has live cascade data.
-            // Falls back to workspace LS if cascade server not found.
+            // Do NOT fall back to workspace LS: it only has a stale snapshot
+            // that can be hours old, causing the "5-hour-old context" oscillation bug.
             const cascadeServer = await this.resolveCascadeServer(cascadeId);
-            const serverInfo = cascadeServer ?? await this.resolveServer();
-            if (!serverInfo) { diag('fetchCW: no server'); return; }
+            if (!cascadeServer) {
+                log.info(`fetchCW: cascade server unavailable for ${shortId} — skipping (no WS LS fallback)`);
+                return;
+            }
+            const serverInfo = cascadeServer;
 
             await this.refreshContextWindow(serverInfo, cascadeId);
-            diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0} (port=${serverInfo.port})`);
+            log.diag(`fetchCW: done — tokens=${this.lastContextWindow?.usedTokens ?? 0} (port=${serverInfo.port})`);
         } catch (err) {
             // Invalidate cascade cache on failure — server may have restarted
             this.cachedCascadeServer = null;
-            diag(`fetchCW FAILED: ${(err as Error)?.message}`);
+            log.diag(`fetchCW FAILED: ${(err as Error)?.message}`);
             log.info(`fetchCW: FAILED ${(err as Error)?.message}`);
         }
     }
 
     /** DRY: push context window data to sidebar + detail panel + globalState */
     private _pushContextUpdate(data: ContextWindowData, cascadeId: string, server: ServerInfo | null): void {
+        // Staleness guard: never overwrite newer data with older data.
+        // This prevents workspace LS stale snapshots from clobbering fresh global LS data.
+        if (this.lastContextWindow && data.lastUpdated && this.lastContextWindow.lastUpdated) {
+            if (data.lastUpdated < this.lastContextWindow.lastUpdated && cascadeId === this.lastContextConversationId) {
+                log.info(`pushCW: REJECTED stale data (incoming=${data.lastUpdated} < current=${this.lastContextWindow.lastUpdated})`);
+                return;
+            }
+        }
         if (cascadeId !== this.lastContextConversationId) {
             log.info(`Context window: conversation → ${cascadeId.substring(0, 12)}`);
             this.lastContextConversationId = cascadeId;
@@ -456,15 +491,15 @@ export class QuotaManager {
         if (data.usedTokens > 0 && data.maxTokens > 0) {
             this.statusBar.updateContext(data.usedTokens, data.maxTokens, data.model);
         }
-        diag(`pushCW: tokens=${data.usedTokens} (${data.model})`);
+        log.diag(`pushCW: tokens=${data.usedTokens} (${data.model})`);
     }
 
     async refresh(activeEmailHint?: string) {
-        // During programmatic switch, suppress ALL refresh triggers (timer, DB watcher)
-        // to prevent premature renders from USS early-push. The definitive render
-        // comes from the explicit pushCachedData() after switchAccount confirms.
-        if (Date.now() < this._switchMuteUntil) {
-            log.info('refresh: SUPPRESSED (switch in progress)');
+        // During programmatic switch, suppress ALL refresh triggers (USS listener, DB watcher)
+        // to prevent premature renders. Lifecycle-scoped: active for the EXACT duration of
+        // switchAccount(), guaranteed cleanup via finally block.
+        if (this._switchController && !this._switchController.signal.aborted) {
+            log.info('refresh: SUPPRESSED (switch lifecycle active)');
             return;
         }
 
@@ -600,12 +635,12 @@ export class QuotaManager {
 
     /** Fetch context window for a specific conversation and push to webview */
     private async refreshContextWindow(serverInfo: ServerInfo, cascadeId: string): Promise<void> {
-        diag(`refreshCW: fetching for ${cascadeId.substring(0, 12)}`);
+        log.diag(`refreshCW: fetching for ${cascadeId.substring(0, 12)}`);
         try {
             const ctx = await this.contextWindowService.getContextForCascade(serverInfo, cascadeId);
 
             if (!ctx) {
-                diag(`refreshCW: ctx is null for ${cascadeId.substring(0, 12)}`);
+                log.diag(`refreshCW: ctx is null for ${cascadeId.substring(0, 12)}`);
                 // If this is the ACTIVE conversation and ctx is null (new/empty conversation),
                 // clear stale data so the widget doesn't show the previous conversation's info.
                 if (cascadeId === this.lastContextConversationId) {
@@ -613,17 +648,17 @@ export class QuotaManager {
                     this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
                     if (this.viewProvider) {
                         this.viewProvider.postContextWindow(null);
-                        diag('refreshCW: cleared stale context (active conversation has no data)');
+                        log.diag('refreshCW: cleared stale context (active conversation has no data)');
                     }
                 }
                 return;
             }
 
-            diag(`refreshCW: got data — title="${ctx.title?.substring(0, 30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0, 12)}`);
+            log.diag(`refreshCW: got data — title="${ctx.title?.substring(0, 30)}" tokens=${ctx.usedTokens}/${ctx.maxTokens} convId=${ctx.conversationId?.substring(0, 12)}`);
 
             this._pushContextUpdate(ctx, ctx.conversationId, serverInfo);
         } catch (err) {
-            diag(`refreshCW FAILED: ${(err as Error)?.message}`);
+            log.diag(`refreshCW FAILED: ${(err as Error)?.message}`);
             log.info(`refreshContextWindow FAILED: ${(err as Error)?.message}`);
         }
     }
@@ -682,54 +717,59 @@ export class QuotaManager {
         );
         if (confirm !== 'Switch') return;
 
-        // Mute DB watcher during switch — prevents stale renders from writeAuthStatusToDb.
-        // Definitive refresh comes from this.refresh() after switchAccount returns.
-        this._switchMuteUntil = Date.now() + 5000;
+        // Lifecycle Guard: abort any previous in-flight switch (double-click protection)
+        // and create a new scope for this switch. Refresh is suppressed for the EXACT
+        // duration of this try/finally block — no hardcoded timeout that can expire early.
+        this._switchController?.abort();
+        this._switchController = new AbortController();
 
-        const result = await this.switchService.switchAccount({
-            email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
-        });
-        if (result.confirmed) {
-            // LS confirmed new email. Fetch local data via CACHED server (0ms discovery + ~200ms HTTP).
-            this.lastActiveEmail = account.email;
-            log.info(`switchAccount: confirmed ${account.email}, fetching local data`);
+        try {
+            const result = await this.switchService.switchAccount({
+                email: account.email, name: account.name, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp,
+            });
+            if (result.confirmed) {
+                // LS confirmed new email. Fetch local data via CACHED server (0ms discovery + ~200ms HTTP).
+                this.lastActiveEmail = account.email;
+                log.info(`switchAccount: confirmed ${account.email}, fetching local data`);
 
-            try {
-                // Invalidate server cache — LS may have changed ports after switch,
-                // and cached server might point to an LS instance still serving old data.
-                this.cachedServer = null;
-                const serverInfo = await this.resolveServer();
-                if (serverInfo) {
-                    const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
-                    // ── FORENSIC: log what fetchLocalQuota actually returned ──
-                    const lqEmail = localData?.userStatus?.email || '(none)';
-                    const lqModels = localData?.userStatus?.cascadeModelConfigData?.clientModelConfigs?.length ?? 0;
-                    const lqTier = localData?.userStatus?.userTier?.name || '(none)';
-                    log.info(`FORENSIC postSwitch: email=${lqEmail} models=${lqModels} tier=${lqTier} expected=${account.email}`);
-                    if (localData) {
-                        this.lastLocalData = localData;
-                        this.updateStatusBar(localData);
+                try {
+                    // Invalidate server cache — LS may have changed ports after switch,
+                    // and cached server might point to an LS instance still serving old data.
+                    this.cachedServer = null;
+                    const serverInfo = await this.resolveServer();
+                    if (serverInfo) {
+                        const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
+                        // ── FORENSIC: log what fetchLocalQuota actually returned ──
+                        const lqEmail = localData?.userStatus?.email || '(none)';
+                        const lqModels = localData?.userStatus?.cascadeModelConfigData?.clientModelConfigs?.length ?? 0;
+                        const lqTier = localData?.userStatus?.userTier?.name || '(none)';
+                        log.info(`FORENSIC postSwitch: email=${lqEmail} models=${lqModels} tier=${lqTier} expected=${account.email}`);
+                        if (localData) {
+                            this.lastLocalData = localData;
+                            this.updateStatusBar(localData);
+                        }
                     }
+                } catch (e: any) {
+                    log.warn('Post-switch local fetch failed:', e?.message);
                 }
-            } catch (e: any) {
-                log.warn('Post-switch local fetch failed:', e?.message);
+
+                // Instant render — local card with correct active email + tracked cards from cache
+                this.pushCachedData();
+
+                // Background full refresh for tracked quotas, token base, workspace context
+                setTimeout(() => this.refresh(), 2000);
+            } else {
+                // Recovery: LS wasn't available during switch, but USS state was set
+                // (token + email pushed at steps 1-4). When LS comes back, it will
+                // pick up the new token from USS. Guard clears in finally → USS listener
+                // can naturally trigger a refresh.
+                log.warn(`switchAccount: unconfirmed for ${account.email} — recovery path`);
+                this.lastActiveEmail = account.email;
+                this.cachedServer = null;
             }
-
-            // Instant render — local card with correct active email + tracked cards from cache
-            this.pushCachedData();
-
-            // Background full refresh for tracked quotas, token base, workspace context
-            setTimeout(() => this.refresh(), 2000);
-        } else {
-            // Recovery: LS wasn't available during switch, but USS state was set
-            // (token + email pushed at steps 1-4). When LS comes back, it will
-            // pick up the new token from USS. Clear the mute guard so the
-            // USS userStatus listener can naturally trigger a refresh.
-            log.warn(`switchAccount: unconfirmed for ${account.email} — recovery: clearing mute guard`);
-            this.lastActiveEmail = account.email;
-            this._switchMuteUntil = 0;
-            this.cachedServer = null;
-            // USS listener already detected email change → refresh will fire when unmuted
+        } finally {
+            // GUARANTEED cleanup — refresh unblocked regardless of success/failure/exception
+            this._switchController = null;
         }
     }
 

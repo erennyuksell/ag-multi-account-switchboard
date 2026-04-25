@@ -77,6 +77,9 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
             : '';
 
         const activeBadge = a.isActive ? '<span class="active-tag">ACTIVE</span>' : '';
+        const transitionBadge = a.isTransitioning && a.pendingEmail
+            ? '<span class="transition-tag">→ ' + a.pendingEmail + '</span>'
+            : '';
         const tierBadge = a.tierName ? '<span class="tier-tag">' + shortTierName(a.tierName) + '</span>' : '';
 
         // Credits as pill badges
@@ -124,7 +127,7 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
         html += '<div class="acct-hdr" data-action="toggle-open">';
         html += '<div class="acct-dot ' + dotCls + '"></div>';
         html += '<div class="acct-info">';
-        html += '<div class="acct-email">' + a.email + ' ' + activeBadge + ' ' + tierBadge + '</div>';
+        html += '<div class="acct-email">' + a.email + ' ' + activeBadge + ' ' + tierBadge + transitionBadge + '</div>';
         html += subBlock;
         html += creditsLine;
         html += '</div>';

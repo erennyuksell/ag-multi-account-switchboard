@@ -1,11 +1,10 @@
 import { EventEmitter } from 'events';
 import * as http from 'http';
 import { ServerInfo } from '../types';
+import { createLogger } from '../utils/logger';
+import { LS_SERVICE_PATH } from '../constants';
 
-const diagPath = '/tmp/ag-ctx-diag.log';
-function diag(msg: string) {
-    try { require('fs').appendFileSync(diagPath, `[${new Date().toISOString()}] LIVE: ${msg}\n`); } catch { }
-}
+const log = createLogger('LiveStream');
 
 /**
  * Ultra-lightweight stream — only extracts totalLength for live context window offset.
@@ -33,12 +32,12 @@ export class LiveStream extends EventEmitter {
         envelope.writeUInt32BE(jsonBuf.length, 1);
         jsonBuf.copy(envelope, 5);
 
-        diag(`connect port=${server.port} cascade=${cascadeId.substring(0, 12)}`);
+        log.diag(`connect port=${server.port} cascade=${cascadeId.substring(0, 12)}`);
 
         const req = http.request({
             hostname: '127.0.0.1',
             port: server.port,
-            path: '/exa.language_server_pb.LanguageServerService/StreamAgentStateUpdates',
+            path: `${LS_SERVICE_PATH}/StreamAgentStateUpdates`,
             method: 'POST',
             headers: {
                 'Content-Type': 'application/connect+json',
@@ -49,10 +48,10 @@ export class LiveStream extends EventEmitter {
         }, (res) => {
             if (this.destroyed) { res.destroy(); return; }
             if (res.statusCode !== 200) {
-                diag(`HTTP ${res.statusCode}`);
+                log.diag(`HTTP ${res.statusCode}`);
                 return;
             }
-            diag('stream OPEN');
+            log.diag('stream OPEN');
 
             let totalBytes = 0;
             let firstChunk = true;
@@ -63,17 +62,17 @@ export class LiveStream extends EventEmitter {
                     firstChunk = false;
                     // Dump first 200 chars for debugging
                     const preview = chunk.subarray(5).toString('utf8').substring(0, 300);
-                    diag(`first chunk: ${chunk.length}b tag=${chunk[0]} len=${chunk.readUInt32BE(1)} preview=${preview}`);
+                    log.diag(`first chunk: ${chunk.length}b tag=${chunk[0]} len=${chunk.readUInt32BE(1)} preview=${preview}`);
                 }
                 this.buffer = Buffer.concat([this.buffer, chunk]);
                 this.parseFrames();
             });
 
-            res.on('end', () => diag(`stream ended (${totalBytes} bytes received, buf=${this.buffer.length})`));
-            res.on('error', (err) => diag(`error: ${err.message}`));
+            res.on('end', () => log.diag(`stream ended (${totalBytes} bytes received, buf=${this.buffer.length})`));
+            res.on('error', (err) => log.diag(`error: ${err.message}`));
         });
 
-        req.on('error', (err) => diag(`req error: ${err.message}`));
+        req.on('error', (err) => log.diag(`req error: ${err.message}`));
         req.write(envelope);
         req.end();
         this.req = req;

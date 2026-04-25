@@ -92,7 +92,7 @@ export class AccountManager {
     async getValidTokensForAccount(email: string, forceRefresh = false): Promise<StoredTokens | null> {
         try {
             return await this.getValidTokens(email, forceRefresh);
-        } catch {
+        } catch { // EXPECTED: token refresh failed — caller handles null return
             return null;
         }
     }

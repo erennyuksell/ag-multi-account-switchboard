@@ -23,8 +23,14 @@ export function timeLeft(resetTimeStr: string | undefined | null): string {
     if (isNaN(reset.getTime())) return '';
     const diff = reset.getTime() - Date.now();
     if (diff <= 0) return 'Reset';
-    const h = Math.floor(diff / 3600000);
-    const m = Math.floor((diff % 3600000) / 60000);
+    return formatDurationMs(diff);
+}
+
+/** Duration in ms → compact string: "5h 23m", "42m", "2d 3h" */
+export function formatDurationMs(ms: number): string {
+    if (ms <= 0) return '';
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
     if (h >= 24) {
         const d = Math.floor(h / 24);
         const rh = h % 24;

@@ -11,10 +11,11 @@
 import { ServerInfo } from '../types';
 import { callLsHttpsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
+import { LS_SERVICE_PATH } from '../constants';
 
 const log = createLogger('RpcDirect');
 
-const SVC = '/exa.language_server_pb.LanguageServerService';
+
 
 export class RpcDirectClient {
     private validated = false;
@@ -28,7 +29,7 @@ export class RpcDirectClient {
     /** Validate connection with a Heartbeat RPC before first real use. */
     async heartbeat(): Promise<boolean> {
         if (this.validated) return true;
-        const resp = await this.rpc(`${SVC}/Heartbeat`, { uuid: '00000000-0000-0000-0000-000000000000' }, 2000);
+        const resp = await this.rpc(`${LS_SERVICE_PATH}/Heartbeat`, { uuid: '00000000-0000-0000-0000-000000000000' }, 2000);
         this.validated = resp !== null;
         return this.validated;
     }
@@ -43,7 +44,7 @@ export class RpcDirectClient {
             // Use cumulative offset (allMeta.length) — NOT page*PAGE_SIZE.
             // The server returns items starting at the offset; fixed-step offsets
             // cause overlapping windows and duplicate entries.
-            const resp = await this.rpc(`${SVC}/GetCascadeTrajectoryGeneratorMetadata`, {
+            const resp = await this.rpc(`${LS_SERVICE_PATH}/GetCascadeTrajectoryGeneratorMetadata`, {
                 cascade_id: cascadeId, generator_metadata_offset: allMeta.length,
             });
             const items = resp ? (resp.generatorMetadata || resp.generator_metadata || []) : [];
@@ -67,7 +68,7 @@ export class RpcDirectClient {
         const allSteps: any[] = [];
 
         for (let page = 0; page < MAX_PAGES; page++) {
-            const resp = await this.rpc(`${SVC}/GetCascadeTrajectorySteps`, {
+            const resp = await this.rpc(`${LS_SERVICE_PATH}/GetCascadeTrajectorySteps`, {
                 cascade_id: cascadeId, step_offset: page === 0 ? 0 : allSteps.length,
             });
             const items = resp ? (resp.steps || []) : [];
@@ -79,7 +80,7 @@ export class RpcDirectClient {
         if (allSteps.length > 0) return allSteps;
 
         // Fallback: GetCascadeTrajectory — returns nested trajectory with steps
-        const full = await this.rpc(`${SVC}/GetCascadeTrajectory`, { cascadeId });
+        const full = await this.rpc(`${LS_SERVICE_PATH}/GetCascadeTrajectory`, { cascadeId });
         if (full?.trajectory?.steps && Array.isArray(full.trajectory.steps)) {
             return full.trajectory.steps;
         }

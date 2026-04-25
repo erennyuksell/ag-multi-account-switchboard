@@ -1,11 +1,10 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP } from '../constants';
+import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 
 const execAsync = promisify(exec);
-const isWindows = process.platform === 'win32';
 
 export class ServerDiscoveryService {
 
@@ -127,7 +126,7 @@ export class ServerDiscoveryService {
     private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         const lines = await getWindowsProcessLines(LS_PROCESS_GREP);
         return lines.flatMap(line => {
-            const csrf = line.match(/--csrf_token[\s=]+([a-zA-Z0-9-]+)/)?.[1];
+            const csrf = line.match(CSRF_TOKEN_RE)?.[1];
             const pid  = line.match(/--api_server_port[\s=]+(\d+)/)?.[1]  // not used but present
                       ?? line.match(/ProcessId[=,"\s]*(\d+)/i)?.[1];
             // PID comes from PowerShell's ExpandProperty — not in the line itself.
@@ -145,7 +144,7 @@ export class ServerDiscoveryService {
             if (!line.trim()) continue;
             const pidMatch = line.trim().match(/^(\d+)\s/);
             if (!pidMatch) continue;
-            const tokenMatch = line.match(/--csrf_token\s+([a-zA-Z0-9\-]+)/);
+            const tokenMatch = line.match(CSRF_TOKEN_RE);
             if (!tokenMatch) continue;
             const wsMatch = line.match(/--workspace_id\s+(\S+)/);
             const httpsPortMatch = line.match(/--https_server_port\s+(\d+)/);

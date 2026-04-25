@@ -199,7 +199,7 @@ export class UsageStatsService {
                 } else {
                     cold.push(cid);
                 }
-            } catch {
+            } catch { // EXPECTED: directory deleted between readdir and stat — treat as hot
                 // Can't stat → treat as hot (fetch it)
                 hot.push(cid);
             }
@@ -521,7 +521,7 @@ export class UsageStatsService {
                 const sc = parseInt(val.stepCount || '0', 10);
                 if (sc > 0) stepCounts.set(id, sc);
             }
-        } catch { /* best-effort */ }
+        } catch (e: unknown) { log.warn('[EXPECTED] fetchTrajectorySummaries:', (e as Error)?.message); }
         return { titleMap, stepCounts };
     }
 
@@ -552,7 +552,7 @@ export class UsageStatsService {
             return fs.readdirSync(brainDir, { withFileTypes: true })
                 .filter(d => d.isDirectory() && UUID_RE.test(d.name))
                 .map(d => d.name);
-        } catch {
+        } catch { // EXPECTED: brain dir inaccessible (e.g., first-time install)
             return [];
         }
     }

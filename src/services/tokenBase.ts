@@ -2,6 +2,7 @@ import { createLogger } from '../utils/logger';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, callLsProto } from '../utils/lsClient';
 import { readFields, type ProtoField } from '../utils/protobuf';
 import { ServerInfo } from '../types';
+import { LS_SERVICE_PATH } from '../constants';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -247,7 +248,7 @@ export class TokenBaseService {
         // Path 1: HTTP via already-discovered workspace LS port
         if (serverInfo) {
             try {
-                const body = await this.callHttp(serverInfo, '/exa.language_server_pb.LanguageServerService/GetTokenBase', 5000);
+                const body = await this.callHttp(serverInfo, `${LS_SERVICE_PATH}/GetTokenBase`, 5000);
                 const data = parseTokenBaseResponse(body);
                 log.info(`Token base (HTTP): ${data.totalTokens}/${data.customizationBudget} tokens (${data.usedPercent}%)`);
                 return data;
@@ -268,7 +269,7 @@ export class TokenBaseService {
             }
 
             const ca = loadLSCert();
-            const endpoint = '/exa.language_server_pb.LanguageServerService/GetTokenBase';
+            const endpoint = `${LS_SERVICE_PATH}/GetTokenBase`;
             for (const ls of lsProcesses) {
                 try {
                     const body = await callLSEndpoint(ls, endpoint, ca);
@@ -293,7 +294,7 @@ export class TokenBaseService {
      */
     async fetchWorkspaceContext(serverInfo: ServerInfo, workspaceName: string, workspaceFsPath: string): Promise<WorkspaceContextData | null> {
         try {
-            const buf = await this.callHttp(serverInfo, '/exa.language_server_pb.LanguageServerService/GetMatchingContextScopeItems');
+            const buf = await this.callHttp(serverInfo, `${LS_SERVICE_PATH}/GetMatchingContextScopeItems`);
             let raw = parseContextScope(buf);
 
             // Guard: if LS returned items from a DIFFERENT workspace (race on first boot),

@@ -19,7 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { LS_CERT_PATHS, LS_PROCESS_GREP } from '../constants';
+import { LS_CERT_PATHS, LS_PROCESS_GREP, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows } from '../constants';
 import { collectBuffer } from './http';
 
 const execAsync = promisify(exec);
@@ -68,7 +68,7 @@ export interface LsEndpoint {
 export async function findLSEndpoints(): Promise<LsEndpoint[]> {
     try {
         let lines: string[];
-        if (process.platform === 'win32') {
+        if (isWindows) {
             lines = await getWindowsProcessLines(LS_PROCESS_GREP);
         } else {
             const { stdout } = await execAsync(
@@ -80,7 +80,7 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
 
         return lines.flatMap(line => {
             const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
-            const csrf = line.match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
+            const csrf = line.match(CSRF_TOKEN_RE)?.[1];
             const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
             return port && csrf ? [{ port: +port, csrf, wsId }] : [];
         });
@@ -183,8 +183,7 @@ export function callLsJson(
     body: Record<string, unknown> = {},
     timeoutMs = 8000,
 ): Promise<any> {
-    const SVC = '/exa.language_server_pb.LanguageServerService/';
-    const fullPath = method.startsWith('/') ? method : SVC + method;
+    const fullPath = method.startsWith('/') ? method : `${LS_SERVICE_PATH}/${method}`;
 
     return new Promise((resolve, reject) => {
         const bodyStr = JSON.stringify(body);

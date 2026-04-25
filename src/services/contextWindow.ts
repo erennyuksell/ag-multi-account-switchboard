@@ -7,13 +7,8 @@
 import { ServerInfo } from '../types';
 import { callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
-import * as fs from 'fs';
 
 const log = createLogger('ContextWindow');
-const diagPath = '/tmp/ag-ctx-diag.log';
-function cwDiag(msg: string) {
-    try { fs.appendFileSync(diagPath, `[${new Date().toISOString()}] CW: ${msg}\n`); } catch { }
-}
 
 /** Known model context limits (tokens) */
 const MODEL_CONTEXT_LIMITS: Record<string, number> = {
@@ -188,7 +183,7 @@ export class ContextWindowService {
                 'GetCascadeTrajectoryGeneratorMetadata',
                 { cascade_id: cascadeId, generator_metadata_offset: offset });
             metas = resp?.generatorMetadata || [];
-            cwDiag(`FETCH: fast path apiTotal=${apiTotal} offset=${offset} got=${metas.length} cascade=${cascadeId.substring(0, 12)}`);
+            log.diag(`FETCH: fast path apiTotal=${apiTotal} offset=${offset} got=${metas.length} cascade=${cascadeId.substring(0, 12)}`);
         } else {
             // Checkpoint path — forward-paginate to find the true end
             let offset = 0;
@@ -204,7 +199,7 @@ export class ContextWindowService {
                 calls++;
                 if (batch.length < 100) break;  // partial batch = reached the end
             }
-            cwDiag(`FETCH: paginated ${calls} calls, trueTotal=${offset} using last ${metas.length} cascade=${cascadeId.substring(0, 12)}`);
+            log.diag(`FETCH: paginated ${calls} calls, trueTotal=${offset} using last ${metas.length} cascade=${cascadeId.substring(0, 12)}`);
         }
 
         if (metas.length === 0) {
@@ -398,11 +393,11 @@ export class ContextWindowService {
             const chatGroup = groups?.find((g: any) => g.name === 'Chat Messages');
             const lastChild = chatGroup?.children?.[chatGroup.children.length - 1];
             const childCount = chatGroup?.children?.length ?? 0;
-            cwDiag(`SCAN HIT: idx=${i}/${metas.length} tokens=${cwm.estimatedTokensUsed} chatChildren=${childCount} lastChild="${lastChild?.name || 'none'}" (scanned ${metas.length - i}, skipped ${metas.length - 1 - i})`);
+            log.diag(`SCAN HIT: idx=${i}/${metas.length} tokens=${cwm.estimatedTokensUsed} chatChildren=${childCount} lastChild="${lastChild?.name || 'none'}" (scanned ${metas.length - i}, skipped ${metas.length - 1 - i})`);
             return m;
         }
 
-        cwDiag(`SCAN TOTAL MISS: no entry with token data in ${metas.length} entries`);
+        log.diag(`SCAN TOTAL MISS: no entry with token data in ${metas.length} entries`);
         return null;
     }
 
@@ -471,7 +466,7 @@ export class ContextWindowService {
         const result = this.buildContextWindowData(cascadeId, title, lastMeta);
         if (result) {
             this.setCacheEntry(cascadeId, result);
-            cwDiag(`LIVE: offset=${offset} tokens=${result.usedTokens} (${result.model})`);
+            log.diag(`LIVE: offset=${offset} tokens=${result.usedTokens} (${result.model})`);
         }
         return result;
     }

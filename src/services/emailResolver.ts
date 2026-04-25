@@ -12,6 +12,7 @@ import { USSApi } from '../types';
 import { extractStringField } from '../utils/protobuf';
 import { STATE_DB_PATH } from '../constants';
 import { createLogger } from '../utils/logger';
+import { getUSS } from '../utils/uss';
 
 const execAsync = promisify(exec);
 const log = createLogger('EmailResolver');
@@ -21,7 +22,7 @@ export class EmailResolver {
     async getActiveEmail(): Promise<string> {
         try {
             // Try USS API first (in-memory, most accurate)
-            const uss: USSApi | undefined = (vscode as any).antigravityUnifiedStateSync;
+            const uss = getUSS();
             if (uss?.UserStatus?.getUserStatus) {
                 const statusBinary = await uss.UserStatus.getUserStatus();
                 if (statusBinary) {

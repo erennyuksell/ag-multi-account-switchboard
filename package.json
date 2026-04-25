@@ -133,6 +133,11 @@
               "cache": 0.25
             }
           }
+        },
+        "ag-switchboard.diagnosticMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose file logging to /tmp/ag-ctx-diag.log for troubleshooting. Restart not required."
         }
       }
     }
