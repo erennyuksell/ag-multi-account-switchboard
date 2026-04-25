@@ -2,19 +2,18 @@
 
 **The missing control panel for Antigravity IDE — switch accounts instantly, monitor AI quotas in real time, drill into token budgets, and track usage costs across every conversation you've ever had.**
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/preview.png" alt="Accounts Tab" width="280"/>
-  &nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/token-budget.png" alt="Token Budget" width="280"/>
-  &nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-sidebar.png" alt="Usage Stats" width="280"/>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/context-detail.png" alt="Context Window Detail" width="580"/>
-  &nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-panel-1.png" alt="Usage Dashboard" width="280"/>
-</p>
+<table align="center">
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/preview.png" alt="Accounts" width="400"/><br/><sub><b>Accounts</b></sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/token-budget.png" alt="Token Budget" width="176"/><br/><sub><b>Token Budget</b></sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-sidebar.png" alt="Usage Stats" width="177"/><br/><sub><b>Usage Stats</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/context-detail.png" alt="Context Detail" width="280"/><br/><sub><b>Context Detail</b></sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-panel-1.png" alt="Dashboard Top" width="282"/><br/><sub><b>Dashboard Top</b></sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/erennyuksell/ag-multi-account-switchboard/main/assets/usage-panel-2.png" alt="Dashboard Bottom" width="282"/><br/><sub><b>Dashboard Bottom</b></sub></td>
+  </tr>
+</table>
 
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
