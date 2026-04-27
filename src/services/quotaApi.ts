@@ -5,6 +5,9 @@ import { collectBody } from '../utils/http';
 
 export class QuotaApiService {
 
+    /** Timeout for Google Cloud quota API requests */
+    private static readonly CLOUD_API_TIMEOUT_MS = 25_000;
+
     /** Fetch quota for a remote account using its access token */
     async fetchRemoteQuota(accessToken: string): Promise<QuotaResult> {
         // 1. Get project ID + tier
@@ -105,7 +108,7 @@ export class QuotaApiService {
                     'User-Agent': USER_AGENT,
                     'Accept': 'application/json',
                 },
-                timeout: 25000,
+                timeout: QuotaApiService.CLOUD_API_TIMEOUT_MS,
             }, async (res) => {
                 try {
                     const { status, body: data } = await collectBody(res);

@@ -3,16 +3,22 @@
  * Pure functions only: no DOM, no Node APIs, no side effects.
  */
 
+import {
+    QUOTA_HEALTHY_PCT, QUOTA_WARN_PCT,
+    USAGE_HIGH_PCT, USAGE_MEDIUM_PCT,
+    HOURS_IN_DAY,
+} from './uiConstants';
+
 // ─── CSS class helpers ───
 
 export function dotClass(pct: number): string {
-    return pct >= 50 ? 'g' : pct >= 20 ? 'y' : 'r';
+    return pct >= QUOTA_HEALTHY_PCT ? 'g' : pct >= QUOTA_WARN_PCT ? 'y' : 'r';
 }
 
 export const fillClass = dotClass;
 
 export function pctClass(pct: number): string {
-    return pct >= 80 ? 'r' : pct >= 50 ? 'y' : 'g';
+    return pct >= USAGE_HIGH_PCT ? 'r' : pct >= USAGE_MEDIUM_PCT ? 'y' : 'g';
 }
 
 // ─── Time helpers ───
@@ -31,9 +37,9 @@ export function formatDurationMs(ms: number): string {
     if (ms <= 0) return '';
     const h = Math.floor(ms / 3600000);
     const m = Math.floor((ms % 3600000) / 60000);
-    if (h >= 24) {
-        const d = Math.floor(h / 24);
-        const rh = h % 24;
+    if (h >= HOURS_IN_DAY) {
+        const d = Math.floor(h / HOURS_IN_DAY);
+        const rh = h % HOURS_IN_DAY;
         return rh > 0 ? d + 'd ' + rh + 'h' : d + 'd';
     }
     return h > 0 ? h + 'h ' + m + 'm' : m + 'm';

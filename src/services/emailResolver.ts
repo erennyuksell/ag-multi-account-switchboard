@@ -10,7 +10,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { USSApi } from '../types';
 import { extractStringField } from '../utils/protobuf';
-import { STATE_DB_PATH } from '../constants';
+import { STATE_DB_PATH, SQLITE_EXEC_TIMEOUT_MS } from '../constants';
 import { createLogger } from '../utils/logger';
 import { getUSS } from '../utils/uss';
 
@@ -41,7 +41,7 @@ export class EmailResolver {
             // Fallback: read from antigravityAuthStatus in state.vscdb
             const sql = "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus';";
             const { stdout } = await execAsync(`sqlite3 "${STATE_DB_PATH}" "${sql}"`, {
-                timeout: 5000,
+                timeout: SQLITE_EXEC_TIMEOUT_MS,
             });
             const result = stdout.trim();
             if (result) {

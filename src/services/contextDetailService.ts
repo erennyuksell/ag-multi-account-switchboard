@@ -8,6 +8,11 @@
 
 import { ServerInfo } from '../types';
 import { callLsJson } from '../utils/lsClient';
+
+/** Timeout for single-step fetch (steps can be large) */
+const STEP_FETCH_TIMEOUT_MS = 15_000;
+/** Timeout for full markdown export (large conversations) */
+const MARKDOWN_EXPORT_TIMEOUT_MS = 30_000;
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('CtxDetail');
@@ -52,7 +57,7 @@ export class ContextDetailService {
             const resp = await callLsJson(serverInfo, 'GetCascadeTrajectorySteps', {
                 cascade_id: cascadeId,
                 step_offset: offset,
-            }, 15000);
+            }, STEP_FETCH_TIMEOUT_MS);
 
             const steps = resp?.steps || [];
             if (steps.length === 0) return null;
@@ -101,7 +106,7 @@ export class ContextDetailService {
         try {
             const resp = await callLsJson(serverInfo, 'ConvertTrajectoryToMarkdown', {
                 conversationId: cascadeId,
-            }, 30000);
+            }, MARKDOWN_EXPORT_TIMEOUT_MS);
 
             if (resp?.markdown) return resp.markdown;
 

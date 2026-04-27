@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows } from '../constants';
+import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 
 const execAsync = promisify(exec);
@@ -92,13 +92,10 @@ export class ServerDiscoveryService {
                 for (const port of ports) {
                     try {
                         const info: ServerInfo = { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
-                        const resp = await callLsJson(info, 'GetCascadeTrajectory', { cascade_id: cascadeId }, 3000);
+                        const resp = await callLsJson(info, 'GetCascadeTrajectory', { cascade_id: cascadeId }, CASCADE_PROBE_TIMEOUT_MS);
                         const metaCount = parseInt(resp?.numTotalGeneratorMetadata || '0', 10);
-                        // Remember the first reachable Global LS (even if metaCount=0)
                         if (!firstReachableGlobal) firstReachableGlobal = info;
-                        if (metaCount > 0) {
-                            return info; // Found live data
-                        }
+                        if (metaCount > 0) return info;
                     } catch { /* port doesn't respond */ }
                 }
             }
@@ -191,7 +188,7 @@ export class ServerDiscoveryService {
     fetchLocalQuota(serverInfo: ServerInfo): Promise<any> {
         return callLsJson(serverInfo, 'GetUserStatus', {
             metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' },
-        }, 3000);
+        }, CASCADE_PROBE_TIMEOUT_MS);
     }
 
     /** Quick probe to validate a server candidate */

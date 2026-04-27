@@ -35,9 +35,11 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'ready':
                     log.info('MSG: ready received');
                     // Instant: push whatever is in memory RIGHT NOW (0ms, no network)
-                    // Context window comes from lastContextWindow cache (set by USS or globalState restore).
-                    // Do NOT re-fetch here — getActiveContext() global sort can pick wrong conversation.
                     this.quotaManager.pushCachedData();
+                    // Then silently fetch fresh quota in background.
+                    // Without this, a re-opened panel shows stale data until the
+                    // next 60s webview timer tick (retainContextWhenHidden is off).
+                    this.quotaManager.refresh();
                     break;
                 case 'refresh':
                     this.quotaManager.refresh();
@@ -47,20 +49,18 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'openFile': {
                     const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-                    if (wsRoot && msg.path) {
-                        // Skills are indexed as directories — open their SKILL.md
-                        const isSkillDir = /^\.agent\/skills\/[^/]+$/.test(msg.path);
-                        const filePath = isSkillDir ? msg.path + '/SKILL.md' : msg.path;
-                        const fileUri = vscode.Uri.joinPath(wsRoot, filePath);
-                        vscode.workspace.openTextDocument(fileUri).then(doc =>
-                            vscode.window.showTextDocument(doc, { preview: true })
-                        ).then(undefined, () => {
-                            // Fallback: try without SKILL.md (e.g. index.md)
-                            const fallback = vscode.Uri.joinPath(wsRoot, msg.path);
-                            vscode.workspace.openTextDocument(fallback).then(doc =>
-                                vscode.window.showTextDocument(doc, { preview: true })
-                            );
-                        });
+                    if (!wsRoot || !msg.path) break;
+
+                    const isSkillDir = /^\.agent\/skills\/[^/]+$/.test(msg.path);
+                    const filePath = isSkillDir ? msg.path + '/SKILL.md' : msg.path;
+
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(wsRoot, filePath));
+                        await vscode.window.showTextDocument(doc, { preview: true });
+                    } catch {
+                        // Fallback: try without SKILL.md suffix
+                        const fallbackDoc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(wsRoot, msg.path));
+                        await vscode.window.showTextDocument(fallbackDoc, { preview: true });
                     }
                     break;
                 }
@@ -108,6 +108,17 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                 case 'setUsageRange':
                     this.handleUsageRange(msg.range);
                     break;
+            }
+        });
+
+        // Refresh quota when panel becomes visible again after being hidden.
+        // The webview timer dies when the panel is collapsed (retainContextWhenHidden
+        // is not set for sidebar views), so cached data can go stale.
+        webviewView.onDidChangeVisibility(() => {
+            if (webviewView.visible) {
+                log.info('panel re-shown → refreshing');
+                this.quotaManager.pushCachedData();
+                this.quotaManager.refresh();
             }
         });
 

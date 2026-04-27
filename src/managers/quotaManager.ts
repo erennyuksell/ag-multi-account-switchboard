@@ -46,6 +46,8 @@ export class QuotaManager {
     private static readonly CASCADE_ID_LOG_LEN = 12;
     private static readonly POST_SWITCH_REFRESH_DELAY = 2000;
     private static readonly DEBOUNCE_MS = 1500;
+    /** Host-side polling interval — runs regardless of panel visibility */
+    private static readonly HOST_POLL_INTERVAL_MS = 60_000;
     private currentUsageRange = '24h';
 
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
@@ -56,6 +58,7 @@ export class QuotaManager {
     private static readonly CASCADE_SERVER_TTL = 600_000;
     /** Lifecycle-scoped switch guard. AbortController so double-click aborts previous switch. */
     private switchController: AbortController | null = null;
+    private hostPollTimer: ReturnType<typeof setInterval> | null = null;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -80,6 +83,13 @@ export class QuotaManager {
         this.lastContextConversationId = null;
         this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
         this.refresh();
+
+        // Host-side periodic poll — keeps status bar and cache fresh even
+        // when the sidebar panel is collapsed (webview timer dies without
+        // retainContextWhenHidden). This is the authoritative poll;
+        // the webview timer provides supplementary UI-driven refreshes.
+        this.hostPollTimer = setInterval(() => this.refresh(), QuotaManager.HOST_POLL_INTERVAL_MS);
+        context.subscriptions.push({ dispose: () => { if (this.hostPollTimer) clearInterval(this.hostPollTimer); } });
     }
 
     getSwitchService(): AccountSwitchService {
@@ -379,6 +389,7 @@ export class QuotaManager {
             if (localResult) {
                 this.lastLocalData = localResult;
                 this.updateStatusBar(localResult);
+                this.logQuotaFractions(localResult);
             } else {
                 this.lastLocalData = null;
                 this.statusBar.setError('$(error) Antigravity: Server Not Found', 'Could not connect to local Antigravity server');
@@ -438,16 +449,11 @@ export class QuotaManager {
 
             if (!ctx) {
                 log.diag(`refreshCW: ctx is null for ${cascadeId.substring(0, QuotaManager.CASCADE_ID_LOG_LEN)}`);
-                // If this is the ACTIVE conversation and ctx is null (new/empty conversation),
-                // clear stale data so the widget doesn't show the previous conversation's info.
-                if (cascadeId === this.lastContextConversationId) {
-                    this.lastContextWindow = null;
-                    this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
-                    if (this.viewProvider) {
-                        this.viewProvider.postContextWindow(null);
-                        log.diag('refreshCW: cleared stale context (active conversation has no data)');
-                    }
-                }
+                if (cascadeId !== this.lastContextConversationId) return;
+                this.lastContextWindow = null;
+                this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, null);
+                this.viewProvider?.postContextWindow(null);
+                log.diag('refreshCW: cleared stale context (active conversation has no data)');
                 return;
             }
 
@@ -526,12 +532,11 @@ export class QuotaManager {
                 try {
                     this.cachedServer = null;
                     const serverInfo = await this.resolveServer();
-                    if (serverInfo) {
-                        const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
-                        if (localData) {
-                            this.lastLocalData = localData;
-                            this.updateStatusBar(localData);
-                        }
+                    if (!serverInfo) throw new Error('no server');
+                    const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
+                    if (localData) {
+                        this.lastLocalData = localData;
+                        this.updateStatusBar(localData);
                     }
                 } catch (e: any) {
                     log.warn('Post-switch local fetch failed:', e?.message);
@@ -581,5 +586,15 @@ export class QuotaManager {
 
     private updateStatusBar(data: LocalQuotaData): void {
         this.statusBar.update(data, this.getSelectedModels());
+    }
+
+    /** Diagnostic probe: log raw LS remainingFraction per model (only in diag mode) */
+    private logQuotaFractions(data: LocalQuotaData): void {
+        const configs = data.userStatus?.cascadeModelConfigData?.clientModelConfigs;
+        if (!configs) return;
+        const fracs = configs
+            .filter((m: any) => m.quotaInfo?.remainingFraction !== undefined)
+            .map((m: any) => `${m.label || '?'}=${m.quotaInfo.remainingFraction}`);
+        if (fracs.length > 0) log.diag(`quota fractions: [${fracs.join(', ')}]`);
     }
 }

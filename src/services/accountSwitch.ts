@@ -9,7 +9,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { writeToStateDb } from '../utils/dbWriter';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
-import { LS_SERVICE_PATH } from '../constants';
+import { LS_SERVICE_PATH, RENEWAL_RETRY_DELAY_MS } from '../constants';
 
 const log = createLogger('AccountSwitch');
 
@@ -62,6 +62,15 @@ export class AccountSwitchService {
     private static readonly MIN_RENEWAL_DELAY_MS = 30_000;
     /** Maximum safe setTimeout delay — Node.js caps at 2^31-1 ms (~24.8 days) */
     private static readonly MAX_TIMEOUT_MS = 2_147_483_647;
+
+    // ── LS Readiness Gate timing ──
+    private static readonly LS_READY_MAX_WAIT_MS = 8_000;
+    private static readonly LS_READY_POLL_INTERVAL_MS = 400;
+
+    // ── Email Confirmation Polling timing ──
+    private static readonly POLL_MAX_WAIT_MS = 12_000;
+    private static readonly POLL_INTERVAL_MS = 800;
+    private static readonly POLL_INITIAL_DELAY_MS = 300;
 
     constructor(_context: vscode.ExtensionContext, authService: GoogleAuthService) {
         this.authService = authService;
@@ -222,7 +231,7 @@ export class AccountSwitchService {
         } catch (err: any) {
             log.error(`❌ Token renewal failed for ${this.activeEmail}:`, err?.message || err);
             // Retry in 2 minutes on transient failure
-            this.renewalTimer = setTimeout(() => this.executeRenewal(), 2 * 60_000);
+            this.renewalTimer = setTimeout(() => this.executeRenewal(), RENEWAL_RETRY_DELAY_MS);
         }
     }
 
@@ -245,7 +254,10 @@ export class AccountSwitchService {
      * Endpoint discovery is INSIDE the retry loop — handles LS temporarily
      * going down after handleAuthRefresh.
      */
-    private async awaitLSReadiness(maxWaitMs = 8000, intervalMs = 400): Promise<{ ready: boolean; endpoints: LsEndpoint[] }> {
+    private async awaitLSReadiness(
+        maxWaitMs = AccountSwitchService.LS_READY_MAX_WAIT_MS,
+        intervalMs = AccountSwitchService.LS_READY_POLL_INTERVAL_MS,
+    ): Promise<{ ready: boolean; endpoints: LsEndpoint[] }> {
         const ca = loadLSCert();
         const start = Date.now();
 
@@ -265,13 +277,13 @@ export class AccountSwitchService {
                     ca,
                 );
                 const userStatus = body ? extractField(body, 1) : null;
-                if (userStatus && userStatus.length > 5) {
-                    const email = extractStringField(userStatus, 7);
-                    if (email) {
-                        log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
-                        return { ready: true, endpoints };
-                    }
-                }
+                if (!userStatus || userStatus.length <= 5) { await delay(intervalMs); continue; }
+
+                const email = extractStringField(userStatus, 7);
+                if (!email) { await delay(intervalMs); continue; }
+
+                log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
+                return { ready: true, endpoints };
             } catch (e: any) {
                 log.info(`LS readiness gate: probe failed (${e?.message}), waiting...`);
             }
@@ -324,8 +336,8 @@ export class AccountSwitchService {
         generation: number,
         targetEmail: string,
         initialEndpoints: LsEndpoint[],
-        maxWaitMs = 12000,
-        intervalMs = 800,
+        maxWaitMs = AccountSwitchService.POLL_MAX_WAIT_MS,
+        intervalMs = AccountSwitchService.POLL_INTERVAL_MS,
     ): Promise<{ confirmed: boolean }> {
         let lsProcesses = initialEndpoints.length > 0 ? initialEndpoints : await findLSEndpoints();
         if (lsProcesses.length === 0) return { confirmed: false };
@@ -337,7 +349,7 @@ export class AccountSwitchService {
         const start = Date.now();
         let pollCount = 0;
 
-        await delay(300); // LS typically updates email within 100-200ms of registerGdmUser
+        await delay(AccountSwitchService.POLL_INITIAL_DELAY_MS);
 
         while (Date.now() - start < maxWaitMs) {
             if (generation !== this.switchGeneration) {
@@ -355,25 +367,21 @@ export class AccountSwitchService {
                 const lsEmail = userStatus ? extractStringField(userStatus, 7) : '';
                 log.info(`FORENSIC poll#${pollCount} @${elapsed}ms: bodyLen=${body?.length ?? 0} statusLen=${userStatus?.length ?? 0} email=${lsEmail || '(empty)'} target=${targetEmail} matched=${emailMatched}`);
 
-                if (userStatus && userStatus.length > 5) {
-                    if (!emailMatched) {
-                        if (lsEmail && lsEmail.toLowerCase() === targetNorm) {
-                            emailMatched = true;
-                            log.info(`FORENSIC EMAIL_MATCH @${elapsed}ms: statusLen=${userStatus.length}B — THIS is pushed to USS`);
+                // Guard: skip if no useful status, already matched, or wrong email
+                if (!userStatus || userStatus.length <= 5 || emailMatched) continue;
+                if (!lsEmail || lsEmail.toLowerCase() !== targetNorm) continue;
 
-                            // Push first confirmed status to USS immediately
-                            await this.pushUserStatusToUSS(uss, userStatus);
-                            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                emailMatched = true;
+                log.info(`FORENSIC EMAIL_MATCH @${elapsed}ms: statusLen=${userStatus.length}B — THIS is pushed to USS`);
 
-                            // Continue USS stabilization in background (profile pic, data growth)
-                            // Detached — doesn't block the switch return.
-                            this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs, maxWaitMs - (Date.now() - start))
-                                .catch(err => log.warn('USS stabilization error:', err?.message));
+                await this.pushUserStatusToUSS(uss, userStatus);
+                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
 
-                            return { confirmed: true };
-                        }
-                    }
-                }
+                // Continue USS stabilization in background (profile pic, data growth)
+                this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs, maxWaitMs - (Date.now() - start))
+                    .catch(err => log.warn('USS stabilization error:', err?.message));
+
+                return { confirmed: true };
             } catch (e: any) {
                 const msg = e?.message || '';
                 log.info(`FORENSIC poll#${pollCount} ERROR: ${msg}`);
@@ -416,33 +424,36 @@ export class AccountSwitchService {
                 let userStatus = body ? extractField(body, 1) : null;
                 if (!userStatus || userStatus.length <= 5) continue;
 
-                // Fetch profile picture
-                try {
-                    const profileBody = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetProfileData`, ca);
-                    const profilePicUrl = profileBody ? extractStringField(profileBody, 1) : '';
-                    if (profilePicUrl.length > 10) {
-                        userStatus = Buffer.concat([userStatus, encodeString(38, profilePicUrl)]);
-                    }
-                } catch (e: any) {
-                    log.warn('Profile picture fetch failed:', e?.message);
+                // Append profile picture URL if available
+                const profilePicUrl = await this.fetchProfilePicUrl(ls, ca);
+                if (profilePicUrl) {
+                    userStatus = Buffer.concat([userStatus, encodeString(38, profilePicUrl)]);
                 }
 
-                if (userStatus.length > lastSize) {
-                    await this.pushUserStatusToUSS(uss, userStatus);
-                    await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-                    log.info(`USS stabilize: grew ${lastSize} → ${userStatus.length}B`);
-                    lastSize = userStatus.length;
-                    stableCount = 0;
-                } else {
+                if (userStatus.length <= lastSize) {
                     stableCount++;
-                    if (stableCount >= 2) {
-                        log.info(`USS stabilized at ${lastSize}B`);
-                        return;
-                    }
+                    if (stableCount >= 2) { log.info(`USS stabilized at ${lastSize}B`); return; }
+                    continue;
                 }
+
+                await this.pushUserStatusToUSS(uss, userStatus);
+                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                log.info(`USS stabilize: grew ${lastSize} → ${userStatus.length}B`);
+                lastSize = userStatus.length;
+                stableCount = 0;
             } catch (e: any) {
                 log.warn('USS stabilize iteration failed:', e?.message);
             }
+        }
+    }
+
+    private async fetchProfilePicUrl(ls: any, ca: Buffer | undefined): Promise<string> {
+        try {
+            const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetProfileData`, ca);
+            const url = body ? extractStringField(body, 1) : '';
+            return url.length > 10 ? url : '';
+        } catch { /* expected: profile endpoint may not be available */
+            return '';
         }
     }
 

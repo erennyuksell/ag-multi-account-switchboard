@@ -10,8 +10,8 @@
 
 import { ServerInfo } from '../types';
 import { callLsHttpsJson } from '../utils/lsClient';
+import { DEFAULT_LS_TIMEOUT_MS, LS_SERVICE_PATH } from '../constants';
 import { createLogger } from '../utils/logger';
-import { LS_SERVICE_PATH } from '../constants';
 
 const log = createLogger('RpcDirect');
 
@@ -89,7 +89,7 @@ export class RpcDirectClient {
     }
 
     /** RPC call with built-in error handling — returns null on any failure. */
-    private async rpc(path: string, body: Record<string, unknown>, timeoutMs = 8000): Promise<any | null> {
+    private async rpc(path: string, body: Record<string, unknown>, timeoutMs = DEFAULT_LS_TIMEOUT_MS): Promise<any | null> {
         if (!this.isAvailable()) return null;
         try {
             return await this.httpsPost(path, body, timeoutMs);
@@ -99,7 +99,7 @@ export class RpcDirectClient {
         }
     }
 
-    private httpsPost(path: string, body: Record<string, unknown>, timeoutMs = 8000): Promise<any> {
+    private httpsPost(path: string, body: Record<string, unknown>, timeoutMs = DEFAULT_LS_TIMEOUT_MS): Promise<any> {
         return callLsHttpsJson(this.serverInfo.httpsPort!, this.serverInfo.csrfToken, path, body, timeoutMs);
     }
 }

@@ -2,7 +2,7 @@ import { createLogger } from '../utils/logger';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, callLsProto } from '../utils/lsClient';
 import { readFields, type ProtoField } from '../utils/protobuf';
 import { ServerInfo } from '../types';
-import { LS_SERVICE_PATH } from '../constants';
+import { LS_SERVICE_PATH, FILE_HEADER_READ_BYTES, DEFAULT_LS_TIMEOUT_MS } from '../constants';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -184,8 +184,8 @@ function readRuleTrigger(filePath: string): 'always_on' | 'model_decision' | 'ma
     try {
         // Only read first 256 bytes — frontmatter is always at the top
         const fd = fs.openSync(filePath, 'r');
-        const buf = Buffer.alloc(256);
-        fs.readSync(fd, buf, 0, 256, 0);
+        const buf = Buffer.alloc(FILE_HEADER_READ_BYTES);
+        fs.readSync(fd, buf, 0, FILE_HEADER_READ_BYTES, 0);
         fs.closeSync(fd);
         const head = buf.toString('utf-8');
         const match = head.match(/^---[\s\S]*?^trigger:\s*(\S+)/m);
@@ -335,7 +335,7 @@ export class TokenBaseService {
     }
 
     /** Generic HTTP POST to LS endpoint, returns raw Buffer — delegates to unified client */
-    private callHttp(serverInfo: ServerInfo, endpointPath: string, timeoutMs = 8000): Promise<Buffer> {
+    private callHttp(serverInfo: ServerInfo, endpointPath: string, timeoutMs = DEFAULT_LS_TIMEOUT_MS): Promise<Buffer> {
         return callLsProto(serverInfo, endpointPath, timeoutMs);
     }
 }

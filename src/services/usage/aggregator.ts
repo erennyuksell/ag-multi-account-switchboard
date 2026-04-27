@@ -14,6 +14,7 @@ import {
     ProviderBucket, WeekdayBucket,
 } from '../../types';
 import { matchPricing } from '../../shared/usage-components';
+import { HOURS_IN_DAY } from '../../shared/uiConstants';
 
 // ─── Model Display Name Resolution ───
 
@@ -132,15 +133,15 @@ function buildDailyBuckets(entries: Array<TokenEntry & { _caW: number; _reas: nu
 /** Build 24-hour token buckets from filtered entries (UTC → local). */
 function buildHourlyBuckets(entries: Array<TokenEntry & { _caW: number; _reas: number }>): HourlyBucket[] {
     const map: Record<number, HourlyBucket> = {};
-    for (let h = 0; h < 24; h++) {
+    for (let h = 0; h < HOURS_IN_DAY; h++) {
         map[h] = { hour: h, input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0 };
     }
     const localOffset = -(new Date().getTimezoneOffset() / 60);
     for (const e of entries) {
         if (e.ts.length < 13) continue;
         const utcHour = parseInt(e.ts.slice(11, 13), 10);
-        const hour = Math.floor((utcHour + localOffset + 24) % 24);
-        if (hour >= 0 && hour < 24) {
+        const hour = Math.floor((utcHour + localOffset + HOURS_IN_DAY) % HOURS_IN_DAY);
+        if (hour >= 0 && hour < HOURS_IN_DAY) {
             map[hour].input += e.inp;
             map[hour].output += e.out;
             map[hour].cache += e.cache;

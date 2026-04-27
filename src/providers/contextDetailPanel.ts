@@ -511,62 +511,12 @@ export class ContextDetailPanel {
                 </div>
                 <div class="cd-group-children">`;
 
-            // Find heaviest child for 🔥 badge
-            const heaviestTokens = group.children && group.children.length > 0
+            const heaviestTokens = group.children?.length
                 ? Math.max(...group.children.map(c => c.numTokens)) : 0;
 
-            // Render children
-            if (group.children && group.children.length > 0) {
+            if (group.children) {
                 for (const child of group.children) {
-                    const childPct = group.numTokens > 0
-                        ? Math.round(child.numTokens / group.numTokens * 100) : 0;
-                    const hasSubs = child.children && child.children.length > 0;
-                    const viewable = this.isViewableStep(child.name);
-                    // Extract step index from name like "1947: CONVERSATION_HISTORY"
-                    const stepIdx = parseInt(child.name.match(/^(\d+):/)?.[1] || '-1', 10);
-                    const classes = ['cd-child'];
-                    if (!hasSubs && !viewable) classes.push('no-expand');
-                    if (viewable) classes.push('viewable');
-                    // Extract step type for filtering
-                    const stepTypeRaw = child.name.match(/^\d+:\s*(.+)$/)?.[1]?.trim() || '';
-                    // Weight tier classes — exempt USER_INPUT & PLANNER_RESPONSE from dimming
-                    const importantTypes = ['USER_INPUT', 'PLANNER_RESPONSE', 'CONVERSATION_HISTORY', 'CHECKPOINT'];
-                    if (childPct >= 5) classes.push('weight-heavy');
-                    else if (childPct < 1 && !importantTypes.includes(stepTypeRaw)) classes.push('weight-light');
-                    const isHeaviest = child.numTokens === heaviestTokens && heaviestTokens > 0 && (group.children?.length || 0) > 1;
-
-                    html += `<div class="${classes.join(' ')}" data-type="${escHtml(stepTypeRaw)}" ${viewable ? `data-step="${escHtml(child.name)}" data-ordinal="${stepIdx}"` : ''}>
-                        <div class="cd-child-header">
-                            ${hasSubs ? '<span class="cd-expand-icon">▶</span>' : '<span class="cd-expand-spacer"></span>'}
-                            <span class="cd-child-name">${isHeaviest ? '🔥 ' : ''}${escHtml(this.formatChildName(child.name))}</span>
-                            <span class="cd-child-tokens">${fmtBig(child.numTokens)}</span>
-                            <span class="cd-child-pct">${childPct}%</span>
-                        </div>`;
-
-                    // Sub-children
-                    if (hasSubs) {
-                        html += `<div class="cd-child-subs">`;
-                        for (const sub of child.children!) {
-                            const subPct = child.numTokens > 0
-                                ? Math.round(sub.numTokens / child.numTokens * 100) : 0;
-                            const subViewable = this.isViewableStep(sub.name);
-                            const subStepIdx = parseInt(sub.name.match(/^(\d+):/)?.[1] || '-1', 10);
-                            html += `<div class="cd-sub" ${subViewable ? `data-step="${escHtml(sub.name)}" data-ordinal="${subStepIdx}"` : ''}>
-                                <div class="cd-sub-row">
-                                    <span class="cd-sub-name">${escHtml(this.formatChildName(sub.name))}</span>
-                                    <span class="cd-sub-tokens">${fmtBig(sub.numTokens)}</span>
-                                    <span class="cd-sub-pct">${subPct}%</span>
-                                </div>
-                                <div class="cd-detail"></div>
-                            </div>`;
-                        }
-                        html += `</div>`;
-                    }
-
-                    // Detail slot (always in DOM, :empty = hidden)
-                    if (viewable) html += `<div class="cd-detail"></div>`;
-
-                    html += `</div>`;
+                    html += this.renderChild(child, group, heaviestTokens);
                 }
             }
 
@@ -593,6 +543,65 @@ export class ContextDetailPanel {
     }
 
     // ─── Helpers ───
+
+    /** Render a single breakdown child node (and its sub-children). */
+    private renderChild(
+        child: ContextBreakdownGroup, parent: ContextBreakdownGroup, heaviestTokens: number,
+    ): string {
+        const childPct = parent.numTokens > 0
+            ? Math.round(child.numTokens / parent.numTokens * 100) : 0;
+        const hasSubs = !!child.children?.length;
+        const viewable = this.isViewableStep(child.name);
+        const stepIdx = parseInt(child.name.match(/^(\d+):/)?.[1] || '-1', 10);
+        const stepTypeRaw = child.name.match(/^\d+:\s*(.+)$/)?.[1]?.trim() || '';
+
+        const classes = ['cd-child'];
+        if (!hasSubs && !viewable) classes.push('no-expand');
+        if (viewable) classes.push('viewable');
+
+        const importantTypes = ['USER_INPUT', 'PLANNER_RESPONSE', 'CONVERSATION_HISTORY', 'CHECKPOINT'];
+        if (childPct >= 5) classes.push('weight-heavy');
+        else if (childPct < 1 && !importantTypes.includes(stepTypeRaw)) classes.push('weight-light');
+
+        const isHeaviest = child.numTokens === heaviestTokens && heaviestTokens > 0
+            && (parent.children?.length || 0) > 1;
+
+        let html = `<div class="${classes.join(' ')}" data-type="${escHtml(stepTypeRaw)}" ${viewable ? `data-step="${escHtml(child.name)}" data-ordinal="${stepIdx}"` : ''}>
+            <div class="cd-child-header">
+                ${hasSubs ? '<span class="cd-expand-icon">▶</span>' : '<span class="cd-expand-spacer"></span>'}
+                <span class="cd-child-name">${isHeaviest ? '🔥 ' : ''}${escHtml(this.formatChildName(child.name))}</span>
+                <span class="cd-child-tokens">${fmtBig(child.numTokens)}</span>
+                <span class="cd-child-pct">${childPct}%</span>
+            </div>`;
+
+        if (hasSubs) {
+            html += `<div class="cd-child-subs">`;
+            for (const sub of child.children!) {
+                html += this.renderSubChild(sub, child);
+            }
+            html += `</div>`;
+        }
+
+        if (viewable) html += `<div class="cd-detail"></div>`;
+        html += `</div>`;
+        return html;
+    }
+
+    /** Render a sub-child leaf node. */
+    private renderSubChild(sub: ContextBreakdownGroup, parent: ContextBreakdownGroup): string {
+        const subPct = parent.numTokens > 0
+            ? Math.round(sub.numTokens / parent.numTokens * 100) : 0;
+        const subViewable = this.isViewableStep(sub.name);
+        const subStepIdx = parseInt(sub.name.match(/^(\d+):/)?.[1] || '-1', 10);
+        return `<div class="cd-sub" ${subViewable ? `data-step="${escHtml(sub.name)}" data-ordinal="${subStepIdx}"` : ''}>
+            <div class="cd-sub-row">
+                <span class="cd-sub-name">${escHtml(this.formatChildName(sub.name))}</span>
+                <span class="cd-sub-tokens">${fmtBig(sub.numTokens)}</span>
+                <span class="cd-sub-pct">${subPct}%</span>
+            </div>
+            <div class="cd-detail"></div>
+        </div>`;
+    }
 
     private getGroupMeta(name: string): { icon: string; color: string } {
         const map: Record<string, { icon: string; color: string }> = {

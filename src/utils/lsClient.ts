@@ -19,7 +19,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { LS_CERT_PATHS, LS_PROCESS_GREP, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows } from '../constants';
+import {
+    LS_CERT_PATHS, LS_PROCESS_GREP, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
+    PROCESS_EXEC_TIMEOUT_MS, WMIC_EXEC_TIMEOUT_MS, LSOF_EXEC_TIMEOUT_MS,
+    LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
+} from '../constants';
 import { collectBuffer } from './http';
 
 const execAsync = promisify(exec);
@@ -33,11 +37,11 @@ export async function getWindowsProcessLines(grep: string): Promise<string[]> {
     const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${grep}*' } | Select-Object -ExpandProperty CommandLine"`;
     const wmic = `wmic process where "CommandLine like '%${grep}%'" get CommandLine /format:value 2>nul`;
     try {
-        const { stdout } = await execAsync(ps, { timeout: 8000 });
+        const { stdout } = await execAsync(ps, { timeout: PROCESS_EXEC_TIMEOUT_MS });
         return stdout.split('\n').map(l => l.trim()).filter(Boolean);
     } catch { /* expected: base64 decode may fail for non-protobuf data */
         try {
-            const { stdout } = await execAsync(wmic, { timeout: 5000 });
+            const { stdout } = await execAsync(wmic, { timeout: WMIC_EXEC_TIMEOUT_MS });
             // wmic /format:value emits "CommandLine=<value>" lines
             return stdout.split('\n')
                 .map(l => l.replace(/^CommandLine=/i, '').trim())
@@ -73,7 +77,7 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
         } else {
             const { stdout } = await execAsync(
                 `ps -A -ww -o args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
-                { timeout: 5000 },
+                { timeout: LSOF_EXEC_TIMEOUT_MS },
             );
             lines = stdout.trim().split('\n').filter(Boolean);
         }
@@ -154,7 +158,7 @@ export function callLSEndpoint(
             },
         );
         req.on('error', reject);
-        req.setTimeout(10_000, () => req.destroy(new Error('LS request timed out')));
+        req.setTimeout(LS_REQUEST_TIMEOUT_MS, () => req.destroy(new Error('LS request timed out')));
         req.end();
     });
 }
@@ -181,7 +185,7 @@ export function callLsJson(
     serverInfo: ServerInfo,
     method: string,
     body: Record<string, unknown> = {},
-    timeoutMs = 8000,
+    timeoutMs = DEFAULT_LS_TIMEOUT_MS,
 ): Promise<any> {
     const fullPath = method.startsWith('/') ? method : `${LS_SERVICE_PATH}/${method}`;
 
@@ -227,7 +231,7 @@ export function callLsJson(
 export function callLsProto(
     serverInfo: ServerInfo,
     endpointPath: string,
-    timeoutMs = 8000,
+    timeoutMs = DEFAULT_LS_TIMEOUT_MS,
 ): Promise<Buffer> {
     return new Promise((resolve, reject) => {
         const req = http.request({
@@ -267,7 +271,7 @@ export function callLsHttpsJson(
     csrfToken: string,
     path: string,
     body: Record<string, unknown> = {},
-    timeoutMs = 8000,
+    timeoutMs = DEFAULT_LS_TIMEOUT_MS,
 ): Promise<any> {
     return new Promise((resolve, reject) => {
         const bodyStr = JSON.stringify(body);

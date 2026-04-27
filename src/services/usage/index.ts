@@ -288,146 +288,114 @@ export class UsageStatsService {
     ): Promise<Record<string, ConvoTokenData>> {
         const result: Record<string, ConvoTokenData> = {};
         const rpc = new RpcDirectClient(serverInfo);
-        let useRpc = rpc.isAvailable();
+        let useRpc = rpc.isAvailable() && await rpc.heartbeat();
         if (useRpc) {
-            const alive = await rpc.heartbeat();
-            if (alive) {
-                log.info(`RPC Direct validated on HTTPS port ${serverInfo.httpsPort}`);
-            } else {
-                log.warn('RPC Direct heartbeat failed — falling back to HTTP');
-                useRpc = false;
-            }
+            log.info(`RPC Direct validated on HTTPS port ${serverInfo.httpsPort}`);
         }
 
-        const STEPS_TIMEOUT = 12000;
-
-        // Sliding-window pool: no batch-boundary idle time.
-        // Each slot is reused the moment a conversation completes.
         let processed = 0;
         await concurrentPool(
             conversationIds,
             async (cid) => {
-                // Fetch BOTH metadata + steps in parallel per conversation.
-                const [metaResult, stepsResult] = await Promise.allSettled([
-                    (async () => {
-                        let meta = useRpc ? await rpc.getMetadata(cid) : null;
-                        if (!meta) {
-                            const allMeta = await paginateAll(async (offset) => {
-                                const resp = await callLsJson(serverInfo, EP.METADATA,
-                                    { cascade_id: cid, generator_metadata_offset: offset }, FETCH_TIMEOUT_MS).catch(() => null);
-                                return resp?.generatorMetadata || resp?.generator_metadata || [];
-                            });
-                            meta = allMeta.length > 0 ? allMeta : null;
-                        }
-                        return meta;
-                    })(),
-                    (async () => {
-                        let steps = useRpc ? await rpc.getSteps(cid) : null;
-                        if (!steps) {
-                            const allSteps = await paginateAll(async (offset) => {
-                                const resp = await callLsJson(serverInfo, EP.STEPS,
-                                    { cascade_id: cid, step_offset: offset }, STEPS_TIMEOUT).catch(() => null);
-                                return resp?.steps || [];
-                            });
-                            steps = allSteps.length > 0 ? allSteps : null;
-                        }
-                        return steps;
-                    })(),
-                ]);
-
-                const meta = metaResult.status === 'fulfilled' ? metaResult.value : null;
-                const steps = stepsResult.status === 'fulfilled' ? stepsResult.value : null;
-                const metaEntries = meta ? this.extractEntries({ generatorMetadata: meta }) : [];
-                const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
-                const merged = [...metaEntries, ...stepEntries];
-
-                // Fingerprint: token counts + timestamp truncated to SECONDS.
-                //
-                // WHY truncate? Metadata and steps APIs return the SAME token event but
-                // with different microsecond-precision timestamps:
-                //   meta: 2026-04-24T18:46:13.25647Z
-                //   step: 2026-04-24T18:46:13.26777Z
-                // Full-precision TS would fail to dedup these. Truncating to seconds
-                // is safe because token counts (inp:out:cache) provide collision resistance.
-                const seen = new Set<string>();
-                const entries = merged.filter(e => {
-                    const tsSec = e.ts?.substring(0, 19) || ''; // truncate to YYYY-MM-DDTHH:MM:SS
-                    const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
-                    if (seen.has(fp)) return false;
-                    seen.add(fp);
-                    return true;
-                });
-
-                if (entries.length > 0) {
-                    result[cid] = { entries };
-                    const removed = merged.length - entries.length;
-                    if (removed > 0 || stepEntries.length > 0) {
-                        log.info(`FETCH: ${cid.substring(0, 12)} — meta=${metaEntries.length} steps=${stepEntries.length} deduped=${entries.length}`);
-                    }
-                }
+                const entries = await this.fetchAndDedup(serverInfo, rpc, useRpc, cid, 1);
+                if (entries.length > 0) result[cid] = { entries };
             },
             BATCH_CONCURRENCY,
-            // Heartbeat + progress: keep lock alive and update UI during long fetches
-            (_result, _index) => {
-                this.processLock.heartbeat();
-                processed++;
-                if (onProgress) onProgress(processed);
-            },
+            () => { this.processLock.heartbeat(); processed++; onProgress?.(processed); },
         );
 
-        // Retry pass: conversations with known stepCounts but 0 extracted entries.
-        // Large conversations timeout under parallel load; retry serially.
+        // Retry: conversations with known stepCounts but 0 entries (timeout under load)
         if (this.currentStepCounts) {
             const missed = conversationIds.filter(cid =>
                 !(cid in result) && (this.currentStepCounts?.get(cid) ?? 0) > 0,
             );
             if (missed.length > 0) {
-                log.info(`Retry: ${missed.length} conversations had stepCounts but 0 entries — retrying serially`);
+                log.info(`Retry: ${missed.length} conversations — serial`);
                 await concurrentPool(
                     missed,
                     async (cid) => {
-                        const [metaResult, stepsResult] = await Promise.allSettled([
-                            (async () => {
-                                const allMeta = await paginateAll(async (offset) => {
-                                    const resp = await callLsJson(serverInfo, EP.METADATA,
-                                        { cascade_id: cid, generator_metadata_offset: offset }, FETCH_TIMEOUT_MS * 2).catch(() => null);
-                                    return resp?.generatorMetadata || resp?.generator_metadata || [];
-                                });
-                                return allMeta.length > 0 ? allMeta : null;
-                            })(),
-                            (async () => {
-                                const allSteps = await paginateAll(async (offset) => {
-                                    const resp = await callLsJson(serverInfo, EP.STEPS,
-                                        { cascade_id: cid, step_offset: offset }, STEPS_TIMEOUT * 2).catch(() => null);
-                                    return resp?.steps || [];
-                                });
-                                return allSteps.length > 0 ? allSteps : null;
-                            })(),
-                        ]);
-                        const meta = metaResult.status === 'fulfilled' ? metaResult.value : null;
-                        const steps = stepsResult.status === 'fulfilled' ? stepsResult.value : null;
-                        const metaEntries = meta ? this.extractEntries({ generatorMetadata: meta }) : [];
-                        const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
-                        const merged = [...metaEntries, ...stepEntries];
-                        const seen = new Set<string>();
-                        const entries = merged.filter(e => {
-                            const tsSec = e.ts?.substring(0, 19) || '';
-                            const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
-                            if (seen.has(fp)) return false;
-                            seen.add(fp);
-                            return true;
-                        });
+                        const entries = await this.fetchAndDedup(serverInfo, rpc, false, cid, 2);
                         if (entries.length > 0) {
                             result[cid] = { entries };
-                            log.info(`RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries recovered`);
+                            log.info(`RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries`);
                         }
                     },
-                    1, // Serial — no contention
+                    1,
                 );
             }
         }
 
         return result;
+    }
+
+    /** Fetch meta+steps for a single conversation, merge, and dedup. */
+    private async fetchAndDedup(
+        serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
+        cid: string, timeoutMultiplier: number,
+    ): Promise<import('./types').TokenEntry[]> {
+        const STEPS_TIMEOUT = 12000 * timeoutMultiplier;
+        const META_TIMEOUT = FETCH_TIMEOUT_MS * timeoutMultiplier;
+
+        const [metaResult, stepsResult] = await Promise.allSettled([
+            this.fetchMetaForConvo(serverInfo, rpc, useRpc, cid, META_TIMEOUT),
+            this.fetchStepsForConvo(serverInfo, rpc, useRpc, cid, STEPS_TIMEOUT),
+        ]);
+
+        const meta = metaResult.status === 'fulfilled' ? metaResult.value : null;
+        const steps = stepsResult.status === 'fulfilled' ? stepsResult.value : null;
+        const metaEntries = meta ? this.extractEntries({ generatorMetadata: meta }) : [];
+        const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
+
+        return this.dedupEntries([...metaEntries, ...stepEntries]);
+    }
+
+    private async fetchMetaForConvo(
+        serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
+        cid: string, timeout: number,
+    ): Promise<any[] | null> {
+        if (useRpc) {
+            const result = await rpc.getMetadata(cid);
+            if (result) return result;
+        }
+        const all = await paginateAll(async (offset) => {
+            const resp = await callLsJson(serverInfo, EP.METADATA,
+                { cascade_id: cid, generator_metadata_offset: offset }, timeout,
+            ).catch(() => null);
+            return resp?.generatorMetadata || resp?.generator_metadata || [];
+        });
+        return all.length > 0 ? all : null;
+    }
+
+    private async fetchStepsForConvo(
+        serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
+        cid: string, timeout: number,
+    ): Promise<any[] | null> {
+        if (useRpc) {
+            const result = await rpc.getSteps(cid);
+            if (result) return result;
+        }
+        const all = await paginateAll(async (offset) => {
+            const resp = await callLsJson(serverInfo, EP.STEPS,
+                { cascade_id: cid, step_offset: offset }, timeout,
+            ).catch(() => null);
+            return resp?.steps || [];
+        });
+        return all.length > 0 ? all : null;
+    }
+
+    /**
+     * Fingerprint-based dedup: token counts + timestamp truncated to seconds.
+     * Meta and steps APIs return the same event with different microsecond timestamps.
+     */
+    private dedupEntries(entries: import('./types').TokenEntry[]): import('./types').TokenEntry[] {
+        const seen = new Set<string>();
+        return entries.filter(e => {
+            const tsSec = e.ts?.substring(0, 19) || '';
+            const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
+            if (seen.has(fp)) return false;
+            seen.add(fp);
+            return true;
+        });
     }
 
     /**

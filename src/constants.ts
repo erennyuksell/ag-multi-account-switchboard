@@ -41,6 +41,41 @@ export const POLL_INTERVAL_MS = 60 * 1000;
 export const TOKEN_REFRESH_BUFFER_SECS = 300; // refresh 5 min before expiry
 export const OAUTH_CALLBACK_TIMEOUT_MS = 120_000; // 2 min
 
+// ─── Timeouts ───
+
+/** Language Server endpoint request timeout */
+export const LS_REQUEST_TIMEOUT_MS = 10_000;
+/** Default timeout for LS JSON/proto calls */
+export const DEFAULT_LS_TIMEOUT_MS = 8_000;
+/** Timeout for process listing (ps/lsof) exec calls */
+export const PROCESS_EXEC_TIMEOUT_MS = 8_000;
+/** Timeout for Windows WMIC exec calls */
+export const WMIC_EXEC_TIMEOUT_MS = 5_000;
+/** Timeout for lsof port discovery */
+export const LSOF_EXEC_TIMEOUT_MS = 5_000;
+/** Timeout for cascade probe during server discovery */
+export const CASCADE_PROBE_TIMEOUT_MS = 3_000;
+/** SQLite CLI execution timeout */
+export const SQLITE_EXEC_TIMEOUT_MS = 5_000;
+/** Token renewal retry delay on transient failure */
+export const RENEWAL_RETRY_DELAY_MS = 2 * 60_000;
+
+// ─── Thresholds ───
+
+/** Bytes to read from file header for binary detection */
+export const FILE_HEADER_READ_BYTES = 256;
+/** Backup file max age before pruning (7 days) */
+export const BACKUP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// ─── UI Constants (re-exported from shared/uiConstants for backward compat) ───
+export {
+    CTX_WARNING_PCT, CTX_CRITICAL_PCT,
+    QUOTA_HEALTHY_PCT, QUOTA_WARN_PCT,
+    USAGE_HIGH_PCT, USAGE_MEDIUM_PCT,
+    CASCADE_LIST_LIMIT, CASCADE_TITLE_MAX_LEN,
+    CASCADE_ENRICHED_LIMIT, CASCADE_ENRICHED_TITLE_MAX_LEN,
+    HOURS_IN_DAY,
+} from './shared/uiConstants';
+
 /** gRPC service path for all Language Server endpoints — SSOT */
 export const LS_SERVICE_PATH = '/exa.language_server_pb.LanguageServerService';
 
@@ -101,11 +136,12 @@ export const CSRF_TOKEN_RE = /--csrf_token[\s=]+([\w-]+)/;
  *
  * Cached per-check to avoid repeated configuration reads.
  */
+const DIAG_CACHE_TTL_MS = 5_000;
 let _diagCached: boolean | null = null;
 let _diagCacheTs = 0;
 export function isDiagEnabled(): boolean {
     const now = Date.now();
-    if (_diagCached !== null && now - _diagCacheTs < 5000) return _diagCached;
+    if (_diagCached !== null && now - _diagCacheTs < DIAG_CACHE_TTL_MS) return _diagCached;
     try {
         _diagCached = vscode.workspace.getConfiguration('ag-switchboard')
             .get<boolean>('diagnosticMode', false);

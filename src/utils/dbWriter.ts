@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { STATE_DB_PATH } from '../constants';
+import { STATE_DB_PATH, SQLITE_EXEC_TIMEOUT_MS, BACKUP_MAX_AGE_MS } from '../constants';
 import { createLogger } from './logger';
 
 const execAsync = promisify(exec);
@@ -43,7 +43,7 @@ export async function writeToStateDb(sql: string): Promise<void> {
     const escapedSql = sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
     try {
-        await execAsync(`sqlite3 "${STATE_DB_PATH}" "${escapedSql}"`, { timeout: 5000 });
+        await execAsync(`sqlite3 "${STATE_DB_PATH}" "${escapedSql}"`, { timeout: SQLITE_EXEC_TIMEOUT_MS });
         log.info('DB write OK');
     } catch (err: any) {
         log.warn('DB write failed (non-critical):', err?.message);
@@ -54,7 +54,7 @@ export async function writeToStateDb(sql: string): Promise<void> {
  * Remove stale backups older than `maxAgeMs` (default: 7 days).
  * Call opportunistically — never throws.
  */
-export function pruneOldBackups(maxAgeMs = 7 * 24 * 60 * 60 * 1000): void {
+export function pruneOldBackups(maxAgeMs = BACKUP_MAX_AGE_MS): void {
     if (!STATE_DB_PATH) return;
     const dir = path.dirname(STATE_DB_PATH);
     try {

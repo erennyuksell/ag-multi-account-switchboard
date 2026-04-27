@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { ClientModelConfig, LocalQuotaData } from '../types';
 import { fmtBig, formatDurationMs } from '../shared/helpers';
+import { CTX_CRITICAL_PCT, CTX_WARNING_PCT } from '../shared/uiConstants';
 
 export class StatusBarService {
     private readonly statusBarItem: vscode.StatusBarItem;
@@ -79,7 +80,7 @@ export class StatusBarService {
             // Append context window percentage if active
             if (this.ctxMax > 0 && this.ctxUsed > 0) {
                 const ctxPct = Math.min((this.ctxUsed / this.ctxMax) * 100, 100);
-                const ctxIcon = ctxPct > 90 ? '$(warning)' : '$(symbol-misc)';
+                const ctxIcon = ctxPct > CTX_CRITICAL_PCT ? '$(warning)' : '$(symbol-misc)';
                 parts.push(`${ctxIcon} ${ctxPct.toFixed(0)}% ctx`);
             }
 
@@ -89,9 +90,9 @@ export class StatusBarService {
         // ── Background color from context level ──
         if (this.ctxMax > 0 && this.ctxUsed > 0) {
             const ctxPct = (this.ctxUsed / this.ctxMax) * 100;
-            if (ctxPct > 90) {
+            if (ctxPct > CTX_CRITICAL_PCT) {
                 this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-            } else if (ctxPct > 75) {
+            } else if (ctxPct > CTX_WARNING_PCT) {
                 this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
             } else {
                 this.statusBarItem.backgroundColor = undefined;

@@ -6,6 +6,10 @@
 
 import { fmtNum, fmtBig, fmtShortDate, escHtml } from './helpers';
 import { DailyBucket, HourlyBucket, ModelBucket, CascadeBucket, MonthlyBucket, ProviderBucket, WeekdayBucket } from '../types';
+import {
+    CASCADE_LIST_LIMIT, CASCADE_TITLE_MAX_LEN,
+    CASCADE_ENRICHED_LIMIT, CASCADE_ENRICHED_TITLE_MAX_LEN,
+} from './uiConstants';
 
 // ═══════════════════════════════════════════
 //  KPI Cards
@@ -273,7 +277,7 @@ export function renderModelBreakdown(models: ModelBucket[], totalTokens: number)
 //  Cascade / Conversation List
 // ═══════════════════════════════════════════
 
-export function renderCascadeList(cascades: CascadeBucket[], limit: number = 20, maxTitleLen: number = 45): string {
+export function renderCascadeList(cascades: CascadeBucket[], limit: number = CASCADE_LIST_LIMIT, maxTitleLen: number = CASCADE_TITLE_MAX_LEN): string {
     const shown = cascades.slice(0, limit);
 
     let html = '<div class="deep-cascade-list">';
@@ -652,7 +656,7 @@ export function renderWeekdayChart(weekday: WeekdayBucket[]): string {
 //  Enriched Cascade List (with cost + mini bar)
 // ═══════════════════════════════════════════
 
-export function renderEnrichedCascadeList(cascades: CascadeBucket[], models: ModelBucket[], limit: number = 30, maxTitleLen: number = 55): string {
+export function renderEnrichedCascadeList(cascades: CascadeBucket[], models: ModelBucket[], limit: number = CASCADE_ENRICHED_LIMIT, maxTitleLen: number = CASCADE_ENRICHED_TITLE_MAX_LEN): string {
     const shown = cascades.slice(0, limit);
     if (shown.length === 0) return '<div class="deep-empty">No conversations</div>';
 

@@ -8,6 +8,9 @@ import {
 } from '../constants';
 import { getOAuthSuccessHtml } from '../templates/oauthSuccess';
 import { createLogger } from '../utils/logger';
+
+/** Timeout for Google API HTTP requests (userinfo, token exchange) */
+const GOOGLE_API_TIMEOUT_MS = 10_000;
 import { collectBody } from '../utils/http';
 
 const log = createLogger('GoogleAuth');
@@ -44,7 +47,7 @@ export class GoogleAuthService {
         return new Promise((resolve, reject) => {
             const req = https.get(USERINFO_URL, {
                 headers: { Authorization: `Bearer ${accessToken}` },
-                timeout: 10000,
+                timeout: GOOGLE_API_TIMEOUT_MS,
             }, async (res) => {
                 try {
                     const { status, body } = await collectBody(res);
@@ -156,7 +159,7 @@ export class GoogleAuthService {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Content-Length': Buffer.byteLength(body),
                 },
-                timeout: 10000,
+                timeout: GOOGLE_API_TIMEOUT_MS,
             }, async (res) => {
                 try {
                     const { status, body: data } = await collectBody(res);
