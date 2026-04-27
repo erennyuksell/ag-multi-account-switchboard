@@ -203,8 +203,22 @@ export class ContextWindowService {
         }
 
         if (metas.length === 0) {
-            log.info(`fetchAndCache: no usable entries for ${cascadeId.substring(0, 12)}`);
-            return null;
+            log.info(`fetchAndCache: no usable entries for ${cascadeId.substring(0, 12)} — returning minimal`);
+            // New/empty conversation: push minimal data so the UI section renders
+            const minimal: ContextWindowData = {
+                title,
+                conversationId: cascadeId,
+                model: '',
+                provider: '',
+                usedTokens: 0,
+                maxTokens: 0,
+                percentage: 0,
+                lastUpdated: new Date().toISOString(),
+                categories: [],
+                completionConfig: { maxOutputTokens: 0, temperature: 0, topK: 0, topP: 0 },
+            };
+            this.resultCache.set(cascadeId, { data: minimal, ts: Date.now() });
+            return minimal;
         }
 
         // 3) Find latest entry with real token data (most recent = most accurate context)

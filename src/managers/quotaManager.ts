@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { callLsJson } from '../utils/lsClient';
 import { PollLock } from '../utils/pollLock';
 import { AccountQuota, AccountCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
 import { AccountManager } from './accountManager';
@@ -184,7 +185,8 @@ export class QuotaManager {
         if (!this.viewProvider) { log.info('pushCachedData: no viewProvider'); return; }
         const hasLocal = !!this.lastLocalData;
         const hasTracked = this.lastTrackedQuotas.length > 0;
-        log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}, hasCtx=${!!this.lastContextWindow}`);
+        const ctxId = this.lastContextWindow?.conversationId?.substring(0, 12) || 'none';
+        log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}, ctxFor=${ctxId}, active=${this.lastContextConversationId?.substring(0, 12) || 'none'}`);
 
         if (hasLocal || hasTracked) {
             this.viewProvider.updateData(this.buildViewState());
@@ -276,7 +278,8 @@ export class QuotaManager {
 
     private initLiveStreamListener(): void {
         this.liveStream.on('totalLength', async (event: { totalLength: number; conversationId: string }) => {
-            const server = this.cachedServer?.info;
+            // Use Global/Cascade LS — workspace LS has stale snapshots (hours old)
+            const server = this.cachedCascadeServer?.info ?? this.cachedServer?.info;
             if (!server || !event.conversationId) return;
             if (event.conversationId !== this.lastContextConversationId) return;
             if (event.totalLength <= this.lastLiveTotalLength) return;
@@ -318,15 +321,20 @@ export class QuotaManager {
 
     /** Push context window data to all surfaces. Rejects stale data. */
     private pushContextUpdate(data: ContextWindowData, cascadeId: string, server: ServerInfo | null): void {
-        // Never overwrite newer data with older — prevents stale LS snapshot clobbering
+        // Reject data from a conversation we've already switched away from.
+        // This prevents the boot fetch (slow LS response) from overwriting
+        // a quicker switch fetch that completed first.
+        if (cascadeId !== this.lastContextConversationId) {
+            log.info(`pushCW: REJECT stale ${cascadeId.substring(0, 12)} (active=${this.lastContextConversationId?.substring(0, 12)})`);
+            return;
+        }
+        // Never overwrite newer data with older for the SAME conversation
         if (this.lastContextWindow && data.lastUpdated && this.lastContextWindow.lastUpdated) {
-            if (data.lastUpdated < this.lastContextWindow.lastUpdated && cascadeId === this.lastContextConversationId) {
+            if (data.lastUpdated < this.lastContextWindow.lastUpdated) {
                 return;
             }
         }
-        if (cascadeId !== this.lastContextConversationId) {
-            this.lastContextConversationId = cascadeId;
-        }
+        log.info(`pushCW: ACCEPT ${cascadeId.substring(0, 12)} title="${data.title?.substring(0, 25)}" tokens=${data.usedTokens}`);
         this.lastContextWindow = data;
         this.context.globalState.update(QuotaManager.CTX_CACHE_KEY, data);
         if (this.viewProvider) this.viewProvider.postContextWindow(data);
@@ -565,6 +573,52 @@ export class QuotaManager {
         }
         await vscode.env.clipboard.writeText(token);
         vscode.window.showInformationMessage('🔑 Token copied to clipboard');
+    }
+
+    // ── Workspace Cascade Ownership ────────────────────────────
+
+    /**
+     * Fetch all cascade IDs belonging to this workspace.
+     * Uses GetAllCascadeTrajectories from the workspace LS — only returns cascades
+     * that are associated with this workspace, enabling cross-window isolation.
+     */
+    async getWorkspaceCascadeIds(): Promise<Set<string> | null> {
+        try {
+            const server = await this.resolveServer();
+            if (!server) return null;
+            const resp = await callLsJson(server, 'GetAllCascadeTrajectories', {});
+            const sums = resp?.trajectorySummaries;
+            if (!sums || typeof sums !== 'object') return null;
+            const ids = new Set(Object.keys(sums));
+            return ids.size > 0 ? ids : null;
+        } catch (e: unknown) {
+            log.info(`getWorkspaceCascadeIds: ${(e as Error)?.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Query the LS for all cascade trajectories and return the most recently
+     * modified cascade ID. USS-independent — works even when USS topics are cold.
+     */
+    async getMostRecentCascadeId(): Promise<string | null> {
+        try {
+            const server = await this.resolveServer();
+            if (!server) return null;
+            const resp = await callLsJson(server, 'GetAllCascadeTrajectories', {});
+            const sums = resp?.trajectorySummaries;
+            if (!sums || typeof sums !== 'object') return null;
+
+            let best: { id: string; time: number } | null = null;
+            for (const [id, summary] of Object.entries(sums) as [string, any][]) {
+                const t = Number(summary?.lastModifiedTime) || 0;
+                if (!best || t > best.time) best = { id, time: t };
+            }
+            return best?.id ?? null;
+        } catch (e: unknown) {
+            log.diag(`getMostRecentCascadeId: ${(e as Error)?.message}`);
+            return null;
+        }
     }
 
     // ── Private Helpers ─────────────────────────────────────────
