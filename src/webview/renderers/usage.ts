@@ -125,7 +125,7 @@ function renderCompactDashboard(el: HTMLElement, stats: any): void {
         html += renderHourlyHeatmap(stats.hourly, costPerToken);
     } else {
         html += '<div class="deep-section-hdr">Activity <span class="deep-section-badge">' + rangeLabel(state) + '</span></div>';
-        html += renderDailyGrid(stats.daily, false);
+        html += renderDailyGrid(stats.daily, false, undefined, costPerToken);
     }
     html += '</div>';
 
