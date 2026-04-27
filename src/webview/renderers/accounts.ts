@@ -103,10 +103,10 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
         if (a.isError) {
             subBlock = '<div class="acct-sub"><span style="color:var(--error)">\u26a0 ' + (a.errorMessage || 'Error') + '</span></div>';
         } else {
-            const pinnedId = pinnedModels[a.email];
-            const displayModel = pinnedId
+            const pinnedLabel = pinnedModels[a.email];
+            const displayModel = pinnedLabel
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                ? (a.models.find((m: any) => m.id === pinnedId) || a.bottleneck)
+                ? (a.models.find((m: any) => m.label === pinnedLabel) || a.bottleneck)
                 : a.bottleneck;
             if (displayModel) {
                 const bnLabel = displayModel.label || shortModelName(displayModel.id);
@@ -143,10 +143,10 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
                 const fCls = fillClass(m.pct);
                 const mTl = timeLeft(m.resetTime);
                 const acctKey = a.email;
-                const isPinned = pinnedModels[acctKey] === m.id;
+                const isPinned = pinnedModels[acctKey] === m.label;
                 const starCls = isPinned ? 'star-btn pinned' : 'star-btn';
                 const starIcon = isPinned ? '\u2605' : '\u2606';
-                const safeModelId = encodeURIComponent(m.id);
+                const safeModelId = encodeURIComponent(m.label);
                 html += '<div class="m-item">';
                 html += '<button class="' + starCls + '" title="Pin to collapsed view" data-action="pin-model" data-account-key="' + acctKey + '" data-model-id="' + safeModelId + '">'
                     + starIcon + '</button>';

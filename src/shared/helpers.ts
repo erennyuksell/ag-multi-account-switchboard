@@ -59,6 +59,18 @@ export function shortModelName(name: string | undefined | null): string {
     return name.split('/').pop()!.replace(/^models-/, '').replace(/^models_/, '');
 }
 
+/**
+ * Normalize any model identifier (LS enum, API key, or label) to a canonical
+ * lowercase alphanumeric string for cross-source pin matching.
+ *
+ * "Claude Opus 4.6 (Thinking)" → "claudeopus46thinking"
+ * "claude-opus-4-6-thinking"   → "claudeopus46thinking"
+ * "MODEL_PLACEHOLDER_M26"      → "modelplaceholderm26"
+ */
+export function normalizeModelKey(s: string): string {
+    return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 export function shortTierName(name: string | undefined | null): string {
     if (!name) return '';
     const parts = name.split(' ');

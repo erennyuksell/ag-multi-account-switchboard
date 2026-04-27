@@ -4,8 +4,54 @@
  */
 
 import { AccountQuota, AccountCard, ModelCard, LocalQuotaData } from '../types';
-import { shortModelName } from '../shared/helpers';
+import { shortModelName, normalizeModelKey } from '../shared/helpers';
 import { parseUserTier, parsePlanStatus } from '../utils/lsTypes';
+
+/**
+ * Build a normKey → LS label lookup map from local protobuf data.
+ * This is the "Rosetta Stone" that bridges LS enum IDs and API keys
+ * to a single canonical label.
+ *
+ * Example map entries:
+ *   "claudeopus46thinking" → "Claude Opus 4.6 (Thinking)"
+ *   "gemini31prohigh"      → "Gemini 3.1 Pro (High)"
+ */
+function buildLabelMap(localData: LocalQuotaData | null): Map<string, string> {
+    const map = new Map<string, string>();
+    const configs = localData?.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+    for (const m of configs as any[]) {
+        const label = m.label;
+        if (!label) continue;
+        // Index by normalized label (for matching against tracked API keys)
+        map.set(normalizeModelKey(label), label);
+    }
+    return map;
+}
+
+/**
+ * Resolve a tracked API key to the canonical LS label using the label map.
+ * Uses exact normKey match first, then startsWith fallback for edge cases
+ * like "claude-sonnet-4-6" matching "Claude Sonnet 4.6 (Thinking)".
+ */
+function resolveLabel(apiKey: string, labelMap: Map<string, string>): string {
+    const norm = normalizeModelKey(apiKey);
+
+    // 1. Exact normKey match
+    const exact = labelMap.get(norm);
+    if (exact) return exact;
+
+    // 2. startsWith fallback: tracked key might be a prefix of LS label
+    //    e.g. "claudesonnet46" (from "claude-sonnet-4-6")
+    //    vs   "claudesonnet46thinking" (from "Claude Sonnet 4.6 (Thinking)")
+    for (const [normLabel, label] of labelMap) {
+        if (normLabel.startsWith(norm) || norm.startsWith(normLabel)) {
+            return label;
+        }
+    }
+
+    // 3. No match → fallback to shortModelName (existing behavior)
+    return shortModelName(apiKey);
+}
 
 export function buildAccountCards(
     localData: LocalQuotaData | null,
@@ -16,6 +62,9 @@ export function buildAccountCards(
 ): AccountCard[] {
     const activeEmail = (activeEmailRaw || '').toLowerCase();
     const cards: AccountCard[] = [];
+
+    // Build label map from local LS data (Rosetta Stone for cross-source pin matching)
+    const labelMap = buildLabelMap(localData);
 
     const status = localData?.userStatus;
     const localEmail = (status?.email || '').toLowerCase();
@@ -78,7 +127,7 @@ export function buildAccountCards(
 
         const models: ModelCard[] = (trackedQuota.models || []).map(m => ({
             id: m.name,
-            label: shortModelName(m.name),
+            label: resolveLabel(m.name, labelMap),
             pct: m.percentage || 0,
             resetTime: m.resetTimeRaw || m.resetTime || '',
             isLocal: false,

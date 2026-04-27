@@ -115,13 +115,14 @@ export class QuotaManager {
         };
     }
     private getAccountCards(): AccountCard[] {
-        return buildAccountCards(
+        const cards = buildAccountCards(
             this.lastLocalData,
             this.lastTrackedQuotas,
             this.lastActiveEmail,
             !!this.switchController,
             this.getSelectedModels(),
         );
+        return cards;
     }
 
     getSelectedModels(): string[] {

@@ -18,7 +18,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-3.0.0-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-3.1.0-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
@@ -217,6 +217,23 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 ---
 
 ## 📝 Changelog
+
+### v3.1.0
+
+**Stability & UX**
+- **Cross-source pin matching** — Pinned models now persist correctly when switching between local and tracked accounts. A host-side "Rosetta Stone" label map bridges LS enum IDs (`MODEL_PLACEHOLDER_M26`) and API keys (`claude-opus-4-6-thinking`) to unified human labels
+- **Host-managed quota polling** — Quota refresh moved to extension-host `setInterval`, ensuring data stays fresh regardless of sidebar visibility
+- **Account card builder refactor** — Extracted pure-function card builder module with zero side effects for testability
+- **Anti-magic constants** — All UI thresholds, timeouts, and API URLs extracted to named constants
+
+**Usage Analytics**
+- **Cost per token in daily grid** — Heatmap cells now show estimated cost alongside token counts
+- **Usage heatmap tooltip fixes** — Corrected tooltip positioning and data display
+
+**Infrastructure**
+- **Diagnostic logging harness** — DIAG-level logging with file sink support for field debugging
+- **LS service modularization** — Cleaner separation of LS configuration and utility exports
+- **Build tag tracking** — Footer shows incremental build identifiers for QA traceability
 
 ### v3.0.0
 
