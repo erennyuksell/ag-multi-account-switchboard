@@ -18,7 +18,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-3.1.0-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-3.1.1-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
@@ -218,69 +218,7 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 
 ## 📝 Changelog
 
-### v3.1.0
-
-**Stability & UX**
-- **Cross-source pin matching** — Pinned models now persist correctly when switching between local and tracked accounts. A host-side "Rosetta Stone" label map bridges LS enum IDs (`MODEL_PLACEHOLDER_M26`) and API keys (`claude-opus-4-6-thinking`) to unified human labels
-- **Host-managed quota polling** — Quota refresh moved to extension-host `setInterval`, ensuring data stays fresh regardless of sidebar visibility
-- **Account card builder refactor** — Extracted pure-function card builder module with zero side effects for testability
-- **Anti-magic constants** — All UI thresholds, timeouts, and API URLs extracted to named constants
-
-**Usage Analytics**
-- **Cost per token in daily grid** — Heatmap cells now show estimated cost alongside token counts
-- **Usage heatmap tooltip fixes** — Corrected tooltip positioning and data display
-
-**Infrastructure**
-- **Diagnostic logging harness** — DIAG-level logging with file sink support for field debugging
-- **LS service modularization** — Cleaner separation of LS configuration and utility exports
-- **Build tag tracking** — Footer shows incremental build identifiers for QA traceability
-
-### v3.0.0
-
-**Context Window**
-- **Context Window Detail** — Full editor panel showing raw token breakdown: every system prompt section, tool definition, MCP tool, chat message, and file read with individual token counts and percentages
-- **Active Context in sidebar** — Donut chart with category-colored stacked bar and per-category breakdown
-- **Export Markdown** — One-click conversation export via LS `ConvertTrajectoryToMarkdown` endpoint
-- **Expand / Collapse All** — Toggle all breakdown groups; filter buttons (All, User, Model, Tools, Files)
-- **Completion Config** — Max output, temperature, TopK, TopP badges in sidebar and detail panel
-- **LiveStream Watcher** — Real-time context window updates during model execution
-
-**Usage Analytics**
-- **RPC Direct Client** — JSON-over-HTTP calls to local LS, replacing fragile protobuf binary parsing
-- **Reasoning tokens** — Tracks reasoning tokens alongside input/cache/output
-- **Monthly cost breakdown** — Stacked bar chart with yearly totals
-- **Weekly pattern** — Day-of-week distribution with weekday/weekend split
-- **Top conversations** — Ranked by estimated cost with token and call stats
-- **LiteLLM-based pricing** — Configurable per-model pricing via settings
-- **Process lock & disk cache** — SQLite-level exclusive lock + incremental disk caching
-
-**Infrastructure**
-- **Dual-LS Architecture** — Automatic discovery of Workspace LS + Global LS; context window data from the correct instance
-- **Server Discovery rewrite** — PID-based process scanning with `lsof` port resolution and workspace isolation
-- **Account Switch Hardening** — LS Readiness Gate, Gate-Once-Pass-Down endpoint reuse, generation-counter polling abort
-- **Proactive Token Renewal** — Automatic access_token refresh before expiry with adaptive re-scheduling
-
-### v2.3.0
-
-- **Usage Stats Dashboard** — Deep analytics with sidebar compact view + full editor tab
-- **9 KPI cards** — Input, Cache, Output, Total, API Calls, Est. Cost, Days Active, Avg/Call, Cache Rate
-- **Estimated Cost** — Per-model cost estimation based on public API pricing
-- **Smart model merging** — Claude Sonnet 4.6 + Sonnet 4.6 (Thinking) consolidated
-- **PostMessage architecture** — Detail panel uses DOM patching instead of full rebuild
-
-### v2.2.0
-
-- **Deep usage stats** — All-time token usage analytics with disk caching and incremental refresh
-- **Bento grid layout** — Full dashboard with daily bars, heatmap, hourly pattern, model distribution
-- **Progressive loading** — Stream partial results during first-time fetch
-- **GitHub contribution grid** — Activity heatmap with 5 intensity levels
-
-### v2.1.0
-
-- **Branded init screen** — Radar pulse animation with AG branding
-- **Sticky layout** — Header and footer pinned; only account list scrolls
-- **Modular webview architecture** — Typed modules with esbuild bundling
-- **Race condition fix** — Pending refresh queue prevents lost switches during background refreshes
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
 

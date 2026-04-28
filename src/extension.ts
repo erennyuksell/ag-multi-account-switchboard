@@ -31,7 +31,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
 
     // Start reactive conversation tracker (USS topics)
-    const tracker = new ConversationTracker(quotaManager);
+    const tracker = new ConversationTracker(quotaManager, context);
     tracker.start();
     context.subscriptions.push(tracker);
 

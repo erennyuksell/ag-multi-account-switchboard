@@ -1,5 +1,5 @@
 import * as https from 'https';
-import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, IMPORTANT_MODELS, USER_AGENT, DEFAULT_PROJECT_ID } from '../constants';
+import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, MODEL_WHITELIST, USER_AGENT } from '../constants';
 import { QuotaModel, QuotaResult, HttpError } from '../types';
 import { collectBody } from '../utils/http';
 
@@ -10,14 +10,14 @@ export class QuotaApiService {
 
     /** Fetch quota for a remote account using its access token */
     async fetchRemoteQuota(accessToken: string): Promise<QuotaResult> {
-        // 1. Get project ID + tier
-        const { projectId, tier, tierName } = await this.loadProjectInfo(accessToken);
+        // 1. Get tier info
+        const { tier, tierName } = await this.loadProjectInfo(accessToken);
 
-        // 2. Fetch model quotas
+        // 2. Fetch quota via retrieveUserQuota (no projectId needed)
         let quotaData: any = null;
         for (const ep of QUOTA_API_ENDPOINTS) {
             try {
-                quotaData = await this.postJson(ep, { project: projectId }, accessToken);
+                quotaData = await this.postJson(ep, {}, accessToken);
                 break;
             } catch (e) {
                 if (e instanceof HttpError) {
@@ -25,7 +25,6 @@ export class QuotaApiService {
                     if (e.statusCode === 401) throw e;
                     if (e.statusCode === 429 || e.statusCode >= 500) continue;
                 }
-                // Network / timeout errors → try next endpoint
                 continue;
             }
         }
@@ -34,21 +33,19 @@ export class QuotaApiService {
             return { models: [], tier, tierName, isForbidden: false, isError: true, errorMessage: 'All endpoints exhausted' };
         }
 
-        const models = this.parseModels(quotaData.models || {});
+        const models = this.parseBuckets(quotaData.buckets || []);
         return { models, tier, tierName, isForbidden: false, isError: false };
     }
 
     // --- Private ---
 
-    private async loadProjectInfo(accessToken: string): Promise<{ projectId: string; tier: string | null; tierName: string | null }> {
-        let projectId = DEFAULT_PROJECT_ID;
+    private async loadProjectInfo(accessToken: string): Promise<{ tier: string | null; tierName: string | null }> {
         let tier: string | null = null;
         let tierName: string | null = null;
 
         for (const ep of LOAD_CODE_ASSIST_ENDPOINTS) {
             try {
                 const res = await this.postJson(ep, { metadata: { ideType: 'ANTIGRAVITY' } }, accessToken);
-                projectId = res.cloudaicompanionProject || projectId;
                 tier = res.paidTier?.id || res.currentTier?.id || null;
                 tierName = res.paidTier?.name || res.currentTier?.name || null;
                 break;
@@ -56,37 +53,42 @@ export class QuotaApiService {
                 if (e instanceof HttpError) {
                     if (e.statusCode === 401) throw e;
                     if (e.statusCode === 429 || e.statusCode >= 500) continue;
-                    break; // Other HTTP errors → stop
+                    break;
                 }
-                // Network / timeout → try next endpoint
                 continue;
             }
         }
 
-        return { projectId, tier, tierName };
+        return { tier, tierName };
     }
 
-    private parseModels(modelsData: Record<string, any>): QuotaModel[] {
+    /**
+     * Parse retrieveUserQuota buckets[] response.
+     * Each bucket: { tokenType, modelId, remainingFraction, resetTime? }
+     */
+    private parseBuckets(buckets: any[]): QuotaModel[] {
         const models: QuotaModel[] = [];
 
-        for (const [name, info] of Object.entries(modelsData)) {
-            if (!IMPORTANT_MODELS.some(kw => name.toLowerCase().includes(kw))) continue;
+        for (const bucket of buckets) {
+            const modelId = bucket.modelId || '';
+            const displayName = MODEL_WHITELIST[modelId];
+            if (!displayName) continue; // skip non-whitelisted models
 
-            const quotaInfo = (info as any).quotaInfo || {};
+            const fraction = bucket.remainingFraction ?? 0;
             let localResetTime = '';
-            if (quotaInfo.resetTime) {
+            if (bucket.resetTime) {
                 try {
-                    localResetTime = new Date(quotaInfo.resetTime).toLocaleString(undefined, {
+                    localResetTime = new Date(bucket.resetTime).toLocaleString(undefined, {
                         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
                     });
-                } catch { localResetTime = quotaInfo.resetTime; }
+                } catch { localResetTime = bucket.resetTime; }
             }
 
             models.push({
-                name,
-                percentage: Math.round((quotaInfo.remainingFraction || 0) * 100),
+                name: displayName,
+                percentage: Math.round(fraction * 100),
                 resetTime: localResetTime,
-                resetTimeRaw: quotaInfo.resetTime || '',
+                resetTimeRaw: bucket.resetTime || '',
             });
         }
 

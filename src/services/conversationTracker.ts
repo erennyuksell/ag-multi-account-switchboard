@@ -2,9 +2,11 @@
  * ConversationTracker — Reactive USS topic listeners for conversation switches and data updates.
  * Encapsulates all USS subscription logic (activeCascade, trajectorySummaries, userStatus).
  *
- * Architecture note: USS state for activeCascadeIds contains one entry per IDE window
- * (keyed by numeric windowId). On boot we take the first UUID found; on subsequent
- * changes we diff against the previous snapshot to detect which window changed.
+ * Window isolation strategy:
+ *  - Boot: workspaceState (per-workspace, per-window) restores the last cascade instantly.
+ *  - Runtime: USS onDidChange + vscode.window.state.focused guard ensures only THIS
+ *    window's conversation switches are accepted.
+ *  - Persist: Every accepted switch is saved to workspaceState for reliable next-boot.
  */
 
 import * as vscode from 'vscode';
@@ -18,6 +20,7 @@ const log = createLogger('ConversationTracker');
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const SUBSCRIBE_TIMEOUT = 5000;
+const WORKSPACE_CASCADE_KEY = 'ag.lastActiveCascadeId';
 
 /** USS subscribe() signature — not exposed in official API */
 interface USSSubscriber {
@@ -30,9 +33,21 @@ export class ConversationTracker implements vscode.Disposable {
     private readonly disposables: vscode.Disposable[] = [];
     private bootPollTimer: ReturnType<typeof setInterval> | undefined;
 
-    constructor(private readonly quotaManager: QuotaManager) {}
+    constructor(
+        private readonly quotaManager: QuotaManager,
+        private readonly context: vscode.ExtensionContext,
+    ) {}
 
     async start(): Promise<void> {
+        // Restore last cascade from workspace-specific storage (guaranteed per-window)
+        const saved = this.context.workspaceState.get<string>(WORKSPACE_CASCADE_KEY);
+        if (saved) {
+            log.info(`boot: restored workspace cascade → ${saved.substring(0, 12)}`);
+            this.lastActiveCascadeId = saved;
+            this.quotaManager.setActiveConversation(saved);
+            this.quotaManager.fetchContextWindowOnce(saved);
+        }
+
         const uss = getUSS() as unknown as USSSubscriber | null;
         if (!uss?.subscribe) {
             log.info('USS API not available — conversation tracking disabled');
@@ -68,86 +83,87 @@ export class ConversationTracker implements vscode.Disposable {
             ]);
             if (!topic) return false;
 
-            let isFirstCall = true;
             let prevSnapshot = new Map<string, string>();
 
-            const handleChange = () => {
-                try {
-                    const rawState = topic.getState();
-                    if (!rawState) return;
+            /** Diff current USS state against previous snapshot; return changed UUID if any. */
+            const readCascadeDiff = (): string | undefined => {
+                const rawState = topic.getState();
+                if (!rawState) return undefined;
 
-                    // Snapshot current values keyed by windowId
-                    const currSnapshot = new Map<string, string>();
-                    for (const [k, v] of Object.entries(rawState)) {
-                        currSnapshot.set(k, v?.value || '');
-                    }
+                const currSnapshot = new Map<string, string>();
+                for (const [k, v] of Object.entries(rawState)) {
+                    currSnapshot.set(k, v?.value || '');
+                }
 
-                    let cascadeId: string | undefined;
+                let cascadeId: string | undefined;
 
-                    if (isFirstCall) {
-                        // Boot: take first UUID found — correct for the active window at startup
-                        isFirstCall = false;
-                        cascadeId = this.extractFirstUuid(rawState);
-                    } else {
-                        // Switch: diff against previous snapshot — changed row = active window
-                        for (const [k, val] of currSnapshot) {
-                            if (prevSnapshot.get(k) !== val && val.length >= 10) {
-                                const uuid = this.extractUuidFromValue(val);
-                                if (uuid) cascadeId = uuid;
-                            }
+                if (prevSnapshot.size === 0) {
+                    // First read — take first UUID found
+                    cascadeId = this.extractFirstUuid(rawState);
+                } else {
+                    // Subsequent reads — diff against previous snapshot
+                    for (const [k, val] of currSnapshot) {
+                        if (prevSnapshot.get(k) !== val && val.length >= 10) {
+                            const uuid = this.extractUuidFromValue(val);
+                            if (uuid) cascadeId = uuid;
                         }
                     }
-
-                    prevSnapshot = currSnapshot;
-
-                    if (cascadeId && cascadeId !== this.lastActiveCascadeId) {
-                        log.info(`activeCascade: switch → ${cascadeId.substring(0, 12)}`);
-                        this.lastActiveCascadeId = cascadeId;
-                        this.quotaManager.setActiveConversation(cascadeId);
-                        this.quotaManager.fetchContextWindowOnce(cascadeId);
-                    }
-                } catch (err) {
-                    log.info(`activeCascade handler error: ${(err as Error)?.message}`);
                 }
+
+                prevSnapshot = currSnapshot;
+                return cascadeId;
             };
 
-            // Initial read (likely empty on cold boot — renderer hasn't pushed yet)
-            handleChange();
-            topic.onDidChange(() => handleChange());
+            /** Apply a cascade switch: update state, notify QuotaManager, persist. */
+            const applySwitch = (cascadeId: string, source: string): void => {
+                if (cascadeId === this.lastActiveCascadeId) return;
+                log.info(`activeCascade: ${source} → ${cascadeId.substring(0, 12)}`);
+                this.lastActiveCascadeId = cascadeId;
+                this.quotaManager.setActiveConversation(cascadeId);
+                this.quotaManager.fetchContextWindowOnce(cascadeId);
+                this.context.workspaceState.update(WORKSPACE_CASCADE_KEY, cascadeId);
+            };
 
-            // Boot-aware polling: renderer pushes cascade ID AFTER extension host starts.
-            // Poll every 3s until first valid ID arrives, capped at 90s.
+            // Event-driven: only accept when THIS window is focused
+            this.disposables.push(
+                topic.onDidChange(() => {
+                    if (!vscode.window.state.focused) return;
+                    try {
+                        const id = readCascadeDiff();
+                        if (id) applySwitch(id, 'switch');
+                    } catch (err) {
+                        log.warn(`activeCascade handler error: ${(err as Error)?.message}`);
+                    }
+                }),
+            );
+
+            // Boot poll: renderer pushes cascade ID AFTER extension host starts.
+            // Poll every 3s until first valid ID arrives (only accept if focused).
             if (!this.lastActiveCascadeId) {
                 let pollCount = 0;
-                const MAX_POLLS = 30;
-                log.info('activeCascade: initial state empty — starting boot poll');
+                const MAX_POLLS = 30; // 30 × 3s = 90s
+                log.info('activeCascade: starting boot poll');
                 this.bootPollTimer = setInterval(() => {
                     pollCount++;
-                    const cascadeId = this.extractFirstUuid(topic.getState());
-                    if (cascadeId) {
-                        log.info(`activeCascade: boot poll #${pollCount} → found ${cascadeId.substring(0, 12)}`);
-                        if (cascadeId !== this.lastActiveCascadeId) {
-                            this.lastActiveCascadeId = cascadeId;
-                            this.quotaManager.setActiveConversation(cascadeId);
-                            this.quotaManager.fetchContextWindowOnce(cascadeId);
-                        }
+                    if (!vscode.window.state.focused) return;
+                    const id = readCascadeDiff();
+                    if (id) {
+                        applySwitch(id, `boot poll #${pollCount}`);
                         clearInterval(this.bootPollTimer!);
                         this.bootPollTimer = undefined;
                     } else if (pollCount >= MAX_POLLS) {
-                        log.info('activeCascade: boot poll exhausted (90s) — giving up');
+                        log.info('activeCascade: boot poll exhausted (90s)');
                         clearInterval(this.bootPollTimer!);
                         this.bootPollTimer = undefined;
                     }
                 }, 3000);
-            } else {
-                log.info(`activeCascade: immediate boot → ${this.lastActiveCascadeId.substring(0, 12)}`);
             }
 
             log.info('activeCascade: ✅ listening');
             this.activeCascadeRunning = true;
             return true;
         } catch (e: unknown) {
-            log.info(`activeCascade failed: ${(e as Error)?.message}`);
+            log.warn(`activeCascade failed: ${(e as Error)?.message}`);
             return false;
         }
     }
@@ -172,7 +188,6 @@ export class ConversationTracker implements vscode.Disposable {
                 for (const [cascadeId, row] of Object.entries(state)) {
                     if (!row) continue;
                     const val = row.value || '';
-                    // Detect both new keys and value changes
                     if (previousValues.get(cascadeId) !== val) {
                         changedIds.push(cascadeId);
                     }
@@ -195,6 +210,7 @@ export class ConversationTracker implements vscode.Disposable {
                     this.lastActiveCascadeId = target;
                     this.quotaManager.setActiveConversation(target);
                     this.quotaManager.fetchContextWindowOnce(target);
+                    this.context.workspaceState.update(WORKSPACE_CASCADE_KEY, target);
                 }
             };
 
@@ -205,10 +221,10 @@ export class ConversationTracker implements vscode.Disposable {
                     if (row) previousValues.set(id, row.value || '');
                 }
             }
-            topic.onDidChange(() => handleChange());
+            this.disposables.push(topic.onDidChange(() => handleChange()));
             log.info('trajectorySummaries: ✅ listening');
         } catch (e: unknown) {
-            log.info(`trajectorySummaries failed: ${(e as Error)?.message}`);
+            log.warn(`trajectorySummaries failed: ${(e as Error)?.message}`);
         }
     }
 
@@ -238,9 +254,9 @@ export class ConversationTracker implements vscode.Disposable {
 
             lastEmail = this.extractEmail(topic.getState());
             log.info(`userStatus: ✅ listening (initial=${lastEmail || '?'})`);
-            topic.onDidChange(() => handleChange());
+            this.disposables.push(topic.onDidChange(() => handleChange()));
         } catch (e: unknown) {
-            log.info(`userStatus failed: ${(e as Error)?.message}`);
+            log.warn(`userStatus failed: ${(e as Error)?.message}`);
         }
     }
 
@@ -257,7 +273,7 @@ export class ConversationTracker implements vscode.Disposable {
         return rawMatch ? rawMatch[0] : undefined;
     }
 
-    /** Extract the first UUID found in any USS state row (boot fallback) */
+    /** Extract the first UUID found in any USS state row */
     private extractFirstUuid(state: Record<string, USSRow> | null): string | undefined {
         if (!state) return undefined;
         for (const row of Object.values(state)) {

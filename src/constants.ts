@@ -17,8 +17,8 @@ export const OAUTH_SCOPES = [
 
 // Antigravity Cloud API endpoints (with fallback order)
 export const QUOTA_API_ENDPOINTS = [
-    'https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
-    'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
+    'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota',
+    'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota',
 ];
 
 export const LOAD_CODE_ASSIST_ENDPOINTS = [
@@ -26,8 +26,16 @@ export const LOAD_CODE_ASSIST_ENDPOINTS = [
     'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
 ];
 
-// Model filter keywords — only show quota for these families
-export const IMPORTANT_MODELS = ['gemini', 'claude'];
+// Strict model whitelist for retrieveUserQuota buckets — modelId → display name
+// Only these user-facing models are shown (matches what LS displays)
+export const MODEL_WHITELIST: Record<string, string> = {
+    'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
+    'claude-sonnet-4-6': 'Claude Sonnet 4.6',
+    'gemini-3-flash': 'Gemini 3 Flash',
+    'gemini-3.1-pro-high': 'Gemini 3.1 Pro (High)',
+    'gemini-3.1-pro-low': 'Gemini 3.1 Pro (Low)',
+    'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)',
+};
 
 // Secrets storage key prefix
 export const SECRETS_PREFIX = 'ag.account.';
@@ -79,8 +87,7 @@ export {
 /** gRPC service path for all Language Server endpoints — SSOT */
 export const LS_SERVICE_PATH = '/exa.language_server_pb.LanguageServerService';
 
-/** Fallback GCP project ID used when loadCodeAssist does not return one */
-export const DEFAULT_PROJECT_ID = 'bamboo-precept-lgxtn';
+
 
 import * as vscode from 'vscode';
 
