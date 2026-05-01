@@ -13,6 +13,7 @@ import { STATE_DB_PATH } from '../constants';
 import { CONVERSATIONS_DIR, BRAIN_DIR } from '../shared/agPaths';
 import { decodeVarint, skipProtobufField } from '../shared/protobuf';
 import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
+import { dbGet, isDbAvailable } from '../shared/db';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ConvGuard');
@@ -33,7 +34,7 @@ export interface ConversationStatus {
 export class ConversationGuard implements vscode.Disposable {
     private _dismissedCount = -1;
     private _lastStatus: ConversationStatus | null = null;
-    private _sqlite3Available: boolean | undefined;
+    private _dbAvailable: boolean | undefined;
     private _onStatusChange = new vscode.EventEmitter<ConversationStatus>();
     public readonly onStatusChange = this._onStatusChange.event;
 
@@ -66,17 +67,12 @@ export class ConversationGuard implements vscode.Disposable {
 
             if (!fs.existsSync(STATE_DB_PATH)) return null;
 
-            // Verify sqlite3 is available (cache result to avoid repeated shell calls)
-            if (this._sqlite3Available === undefined) {
-                try {
-                    cp.execSync('sqlite3 --version', { timeout: 3000, stdio: 'pipe' });
-                    this._sqlite3Available = true;
-                } catch {
-                    this._sqlite3Available = false;
-                    log.warn('sqlite3 CLI not found in PATH — conversation detection disabled');
-                }
+            // Verify DB backend is available (cache result)
+            if (this._dbAvailable === undefined) {
+                this._dbAvailable = isDbAvailable();
+                if (!this._dbAvailable) log.warn('No DB backend available — conversation detection disabled');
             }
-            if (!this._sqlite3Available) return null;
+            if (!this._dbAvailable) return null;
 
             const diskIds = new Set(pbFiles.map(f => f.replace('.pb', '')));
             const indexIds = await this._readIndexIds();
@@ -104,50 +100,42 @@ export class ConversationGuard implements vscode.Disposable {
     }
 
     /** Extract conversation IDs from the trajectory summaries protobuf index */
-    private _readIndexIds(): Promise<Set<string>> {
-        return new Promise((resolve) => {
-            const query = `SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.trajectorySummaries'`;
-            cp.exec(
-                `sqlite3 "${STATE_DB_PATH}" "${query}"`,
-                { timeout: 5000, maxBuffer: 10 * 1024 * 1024 },
-                (err, stdout) => {
-                    if (err || !stdout.trim()) { resolve(new Set()); return; }
-                    try {
-                        const ids = new Set<string>();
-                        const decoded = Buffer.from(stdout.trim(), 'base64');
-                        let pos = 0;
-                        while (pos < decoded.length) {
-                            try {
-                                const { value: tag, pos: tagEnd } = decodeVarint(decoded, pos);
-                                if ((tag & 7) !== 2) break;
-                                const { value: entryLen, pos: entryStart } = decodeVarint(decoded, tagEnd);
-                                const entry = decoded.slice(entryStart, entryStart + entryLen);
-                                pos = entryStart + entryLen;
+    private async _readIndexIds(): Promise<Set<string>> {
+        try {
+            const raw = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
+            if (!raw) return new Set();
 
-                                // Extract UID from field 1 of the entry
-                                let ep = 0;
-                                while (ep < entry.length) {
-                                    const { value: t, pos: tnext } = decodeVarint(entry, ep);
-                                    const fn = Math.floor(t / 8);
-                                    const wt = t & 7;
-                                    if (wt === 2) {
-                                        const { value: l, pos: ds } = decodeVarint(entry, tnext);
-                                        if (fn === 1) {
-                                            ids.add(entry.slice(ds, ds + l).toString('utf8'));
-                                            break;
-                                        }
-                                        ep = ds + l;
-                                    } else {
-                                        ep = skipProtobufField(entry, tnext, wt);
-                                    }
-                                }
-                            } catch { break; }
+            const ids = new Set<string>();
+            const decoded = Buffer.from(raw, 'base64');
+            let pos = 0;
+            while (pos < decoded.length) {
+                try {
+                    const { value: tag, pos: tagEnd } = decodeVarint(decoded, pos);
+                    if ((tag & 7) !== 2) break;
+                    const { value: entryLen, pos: entryStart } = decodeVarint(decoded, tagEnd);
+                    const entry = decoded.subarray(entryStart, entryStart + entryLen);
+                    pos = entryStart + entryLen;
+
+                    let ep = 0;
+                    while (ep < entry.length) {
+                        const { value: t, pos: tnext } = decodeVarint(entry, ep);
+                        const fn = Math.floor(t / 8);
+                        const wt = t & 7;
+                        if (wt === 2) {
+                            const { value: l, pos: ds } = decodeVarint(entry, tnext);
+                            if (fn === 1) {
+                                ids.add(entry.subarray(ds, ds + l).toString('utf8'));
+                                break;
+                            }
+                            ep = ds + l;
+                        } else {
+                            ep = skipProtobufField(entry, tnext, wt);
                         }
-                        resolve(ids);
-                    } catch { resolve(new Set()); }
-                }
-            );
-        });
+                    }
+                } catch { break; }
+            }
+            return ids;
+        } catch { return new Set(); }
     }
 
     /** Dismiss the current missing count (don't nag again for the same number) */

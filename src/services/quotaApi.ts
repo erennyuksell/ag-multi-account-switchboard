@@ -1,5 +1,5 @@
 import * as https from 'https';
-import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, MODEL_WHITELIST, USER_AGENT } from '../constants';
+import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, MODEL_DISPLAY_NAMES, USER_AGENT } from '../constants';
 import { QuotaModel, QuotaResult, HttpError } from '../types';
 import { collectBody } from '../utils/http';
 
@@ -67,15 +67,20 @@ export class QuotaApiService {
     /**
      * Parse retrieveUserQuota buckets[] response.
      * Each bucket: { tokenType, modelId, remainingFraction, resetTime? }
+     * Shows ALL models — no filtering. Uses display name overrides when available,
+     * otherwise auto-humanizes the model slug.
      */
     private parseBuckets(buckets: any[]): QuotaModel[] {
         const models: QuotaModel[] = [];
 
         for (const bucket of buckets) {
             const modelId = bucket.modelId || '';
+            if (!modelId) continue;
+
             const cleanId = modelId.split('/').pop()!;
-            const displayName = MODEL_WHITELIST[cleanId] || MODEL_WHITELIST[modelId];
-            if (!displayName) continue; // skip non-whitelisted models
+            const displayName = MODEL_DISPLAY_NAMES[cleanId]
+                || MODEL_DISPLAY_NAMES[modelId]
+                || QuotaApiService.humanizeModelId(cleanId);
 
             const fraction = bucket.remainingFraction ?? bucket.remaining_fraction ?? 0;
             let localResetTime = '';
@@ -96,6 +101,25 @@ export class QuotaApiService {
         }
 
         return models.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    /**
+     * Auto-humanize a model slug: 'gemini-3.1-pro-high' → 'Gemini 3.1 Pro (High)'
+     * Treats the last segment as a variant qualifier when it's a known modifier.
+     */
+    private static humanizeModelId(slug: string): string {
+        const VARIANT_QUALIFIERS = new Set(['high', 'low', 'medium', 'fast', 'thinking', 'lite', 'experimental', 'preview']);
+        const ACRONYMS = new Set(['gpt', 'oss', 'llm', 'tts', 'api']);
+        const parts = slug.split('-');
+        let variant = '';
+        if (parts.length > 1 && VARIANT_QUALIFIERS.has(parts[parts.length - 1].toLowerCase())) {
+            variant = parts.pop()!;
+        }
+        const base = parts.map(p => {
+            if (ACRONYMS.has(p.toLowerCase())) return p.toUpperCase();
+            return p.charAt(0).toUpperCase() + p.slice(1);
+        }).join(' ');
+        return variant ? `${base} (${variant.charAt(0).toUpperCase() + variant.slice(1)})` : base;
     }
 
     private postJson(endpoint: string, body: any, accessToken: string): Promise<any> {

@@ -2,19 +2,15 @@
  * EmailResolver — resolves the active IDE account email.
  * Extracted from QuotaManager to follow Single Responsibility Principle.
  *
- * Strategy: USS API (in-memory) → sqlite3 DB fallback → empty string.
+ * Strategy: USS API (in-memory) → state.vscdb fallback → empty string.
  */
 
 import * as vscode from 'vscode';
-import { exec } from 'child_process';
-import { promisify } from 'util';
 import { USSApi } from '../types';
 import { extractStringField } from '../utils/protobuf';
-import { STATE_DB_PATH, SQLITE_EXEC_TIMEOUT_MS } from '../constants';
 import { createLogger } from '../utils/logger';
 import { getUSS } from '../utils/uss';
 
-const execAsync = promisify(exec);
 const log = createLogger('EmailResolver');
 
 export class EmailResolver {
@@ -39,11 +35,8 @@ export class EmailResolver {
 
         try {
             // Fallback: read from antigravityAuthStatus in state.vscdb
-            const sql = "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus';";
-            const { stdout } = await execAsync(`sqlite3 "${STATE_DB_PATH}" "${sql}"`, {
-                timeout: SQLITE_EXEC_TIMEOUT_MS,
-            });
-            const result = stdout.trim();
+            const { dbGet } = require('../shared/db');
+            const result = await dbGet('antigravityAuthStatus');
             if (result) {
                 try {
                     const parsed = JSON.parse(result);
@@ -59,3 +52,4 @@ export class EmailResolver {
         return '';
     }
 }
+

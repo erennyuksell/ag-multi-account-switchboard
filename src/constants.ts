@@ -26,9 +26,9 @@ export const LOAD_CODE_ASSIST_ENDPOINTS = [
     'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist',
 ];
 
-// Strict model whitelist for retrieveUserQuota buckets — modelId → display name
-// Only these user-facing models are shown (matches what LS displays)
-export const MODEL_WHITELIST: Record<string, string> = {
+// Optional display name overrides for known model slugs.
+// Models NOT in this map are still shown — their ID is auto-humanized.
+export const MODEL_DISPLAY_NAMES: Record<string, string> = {
     'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
     'claude-sonnet-4-6': 'Claude Sonnet 4.6',
     'gemini-3-flash': 'Gemini 3 Flash',
@@ -63,8 +63,6 @@ export const WMIC_EXEC_TIMEOUT_MS = 5_000;
 export const LSOF_EXEC_TIMEOUT_MS = 5_000;
 /** Timeout for cascade probe during server discovery */
 export const CASCADE_PROBE_TIMEOUT_MS = 3_000;
-/** SQLite CLI execution timeout */
-export const SQLITE_EXEC_TIMEOUT_MS = 5_000;
 /** Token renewal retry delay on transient failure */
 export const RENEWAL_RETRY_DELAY_MS = 2 * 60_000;
 
@@ -72,8 +70,6 @@ export const RENEWAL_RETRY_DELAY_MS = 2 * 60_000;
 
 /** Bytes to read from file header for binary detection */
 export const FILE_HEADER_READ_BYTES = 256;
-/** Backup file max age before pruning (7 days) */
-export const BACKUP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // ─── UI Constants (re-exported from shared/uiConstants for backward compat) ───
 export {
     CTX_WARNING_PCT, CTX_CRITICAL_PCT,

@@ -3,7 +3,7 @@
  * =====================================
  * Runs as a standalone Node.js process (via ELECTRON_RUN_AS_NODE=1)
  * after AntiGravity exits. Rebuilds the sidebar conversation index
- * from .pb files on disk using sqlite3 CLI (no WASM dependency).
+ * from .pb files on disk using shared/db.ts (native module + CLI fallback).
  *
  * Usage: spawned by conversationGuard.ts with parentPid as argv[2]
  */
@@ -19,6 +19,7 @@ import {
     buildTimestampFields, hasTimestampFields,
 } from '../shared/protobuf';
 import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
+import { dbGet, dbExecRaw } from '../shared/db';
 import { createWorkerLogger } from '../shared/workerLogger';
 
 // ─── Worker-local state ──────────────────────────────────────────────
@@ -29,29 +30,6 @@ let _hasRelaunched = false;
 interface RelaunchInfo {
     workspaceFolders: string[];
     mainPid?: number;
-}
-
-// ─── sqlite3 CLI wrapper ────────────────────────────────────────────
-/**
- * Unified sqlite3 CLI executor — always uses temp file to avoid shell arg limits.
- * Returns stdout (for SELECT) or empty string (for UPDATE/INSERT).
- */
-function sqlite3(sql: string, opts?: { timeout?: number; maxBuffer?: number }): string {
-    const tmpFile = path.join(os.tmpdir(), 'ag-conv-fix-sql.tmp');
-    try {
-        fs.writeFileSync(tmpFile, sql, 'utf8');
-        return cp.execSync(`sqlite3 "${STATE_DB_PATH}" < "${tmpFile}"`, {
-            encoding: 'utf8',
-            timeout: opts?.timeout ?? 30000,
-            maxBuffer: opts?.maxBuffer ?? 50 * 1024 * 1024,
-            shell: isWindows ? 'cmd.exe' : '/bin/sh',
-        }).trim();
-    } catch (e: unknown) {
-        log.error(`sqlite3 error: ${(e as Error).message}`);
-        throw e;
-    } finally {
-        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
 }
 
 // ─── Title Helpers (isGenericTitle, getTitleFromBrain, getTitleFromTranscript
@@ -272,11 +250,11 @@ async function main(): Promise<void> {
     if (!fs.existsSync(STATE_DB_PATH)) { log.error('DB not found'); relaunchAG(relaunchInfo); return; }
     if (!fs.existsSync(CONVERSATIONS_DIR)) { log.error('Conv dir not found'); relaunchAG(relaunchInfo); return; }
 
-    // 4. Read existing index via sqlite3 CLI
-    log.info('Reading existing index via sqlite3...');
+    // 4. Read existing index via shared/db.ts
+    log.info('Reading existing index...');
     let rawB64 = '';
     try {
-        rawB64 = sqlite3("SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.trajectorySummaries';");
+        rawB64 = await dbGet('antigravityUnifiedStateSync.trajectorySummaries') || '';
     } catch { /* will rebuild from scratch */ }
     if (!rawB64) {
         log.warn('No existing index found, building from scratch.');
@@ -327,12 +305,12 @@ async function main(): Promise<void> {
         } catch (e: unknown) { log.warn(`Backup warning: ${(e as Error).message}`); }
     }
 
-    // 10. Write new index via sqlite3 CLI
+    // 10. Write new index via shared/db.ts
     const encoded = resultBytes.toString('base64');
-    // Escape single quotes for SQL
     const escapedVal = encoded.replace(/'/g, "''");
     try {
-        sqlite3(`UPDATE ItemTable SET value='${escapedVal}' WHERE key='antigravityUnifiedStateSync.trajectorySummaries';`);
+        const ok = await dbExecRaw(`UPDATE ItemTable SET value='${escapedVal}' WHERE key='antigravityUnifiedStateSync.trajectorySummaries';`);
+        if (!ok) throw new Error('dbExecRaw returned false');
         log.info(`SUCCESS: Rebuilt index with ${resolved.length} conversations.`);
     } catch (e: unknown) {
         log.error(`Writing index failed: ${(e as Error).message}`);

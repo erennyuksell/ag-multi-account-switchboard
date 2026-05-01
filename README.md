@@ -18,7 +18,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-3.2.0-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-3.2.1-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.

@@ -137,3 +137,4 @@ dist
 
 # VS Code Extension packages
 *.vsix
+docs

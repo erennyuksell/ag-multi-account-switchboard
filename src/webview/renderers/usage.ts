@@ -16,9 +16,19 @@ export function renderUsageStats(stats: any): void {
     const el = document.getElementById('usageContent');
     if (!el) return;
 
-    const hasMonthly = stats?.monthly && stats.monthly.some((m: any) => m.total > 0);
-    if (!stats || (stats.totalCalls === 0 && (!stats.daily || stats.daily.length === 0) && !hasMonthly)) {
+    if (!stats) {
         el.innerHTML = renderShimmerSkeleton();
+        return;
+    }
+
+    if (stats.error) {
+        el.innerHTML = renderErrorState(stats.error);
+        return;
+    }
+
+    const hasMonthly = stats.monthly && stats.monthly.some((m: any) => m.total > 0);
+    if (stats.totalCalls === 0 && (!stats.daily || stats.daily.length === 0) && !hasMonthly) {
+        el.innerHTML = renderEmptyState();
         return;
     }
 
@@ -29,6 +39,40 @@ export function renderUsageStats(stats: any): void {
     } else {
         renderLegacyStats(el, stats);
     }
+}
+
+/** Error state — shown when fetch Deep Stats throws an error and no cache exists */
+function renderErrorState(msg: string): string {
+    return `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:70px 20px;text-align:center;">
+        <div style="width:56px;height:56px;border-radius:50%;background:rgba(255,80,80,0.05);border:1px solid rgba(255,80,80,0.15);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.02);">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--vscode-errorForeground);opacity:0.8;">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+        </div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--vscode-foreground);letter-spacing:0.2px;">Scan Failed</div>
+        <div style="font-size:12px;color:var(--vscode-descriptionForeground);max-width:230px;line-height:1.5;">${escHtml(msg)}</div>
+    </div>
+    `;
+}
+
+/** Empty state — shown when scan completes but 0 conversations exist */
+function renderEmptyState(): string {
+    return `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:70px 20px;text-align:center;">
+        <div style="width:56px;height:56px;border-radius:50%;background:rgba(128,128,128,0.04);border:1px solid rgba(128,128,128,0.08);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.02);">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--vscode-descriptionForeground);opacity:0.7;">
+                <line x1="18" y1="20" x2="18" y2="10"></line>
+                <line x1="12" y1="20" x2="12" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="14"></line>
+            </svg>
+        </div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--vscode-foreground);letter-spacing:0.2px;">No Usage History</div>
+        <div style="font-size:12px;color:var(--vscode-descriptionForeground);max-width:230px;line-height:1.5;">Tracked conversations and token telemetry will be visualized here.</div>
+    </div>
+    `;
 }
 
 /** Shimmer skeleton — shown while data is loading */

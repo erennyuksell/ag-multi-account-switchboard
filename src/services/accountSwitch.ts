@@ -7,7 +7,7 @@ import {
     encodeMessage, extractField, extractStringField,
 } from '../utils/protobuf';
 import { createLogger } from '../utils/logger';
-import { writeToStateDb } from '../utils/dbWriter';
+import { dbExec } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
 import { LS_SERVICE_PATH, RENEWAL_RETRY_DELAY_MS } from '../constants';
 
@@ -485,7 +485,7 @@ export class AccountSwitchService {
     /**
      * Write auth status to the IDE's state database (async — does not block extension host).
      * Uses hex-encoded JSON as SQLite X'...' blob to prevent SQL injection.
-     * Delegates to dbWriter which: (1) creates a backup first, (2) uses cross-platform CLI args.
+     * Delegates to shared/db which: (1) creates a backup first, (2) uses cross-platform CLI args.
      */
     private writeAuthStatusToDb(name: string, email: string, apiKey: string): void {
         const proto = Buffer.concat([encodeVarintField(2, 1), encodeString(3, name), encodeString(7, email)]);
@@ -494,8 +494,7 @@ export class AccountSwitchService {
         const hexValue = Buffer.from(json, 'utf-8').toString('hex');
         const sql = `UPDATE ItemTable SET value = CAST(X'${hexValue}' AS TEXT) WHERE key = 'antigravityAuthStatus';`;
 
-        // Delegate to dbWriter: backs up state.vscdb first, then writes cross-platform
-        writeToStateDb(sql).catch(err => log.warn('Legacy DB write failed:', err?.message));
+        dbExec(sql).catch(err => log.warn('Legacy DB write failed:', err?.message));
     }
 
     async testApiAccess(): Promise<boolean> {

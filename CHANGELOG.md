@@ -2,6 +2,14 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
+## [3.2.1] — 2026-05-01
+
+### Fixed
+- **Quota 100% display bug** — Restored `projectId` parameter in `retrieveUserQuota` API call. Without it, Google returned generic empty buckets showing 100% for all models. (via [#3](https://github.com/erennyuksell/ag-multi-account-switchboard/pull/3) by [@ameenalasady](https://github.com/ameenalasady))
+
+### Changed
+- **Model whitelist removed** — All models returned by the API are now displayed, not just hardcoded ones. Unknown model IDs are auto-humanized (`gemini-3.1-pro-high` → `Gemini 3.1 Pro (High)`). The old `MODEL_WHITELIST` is now `MODEL_DISPLAY_NAMES` — a cosmetic override map, not a filter.
+
 ## [3.2.0] — 2026-05-01
 
 ### Added

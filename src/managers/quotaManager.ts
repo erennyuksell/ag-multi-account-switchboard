@@ -428,6 +428,12 @@ export class QuotaManager {
                     if (deep) { this.lastUsageStats = deep; this.pushCachedData(); }
                 }).catch(err => {
                     log.diag(`fetchDeepStats: ${err?.message}`);
+                    if (!this.lastUsageStats) {
+                        this.viewProvider?.postMessage({ 
+                            type: 'usageStatsUpdate', 
+                            usageStats: { error: err?.message || 'Failed to scan usage data from Antigravity server.' } 
+                        });
+                    }
                 });
             }
         } catch (error: any) {

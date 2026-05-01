@@ -47,7 +47,7 @@ export function getTitleFromBrain(cid: string, maxLen = 55): string | null {
                     if (line.startsWith('```') || line.startsWith('<') || line.startsWith('>')) continue;
                     const text = line.replace(/^#+\s*/, '').replace(/[*_~`]/g, '').trim();
                     if (isGenericTitle(text)) continue;
-                    if (/[a-zA-Z]/.test(text) && text.length > 3) {
+                    if (/\p{L}/u.test(text) && text.length > 3) {
                         return text.length > maxLen ? text.substring(0, maxLen - 3) + '...' : text;
                     }
                 }
@@ -108,3 +108,87 @@ export function getTitleFromTranscript(cid: string, maxLen = 55): string | null 
     } catch { /* ignore */ }
     return null;
 }
+
+// ─── Global Index Title Extraction ──────────────────────────────────
+
+type GlobalIndexResult = { titleMap: Map<string, string>, stepCounts: Map<string, number> };
+const EMPTY_RESULT: GlobalIndexResult = { titleMap: new Map(), stepCounts: new Map() };
+
+/**
+ * Parse the raw protobuf bytes from trajectorySummaries into title + stepCount maps.
+ */
+function parseTrajectorySummaries(decoded: Buffer): GlobalIndexResult {
+    const { decodeVarint, skipProtobufField } = require('./protobuf');
+    const titleMap = new Map<string, string>();
+    const stepCounts = new Map<string, number>();
+    let pos = 0;
+    while (pos < decoded.length) {
+        try {
+            const { value: tag, pos: tagEnd } = decodeVarint(decoded, pos);
+            if ((tag & 7) !== 2) break;
+            const { value: entryLen, pos: entryStart } = decodeVarint(decoded, tagEnd);
+            const entry = decoded.subarray(entryStart, entryStart + entryLen);
+            pos = entryStart + entryLen;
+
+            let ep = 0, id = '', title = '', stepCount = 0;
+            while (ep < entry.length) {
+                try {
+                    const { value: t, pos: tnext } = decodeVarint(entry, ep);
+                    const fn = Math.floor(t / 8);
+                    const wt = t & 7;
+                    if (wt === 2) {
+                        const { value: l, pos: ds } = decodeVarint(entry, tnext);
+                        if (fn === 1) {
+                            id = entry.subarray(ds, ds + l).toString('utf8');
+                        } else if (fn === 2) {
+                            const base64Str = entry.subarray(ds, ds + l).toString('utf8');
+                            const innerBuf = Buffer.from(base64Str, 'base64');
+                            let ip = 0;
+                            while (ip < innerBuf.length) {
+                                const { value: it, pos: itnext } = decodeVarint(innerBuf, ip);
+                                const ifn = Math.floor(it / 8);
+                                const iwt = it & 7;
+                                if (iwt === 0) {
+                                    const { value: val, pos: next } = decodeVarint(innerBuf, itnext);
+                                    if (ifn === 2) stepCount = val;
+                                    ip = next;
+                                } else if (iwt === 2) {
+                                    const { value: il, pos: ids } = decodeVarint(innerBuf, itnext);
+                                    if (ifn === 1) title = innerBuf.subarray(ids, ids + il).toString('utf8');
+                                    ip = ids + il;
+                                } else {
+                                    ip = skipProtobufField(innerBuf, itnext, iwt);
+                                }
+                            }
+                        }
+                        ep = ds + l;
+                    } else {
+                        ep = skipProtobufField(entry, tnext, wt);
+                    }
+                } catch { break; }
+            }
+            if (id) {
+                if (title) titleMap.set(id, title);
+                if (stepCount > 0) stepCounts.set(id, stepCount);
+            }
+        } catch { break; }
+    }
+    return { titleMap, stepCounts };
+}
+
+/**
+ * Extract conversation IDs, Titles, and Step Counts from the global trajectory summaries.
+ * Uses shared db.ts for cross-platform SQLite access (native module + CLI fallback).
+ */
+export async function getGlobalIndexData(): Promise<GlobalIndexResult> {
+    const { dbGet } = require('./db');
+    const raw: string | null = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
+    if (!raw) return EMPTY_RESULT;
+
+    try {
+        const decoded = Buffer.from(raw, 'base64');
+        return parseTrajectorySummaries(decoded);
+    } catch { return EMPTY_RESULT; }
+}
+
+

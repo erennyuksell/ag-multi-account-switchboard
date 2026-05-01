@@ -106,7 +106,10 @@ export class UsageStatsService {
             const allIds = this.discoverConversationIds();
             if (allIds.length === 0) {
                 log.info('No conversations found on disk');
-                return null;
+                const emptyStats = aggregateFromPerConvo({}, new Map());
+                this.deepStatsCache = emptyStats;
+                if (onBackfillComplete) onBackfillComplete(emptyStats);
+                return emptyStats;
             }
 
             // Split into HOT (recent 48h) and COLD
@@ -153,7 +156,7 @@ export class UsageStatsService {
 
         } catch (e: any) {
             log.warn('twoPhaseFullFetch failed:', e?.message);
-            return null;
+            throw new Error(e?.message || 'Unknown network error during fetch');
         }
     }
 
@@ -461,16 +464,29 @@ export class UsageStatsService {
 
     // ─── Trajectory Summaries (titles + stepCounts) ───
 
-    /**
-     * Fetch trajectory summaries — extracts both titles and stepCounts in a single API call.
-     * stepCounts are used for delta detection: only re-fetch conversations where steps increased.
-     */
     private async fetchTrajectorySummaries(serverInfo: ServerInfo): Promise<{
         titleMap: Map<string, string>;
         stepCounts: Map<string, number>;
     }> {
         const titleMap = new Map<string, string>();
         const stepCounts = new Map<string, number>();
+
+        // Phase 1: Fetch global data directly from state.vscdb (SSOT for all workspaces)
+        try {
+            const { getGlobalIndexData } = require('../../shared/titleResolver');
+            const globalData = await getGlobalIndexData();
+            for (const [id, title] of globalData.titleMap.entries()) {
+                titleMap.set(id, title);
+            }
+            for (const [id, count] of globalData.stepCounts.entries()) {
+                stepCounts.set(id, count);
+            }
+            log.info(`fetchTrajectorySummaries: loaded ${globalData.titleMap.size} titles, ${globalData.stepCounts.size} stepCounts from vscdb`);
+        } catch (e: any) {
+            log.warn('Failed to fetch global index data:', e.message);
+        }
+
+        // Phase 2: Fetch current workspace stats via LS
         try {
             const trajResp = await callLsJson(serverInfo, EP.TRAJECTORIES, {});
             const sums = trajResp?.trajectorySummaries || {};
@@ -485,11 +501,15 @@ export class UsageStatsService {
             for (const [id, v] of entries) {
                 const val = v as any;
                 const title = val.summary || val.title || val.displayName || val.name || val.description || '';
-                titleMap.set(id, title || 'Untitled');
+                // LS titles have highest fidelity for the current workspace, so override if present
+                if (title) titleMap.set(id, title);
+                else if (!titleMap.has(id)) titleMap.set(id, 'Untitled');
+
                 const sc = parseInt(val.stepCount || '0', 10);
                 if (sc > 0) stepCounts.set(id, sc);
             }
         } catch (e: unknown) { log.warn('[EXPECTED] fetchTrajectorySummaries:', (e as Error)?.message); }
+
         return { titleMap, stepCounts };
     }
 

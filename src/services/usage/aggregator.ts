@@ -308,9 +308,18 @@ export function aggregateFromPerConvo(
         totalIn += cIn; totalOut += cOut; totalCa += cCache; totalCaW += ccW; totalReas += cReas; totalCalls += cCalls;
 
         if (cCalls > 0) {
+            let title = titleMap.get(cid) || '';
+            const { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } = require('../../shared/titleResolver');
+            
+            if (isGenericTitle(title)) {
+                title = getTitleFromBrain(cid, 50) || '';
+                if (!title) title = getTitleFromTranscript(cid, 50) || '';
+                if (!title) title = 'Conversation';
+            }
+
             cascadeList.push({
                 id: cid,
-                title: titleMap.get(cid) || 'Conversation',
+                title,
                 input: cIn, output: cOut, cache: cCache, cacheWrite: ccW, reasoning: cReas, calls: cCalls,
             });
         }

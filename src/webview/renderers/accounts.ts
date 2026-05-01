@@ -111,7 +111,7 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
             if (displayModel) {
                 const bnLabel = displayModel.label || shortModelName(displayModel.id);
                 const pctCls = fillClass(displayModel.pct);
-                const tl = timeLeft(a.resetTime);
+                const tl = timeLeft(displayModel.resetTime);
                 subBlock = '<div class="acct-sub">'
                     + '<span class="bn-model">' + bnLabel + '</span> \u00b7 '
                     + '<span class="bn-pct ' + pctCls + '">' + displayModel.pct + '%</span>'
