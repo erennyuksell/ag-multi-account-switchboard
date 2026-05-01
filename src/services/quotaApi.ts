@@ -10,14 +10,14 @@ export class QuotaApiService {
 
     /** Fetch quota for a remote account using its access token */
     async fetchRemoteQuota(accessToken: string): Promise<QuotaResult> {
-        // 1. Get tier info
-        const { tier, tierName } = await this.loadProjectInfo(accessToken);
+        // 1. Get tier info and projectId
+        const { projectId, tier, tierName } = await this.loadProjectInfo(accessToken);
 
-        // 2. Fetch quota via retrieveUserQuota (no projectId needed)
+        // 2. Fetch quota via retrieveUserQuota
         let quotaData: any = null;
         for (const ep of QUOTA_API_ENDPOINTS) {
             try {
-                quotaData = await this.postJson(ep, {}, accessToken);
+                quotaData = await this.postJson(ep, { project: projectId }, accessToken);
                 break;
             } catch (e) {
                 if (e instanceof HttpError) {
@@ -39,13 +39,15 @@ export class QuotaApiService {
 
     // --- Private ---
 
-    private async loadProjectInfo(accessToken: string): Promise<{ tier: string | null; tierName: string | null }> {
+    private async loadProjectInfo(accessToken: string): Promise<{ projectId: string; tier: string | null; tierName: string | null }> {
+        let projectId = 'cloudaicompanion-enterprise';
         let tier: string | null = null;
         let tierName: string | null = null;
 
         for (const ep of LOAD_CODE_ASSIST_ENDPOINTS) {
             try {
                 const res = await this.postJson(ep, { metadata: { ideType: 'ANTIGRAVITY' } }, accessToken);
+                projectId = res.cloudaicompanionProject || projectId;
                 tier = res.paidTier?.id || res.currentTier?.id || null;
                 tierName = res.paidTier?.name || res.currentTier?.name || null;
                 break;
@@ -59,7 +61,7 @@ export class QuotaApiService {
             }
         }
 
-        return { tier, tierName };
+        return { projectId, tier, tierName };
     }
 
     /**
@@ -71,10 +73,11 @@ export class QuotaApiService {
 
         for (const bucket of buckets) {
             const modelId = bucket.modelId || '';
-            const displayName = MODEL_WHITELIST[modelId];
+            const cleanId = modelId.split('/').pop()!;
+            const displayName = MODEL_WHITELIST[cleanId] || MODEL_WHITELIST[modelId];
             if (!displayName) continue; // skip non-whitelisted models
 
-            const fraction = bucket.remainingFraction ?? 0;
+            const fraction = bucket.remainingFraction ?? bucket.remaining_fraction ?? 0;
             let localResetTime = '';
             if (bucket.resetTime) {
                 try {
