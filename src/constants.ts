@@ -91,47 +91,8 @@ export const LS_SERVICE_PATH = '/exa.language_server_pb.LanguageServerService';
 
 import * as vscode from 'vscode';
 
-// Platform-aware paths
-import * as path from 'path';
-import * as os from 'os';
-
-export const isMac = process.platform === 'darwin';
-export const isLinux = process.platform === 'linux';
-export const isWindows = process.platform === 'win32';
-
-/** Path to Antigravity's local state SQLite DB (used for active-account detection) */
-export const STATE_DB_PATH = isMac
-    ? path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
-    : isLinux
-        ? path.join(os.homedir(), '.config', 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
-        : isWindows
-            ? path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Antigravity', 'User', 'globalStorage', 'state.vscdb')
-            : '';
-
-/** Ordered list of candidate cert paths for the local language server */
-export const LS_CERT_PATHS: string[] = isMac
-    ? [
-        '/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/dist/languageServer/cert.pem',
-    ]
-    : isLinux
-        ? [
-            '/opt/antigravity/resources/app/extensions/antigravity/dist/languageServer/cert.pem',
-            path.join(os.homedir(), '.local', 'share', 'antigravity', 'resources', 'app', 'extensions', 'antigravity', 'dist', 'languageServer', 'cert.pem'),
-        ]
-        : isWindows
-            ? [
-                path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'), 'Programs', 'Antigravity', 'resources', 'app', 'extensions', 'antigravity', 'dist', 'languageServer', 'cert.pem'),
-            ]
-            : [];
-
-/** grep pattern to find the LS binary in `ps` output */
-export const LS_PROCESS_GREP = isMac
-    ? 'language_server_macos'
-    : isLinux
-        ? 'language_server_linux'
-        : isWindows
-            ? 'language_server_win'
-            : 'language_server';
+// Platform-aware paths — re-exported from shared SSOT (vscode-free)
+export { isMac, isLinux, isWindows, STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP } from './shared/agPaths';
 
 /** Unified CSRF token extraction regex — SSOT for process discovery */
 export const CSRF_TOKEN_RE = /--csrf_token[\s=]+([\w-]+)/;

@@ -7,6 +7,7 @@ import { ContextDetailPanel } from './providers/contextDetailPanel';
 import { updatePricing, setExternalPricingResolver } from './shared/usage-components';
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
 import { ConversationTracker } from './services/conversationTracker';
+import { ConversationGuard } from './services/conversationGuard';
 import { initLogger, createLogger, setFileSink, setDiagSink } from './utils/logger';
 
 const log = createLogger('Extension');
@@ -64,8 +65,12 @@ export async function activate(context: vscode.ExtensionContext) {
         log.info('LiteLLM dynamic pricing resolver registered');
     }).catch(() => { /* silent — hardcoded fallback active */ });
 
+    // --- Conversation Guard (Fix Missing Conversations) ---
+    const convGuard = new ConversationGuard(context);
+    context.subscriptions.push(convGuard);
+
     // --- Register webview provider ---
-    const viewProvider = new QuotaViewProvider(context.extensionUri, quotaManager);
+    const viewProvider = new QuotaViewProvider(context.extensionUri, quotaManager, convGuard);
     quotaManager.setViewProvider(viewProvider);
 
     context.subscriptions.push(
@@ -128,10 +133,58 @@ export async function activate(context: vscode.ExtensionContext) {
                 quotaManager.fetchContextWindowOnce(cascadeId);
             }
         }),
+        vscode.commands.registerCommand('ag.fixConversations', async () => {
+            const status = await convGuard.detect();
+            const count = status?.missing ?? 0;
+
+            const msg = count > 0
+                ? `${count} missing conversation${count > 1 ? 's' : ''} found.`
+                : 'No missing conversations detected.';
+            const detail = 'This will close Antigravity, rebuild the sidebar index from disk, and relaunch automatically.';
+
+            const confirm = await vscode.window.showWarningMessage(
+                msg,
+                { modal: true, detail },
+                'Fix Now'
+            );
+            if (confirm === 'Fix Now') convGuard.runFix();
+        }),
     );
 
     // --- React to account changes ---
     accountManager.onDidChange(() => quotaManager.refresh());
+
+    // --- Start delayed conversation detection ---
+    convGuard.startDelayedDetection();
+    convGuard.onStatusChange(async (status) => {
+        if (status.missing > 0 && !convGuard.isDismissed()) {
+            // Try to get LS titles (highest fidelity) — graceful fallback if unavailable
+            let lsTitles: Map<string, string> | undefined;
+            try {
+                const si = await quotaManager.getServerInfo();
+                if (si) {
+                    const { callLsJson } = await import('./utils/lsClient');
+                    const resp = await callLsJson(si, 'GetAllCascadeTrajectories', {});
+                    const sums = resp?.trajectorySummaries || {};
+                    lsTitles = new Map<string, string>();
+                    for (const [id, v] of Object.entries(sums)) {
+                        const val = v as any;
+                        const title = val.summary || val.title || val.displayName || '';
+                        if (title) lsTitles.set(id, title);
+                    }
+                }
+            } catch { /* LS unavailable — filesystem fallback */ }
+
+            const details = convGuard.resolveMissingDetails(status.missingIds, lsTitles);
+            viewProvider.postMessage({
+                type: 'conversationStatus',
+                onDisk: status.onDisk,
+                inIndex: status.inIndex,
+                missing: status.missing,
+                details,
+            });
+        }
+    });
 }
 
 function applyPricingFromSettings(): void {

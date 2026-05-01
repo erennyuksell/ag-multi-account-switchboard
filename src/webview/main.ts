@@ -83,6 +83,12 @@ const ACTIONS: Record<string, (t: HTMLElement) => void> = {
     },
     'open-usage-panel':     () => vscode.postMessage({ type: 'openUsagePanel' }),
     'open-context-detail':  () => vscode.postMessage({ type: 'openContextDetail' }),
+    'fix-conversations':    () => vscode.postMessage({ type: 'fixConversations' }),
+    'dismiss-conv-fix':     () => {
+        vscode.postMessage({ type: 'dismissConvFix' });
+        const banner = document.getElementById('convGuardBanner');
+        if (banner) banner.classList.add('hidden');
+    },
 };
 
 document.addEventListener('click', (e: MouseEvent) => {

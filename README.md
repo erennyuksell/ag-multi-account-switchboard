@@ -18,7 +18,7 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-3.1.1-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-3.2.0-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
@@ -82,6 +82,18 @@ A dedicated editor tab for deep context window analysis. Click **"See All →"**
 - **Export Markdown** — One-click conversation export with Copy to Clipboard and Save As options
 - **Live updates** — Auto-refreshes during active model execution via LiveStream watcher
 - **🔥 badges** — Heaviest token consumers are flagged for quick identification
+
+---
+
+### 🛡️ Conversation Guard — Lost Conversation Recovery
+
+Antigravity can silently lose conversations from the sidebar after crashes or multi-window usage. The Conversation Guard detects these orphaned conversations by comparing `.pb` files on disk against the sidebar index, and offers a one-click fix.
+
+- **Automatic detection** — Runs 15 seconds after startup, comparing disk state vs. sidebar index
+- **Expandable warning banner** — Shows exactly which conversations are missing, with resolved titles and dates
+- **One-click fix** — Spawns a detached worker that rebuilds the sidebar index after AG quits, then auto-relaunches the IDE
+- **Title resolution** — Recovers conversation titles from LS trajectory data, brain markdown files, or transcript logs
+- **Safe** — Creates a backup before modifying the index. Existing metadata (titles, timestamps) is preserved.
 
 ---
 
@@ -182,6 +194,7 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 | `AG Switchboard: Add Account via Token` | Add by pasting a refresh token |
 | `AG Switchboard: Remove Account` | Remove a tracked account |
 | `AG Switchboard: Open Usage Statistics` | Open the full usage dashboard |
+| `AG Switchboard: Fix Missing Conversations` | Detect and fix orphaned conversations |
 
 ### Configuration
 
@@ -213,6 +226,7 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 | **Account switch not reflected** | The panel watches for changes automatically. If delayed, click ↺ |
 | **Context window empty** | The Dual-LS discovery may need a moment. Click Refresh or wait for auto-sync |
 | **Windows: token budget not showing** | Ensure LS is running. The extension uses PowerShell for process discovery |
+| **Missing conversations** | The Conversation Guard auto-detects this. Click "Fix Now" in the warning banner, or run `AG Switchboard: Fix Missing Conversations` from the command palette |
 
 ---
 

@@ -3,6 +3,7 @@ import { ViewState } from '../types';
 import { QuotaManager } from '../managers/quotaManager';
 import { getWebviewContent } from '../templates/webviewTemplate';
 import { getPricing } from '../shared/usage-components';
+import { ConversationGuard } from '../services/conversationGuard';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ViewProvider');
@@ -13,6 +14,7 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly quotaManager: QuotaManager,
+        private readonly convGuard?: ConversationGuard,
     ) {}
 
     resolveWebviewView(
@@ -107,6 +109,12 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                     break;
                 case 'setUsageRange':
                     this.handleUsageRange(msg.range);
+                    break;
+                case 'fixConversations':
+                    vscode.commands.executeCommand('ag.fixConversations');
+                    break;
+                case 'dismissConvFix':
+                    if (this.convGuard) this.convGuard.dismiss();
                     break;
             }
         });

@@ -100,6 +100,51 @@ export function setupMessageHandler(): void {
                 }
                 break;
             }
+
+            case 'conversationStatus': {
+                const banner = document.getElementById('convGuardBanner');
+                if (!banner || msg.missing <= 0) break;
+
+                // Sanitize titles to prevent XSS from local brain files
+                const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+                // Build list items from details array
+                const details: Array<{title: string; date: string}> = msg.details || [];
+                const listHtml = details.map((d: {title: string; date: string}, i: number) =>
+                    `<div class="cg-item">`
+                    + `<span class="cg-item-num">${i + 1}.</span>`
+                    + `<span class="cg-item-title" title="${esc(d.title)}">${esc(d.title)}</span>`
+                    + `<span class="cg-item-date">${esc(d.date)}</span>`
+                    + `</div>`
+                ).join('');
+
+                banner.innerHTML =
+                    `<div class="cg-header" id="cgToggle">`
+                    + `<svg class="cg-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4l4 4-4 4"/></svg>`
+                    + `<span class="cg-icon">⚠</span>`
+                    + `<span class="cg-summary">`
+                    +   `<span class="cg-count">${msg.missing} conversations missing</span>`
+                    +   `<span class="cg-stats">${msg.onDisk} on disk · ${msg.inIndex} indexed</span>`
+                    + `</span>`
+                    + `<div class="cg-actions">`
+                    +   `<button class="cg-btn cg-fix" data-action="fix-conversations">Fix Now</button>`
+                    +   `<button class="cg-btn cg-dismiss" data-action="dismiss-conv-fix">✕</button>`
+                    + `</div>`
+                    + `</div>`
+                    + `<div class="cg-list-wrap">`
+                    +   `<div class="cg-list">${listHtml}</div>`
+                    + `</div>`;
+
+                banner.classList.remove('hidden');
+
+                // Toggle expand/collapse (event delegation on banner — no leak on re-render)
+                banner.onclick = (e) => {
+                    const target = e.target as HTMLElement;
+                    if (target.closest('.cg-actions') || target.closest('.cg-list')) return;
+                    if (target.closest('.cg-header')) banner.classList.toggle('cg-expanded');
+                };
+                break;
+            }
         }
     });
 }
