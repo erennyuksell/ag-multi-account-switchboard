@@ -61,21 +61,32 @@ export class UsageStatsService {
         /** Called during scan with (done, total) for progress UI */
         onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
+        log.info(`fetchDeepStats: start — port=${serverInfo.port} forceRefresh=${forceRefresh} memCache=${!!this.deepStatsCache}`);
+
         // 1. Instant return from memory cache (fastest) — skip if forceRefresh
-        if (this.deepStatsCache && !forceRefresh) return this.deepStatsCache;
+        if (this.deepStatsCache && !forceRefresh) {
+            log.info('fetchDeepStats: returning memory cache (no refresh needed)');
+            return this.deepStatsCache;
+        }
 
         // 2. Try disk cache + incremental refresh (picks up new conversations)
         const diskCache = this.cache.read();
         if (diskCache) {
             this.deepStatsCache = diskCache.stats;
-            log.info(`Deep stats: loaded from disk cache (${diskCache.fetchedIds.length} conversations, forceRefresh=${forceRefresh})`);
+            log.info(`fetchDeepStats: disk cache hit — ${diskCache.fetchedIds.length} conversations cached, updatedAt=${diskCache.updatedAt}`);
 
             // Cross-process lock: only 1 window fetches, others read cache only
             if (!this.processLock.acquire()) {
+                log.info('fetchDeepStats: lock held by another instance — returning disk cache as-is');
                 return this.deepStatsCache;
             }
             try {
-                const updated = await this.incrementalRefresh(serverInfo, diskCache).catch(() => false);
+                log.info('fetchDeepStats: starting incremental refresh...');
+                const updated = await this.incrementalRefresh(serverInfo, diskCache).catch((e: any) => {
+                    log.warn('fetchDeepStats: incrementalRefresh threw:', e?.message);
+                    return false;
+                });
+                log.info(`fetchDeepStats: incremental refresh done — updated=${updated}`);
                 if (updated && onBackfillComplete) onBackfillComplete(this.deepStatsCache!);
             } finally {
                 this.processLock.release();
@@ -85,9 +96,10 @@ export class UsageStatsService {
         }
 
         // 3. Two-phase fetch (first time only — no disk cache exists)
+        log.info('fetchDeepStats: no disk cache — starting cold two-phase fetch');
         //    Lock guard: only 1 window does the expensive cold boot
         if (!this.processLock.acquire()) {
-            log.info('Another instance is fetching — waiting for disk cache');
+            log.info('fetchDeepStats: lock held by another instance during cold boot — returning null');
             return null;
         }
         try {
@@ -108,26 +120,41 @@ export class UsageStatsService {
         onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
         try {
+<<<<<<< HEAD
             this.rawFetchCounts = {};
+=======
+            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+            log.info(`twoPhaseFullFetch: scanning brain dir: ${brainDir}`);
+
+>>>>>>> 34b445a (fix: Windows LS discovery broken by missing PID in process enumeration)
             const allIds = this.discoverConversationIds();
+            log.info(`twoPhaseFullFetch: found ${allIds.length} conversation(s) on disk`);
             if (allIds.length === 0) {
+<<<<<<< HEAD
                 log.info('No conversations found on disk');
                 const emptyStats = aggregateFromPerConvo({}, new Map());
                 this.deepStatsCache = emptyStats;
                 if (onBackfillComplete) onBackfillComplete(emptyStats);
                 return emptyStats;
+=======
+                log.warn('twoPhaseFullFetch: NO conversations found — check brain dir exists and contains UUID folders');
+                return null;
+>>>>>>> 34b445a (fix: Windows LS discovery broken by missing PID in process enumeration)
             }
 
             // Split into HOT (recent 48h) and COLD
             const cutoffMs = Date.now() - HOT_THRESHOLD_MS;
             const { hot, cold } = this.partitionByMtime(allIds, cutoffMs);
-            log.info(`Two-phase fetch: ${hot.length} hot + ${cold.length} cold = ${allIds.length} total`);
+            log.info(`twoPhaseFullFetch: partition done — ${hot.length} hot (recent 48h) + ${cold.length} cold = ${allIds.length} total`);
 
             // Phase 1: Fetch HOT conversations + trajectory summaries (titles + stepCounts)
+            log.info(`twoPhaseFullFetch: Phase 1 — fetching trajectory summaries + ${hot.length} hot conversations...`);
             const [summaries, hotData] = await Promise.all([
                 this.fetchTrajectorySummaries(serverInfo),
                 this.fetchConversationData(serverInfo, hot, onProgress ? (d) => onProgress(d, allIds.length) : undefined),
             ]);
+
+            log.diag(`twoPhaseFullFetch: Phase 1 API done — titleMap=${summaries.titleMap.size} titles, stepCounts=${summaries.stepCounts.size}, hotData=${Object.keys(hotData).length} convos with data`);
 
             this.currentTitleMap = summaries.titleMap;
             this.currentStepCounts = summaries.stepCounts;
@@ -135,10 +162,11 @@ export class UsageStatsService {
 
             const hotStats = aggregateFromPerConvo(hotData, summaries.titleMap);
             this.deepStatsCache = hotStats;
-            log.info(`Phase 1 complete: ${hotStats.totalCalls} calls from ${hot.length} recent conversations`);
+            log.diag(`twoPhaseFullFetch: Phase 1 aggregated — totalCalls=${hotStats.totalCalls} totalTokens=${hotStats.totalTokens} from ${hot.length} hot convos`);
 
             // If no cold conversations, write final cache and return
             if (cold.length === 0) {
+                log.diag('twoPhaseFullFetch: no cold conversations — writing cache and returning Phase 1 result');
                 const entryCounts = this.buildEntryCounts();
                 this.cache.write(hotData, allIds, hotStats, summaries.titleMap, summaries.stepCounts, entryCounts);
                 return hotStats;
@@ -147,9 +175,11 @@ export class UsageStatsService {
             // Phase 2: Fetch COLD conversations inline (not background).
             // Returning partial Phase 1 data caused flip-flop ($3 → $177 → $203).
             // Await full result so the UI transitions once: loading → correct data.
-            log.info(`Phase 2: fetching ${cold.length} cold conversations...`);
+            log.info(`twoPhaseFullFetch: Phase 2 — fetching ${cold.length} cold conversations...`);
             const hotDone = hot.length;
             const coldData = await this.fetchConversationData(serverInfo, cold, onProgress ? (d) => onProgress(hotDone + d, allIds.length) : undefined);
+            log.diag(`twoPhaseFullFetch: Phase 2 API done — coldData=${Object.keys(coldData).length} convos with data`);
+
             const merged = { ...hotData, ...coldData };
             this.currentPerConvo = merged;
 
@@ -159,14 +189,15 @@ export class UsageStatsService {
             // Build entryCounts for offset-based delta on next incremental
             const entryCounts = this.buildEntryCounts();
             this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts, entryCounts);
-            log.info(`Phase 2 complete: ${fullStats.totalCalls} calls total`);
+            log.info(`twoPhaseFullFetch: Phase 2 complete — totalCalls=${fullStats.totalCalls} totalTokens=${fullStats.totalTokens} across ${Object.keys(merged).length} convos`);
 
             if (onBackfillComplete) onBackfillComplete(fullStats);
             return fullStats;
 
         } catch (e: any) {
-            log.warn('twoPhaseFullFetch failed:', e?.message);
-            throw new Error(e?.message || 'Unknown network error during fetch');
+            log.warn('twoPhaseFullFetch: FAILED with error:', e?.message);
+            log.warn('twoPhaseFullFetch: stack:', e?.stack?.split('\n').slice(0, 5).join(' | '));
+            return null;
         }
     }
 
@@ -204,9 +235,11 @@ export class UsageStatsService {
             this.rawFetchCounts = {};
             const allIds = this.discoverConversationIds();
             const cachedSet = new Set(diskCache.fetchedIds);
+            log.diag(`incrementalRefresh: disk has ${allIds.length} convos, cache has ${cachedSet.size} fetched IDs`);
 
             // 1. NEW conversations (not in cache at all)
             const newIds = allIds.filter(id => !cachedSet.has(id));
+            log.diag(`incrementalRefresh: ${newIds.length} new conversations not in cache`);
 
             // 2. CHANGED conversations — precise stepCount delta detection
             //    Compare server's current stepCount vs our cached stepCount.
@@ -222,11 +255,12 @@ export class UsageStatsService {
                 const cachedCount = cachedStepCounts[id] ?? 0;
                 return currentCount > cachedCount;
             });
+            log.diag(`incrementalRefresh: ${changedIds.length} conversations changed (stepCount delta)`);
 
             const dirtyIds = [...new Set([...newIds, ...changedIds])];
 
             if (dirtyIds.length === 0) {
-                log.info('Deep stats: incremental — no new or changed conversations');
+                log.info('incrementalRefresh: nothing to fetch — all conversations up to date');
                 return false;
             }
 
@@ -237,6 +271,8 @@ export class UsageStatsService {
                 const cached = cachedEntryCounts[cid];
                 if (cached) offsetMap.set(cid, cached);
             }
+
+            log.info(`incrementalRefresh: fetching ${dirtyIds.length} dirty (${newIds.length} new + ${changedIds.length} changed)`);
 
             const deltaCount = [...offsetMap.values()].filter(v => v.meta > 0 || v.steps > 0).length;
             log.info(`Deep stats: incremental fetch — ${newIds.length} new, ${changedIds.length} changed (${deltaCount} offset-based delta)`);
@@ -270,10 +306,10 @@ export class UsageStatsService {
             this.currentPerConvo = merged;
             this.cache.write(merged, mergedIds, stats, summaries.titleMap, summaries.stepCounts, entryCounts);
 
-            log.info(`Deep stats: incremental complete — ${dirtyIds.length} dirty (${newIds.length} new + ${changedIds.length} changed)`);
+            log.info(`incrementalRefresh: complete — totalCalls=${stats.totalCalls} (${newIds.length} new + ${changedIds.length} changed convos updated)`);
             return true;
         } catch (e: any) {
-            log.warn('incrementalRefresh failed:', e?.message);
+            log.warn('incrementalRefresh: FAILED:', e?.message);
             return false;
         }
     }
@@ -290,13 +326,29 @@ export class UsageStatsService {
         offsetMap?: Map<string, { meta: number; steps: number }>,
     ): Promise<Record<string, ConvoTokenData>> {
         const result: Record<string, ConvoTokenData> = {};
+        if (conversationIds.length === 0) {
+            log.diag('fetchConversationData: called with 0 conversations — returning empty');
+            return result;
+        }
+
         const rpc = new RpcDirectClient(serverInfo);
-        let useRpc = rpc.isAvailable() && await rpc.heartbeat();
-        if (useRpc) {
-            log.info(`RPC Direct validated on HTTPS port ${serverInfo.httpsPort}`);
+        const rpcAvailable = rpc.isAvailable();
+        log.diag(`fetchConversationData: ${conversationIds.length} conversations — RPC available=${rpcAvailable} (httpsPort=${serverInfo.httpsPort ?? 'none'})`);
+
+        let useRpc = false;
+        if (rpcAvailable) {
+            try {
+                useRpc = await rpc.heartbeat();
+                log.diag(`fetchConversationData: RPC heartbeat ${useRpc ? '✓ validated' : '✗ failed'} on port ${serverInfo.httpsPort}`);
+            } catch (e: any) {
+                log.diag('fetchConversationData: RPC heartbeat threw:', e?.message);
+            }
+        } else {
+            log.diag(`fetchConversationData: RPC not available — httpsPort is ${serverInfo.httpsPort} — will use HTTP fallback`);
         }
 
         let processed = 0;
+        let withEntries = 0;
         await concurrentPool(
             conversationIds,
             async (cid) => {
@@ -305,11 +357,12 @@ export class UsageStatsService {
                     serverInfo, rpc, useRpc, cid, 1,
                     offsets?.meta ?? 0, offsets?.steps ?? 0,
                 );
-                if (entries.length > 0) result[cid] = { entries };
+                if (entries.length > 0) { result[cid] = { entries }; withEntries++; }
             },
             BATCH_CONCURRENCY,
             () => { this.processLock.heartbeat(); processed++; onProgress?.(processed); },
         );
+        log.diag(`fetchConversationData: pool done — ${processed} processed, ${withEntries}/${conversationIds.length} had token data`);
 
         // Retry: conversations with known stepCounts but 0 entries (timeout under load)
         if (this.currentStepCounts) {
@@ -317,7 +370,8 @@ export class UsageStatsService {
                 !(cid in result) && (this.currentStepCounts?.get(cid) ?? 0) > 0,
             );
             if (missed.length > 0) {
-                log.info(`Retry: ${missed.length} conversations — serial, full fetch`);
+                log.info(`fetchConversationData: retry — ${missed.length} conversations had stepCounts but 0 entries — serial, full fetch`);
+                let retryHits = 0;
                 await concurrentPool(
                     missed,
                     async (cid) => {
@@ -325,11 +379,18 @@ export class UsageStatsService {
                         const entries = await this.fetchAndDedup(serverInfo, rpc, false, cid, 2, 0, 0);
                         if (entries.length > 0) {
                             result[cid] = { entries };
-                            log.info(`RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries`);
+                            retryHits++;
+                            log.diag(`fetchConversationData: RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries`);
                         }
                     },
                     1,
                 );
+                log.info(`fetchConversationData: retry complete — ${retryHits}/${missed.length} recovered`);
+            } else {
+                const zeroEntryCount = conversationIds.filter(cid => !(cid in result)).length;
+                if (zeroEntryCount > 0) {
+                    log.diag(`fetchConversationData: ${zeroEntryCount} conversations returned 0 entries and had 0 stepCount (likely empty/no-op)`);
+                }
             }
         }
 
@@ -524,7 +585,6 @@ export class UsageStatsService {
     }> {
         const titleMap = new Map<string, string>();
         const stepCounts = new Map<string, number>();
-
         // Phase 1: Fetch global data directly from state.vscdb (SSOT for all workspaces)
         try {
             const globalData = await getGlobalIndexData();
@@ -540,15 +600,24 @@ export class UsageStatsService {
         }
 
         // Phase 2: Fetch current workspace stats via LS
+        log.info(`fetchTrajectorySummaries: calling ${EP.TRAJECTORIES} on port ${serverInfo.port}`);
         try {
             const trajResp = await callLsJson(serverInfo, EP.TRAJECTORIES, {});
+            if (!trajResp) {
+                log.warn('fetchTrajectorySummaries: API returned null/empty response — LS may be offline or on wrong port');
+                return { titleMap, stepCounts };
+            }
             const sums = trajResp?.trajectorySummaries || {};
             const entries = Object.entries(sums);
+            log.info(`fetchTrajectorySummaries: API returned ${entries.length} trajectory summaries`);
 
-            // Debug: log first entry's field names
+            // Debug: log first entry's field names to help diagnose schema changes
             if (entries.length > 0) {
-                const [, firstVal] = entries[0];
-                log.info(`TrajSummary sample fields: ${Object.keys(firstVal as any).join(', ')}`);
+                const [firstId, firstVal] = entries[0];
+                log.diag(`fetchTrajectorySummaries: sample fields for ${firstId.substring(0, 12)}: [${Object.keys(firstVal as any).join(', ')}]`);
+            } else {
+                log.warn('fetchTrajectorySummaries: trajectorySummaries is empty — no conversations visible to this LS instance');
+                log.warn(`fetchTrajectorySummaries: raw response keys: [${Object.keys(trajResp).join(', ')}]`);
             }
 
             for (const [id, v] of entries) {
@@ -561,8 +630,10 @@ export class UsageStatsService {
                 const sc = parseInt(val.stepCount || '0', 10);
                 if (sc > 0) stepCounts.set(id, sc);
             }
-        } catch (e: unknown) { log.warn('[EXPECTED] fetchTrajectorySummaries:', (e as Error)?.message); }
-
+            log.diag(`fetchTrajectorySummaries: done — ${titleMap.size} titles, ${stepCounts.size} with stepCounts`);
+        } catch (e: unknown) {
+            log.warn('fetchTrajectorySummaries: FAILED:', (e as Error)?.message);
+        }
         return { titleMap, stepCounts };
     }
 
@@ -586,14 +657,19 @@ export class UsageStatsService {
     /** Scan ~/.gemini/antigravity/brain/ for conversation UUIDs */
     private discoverConversationIds(): string[] {
         const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-        if (!fs.existsSync(brainDir)) return [];
+        if (!fs.existsSync(brainDir)) {
+            log.warn(`discoverConversationIds: brain dir does not exist: ${brainDir}`);
+            return [];
+        }
 
         const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         try {
-            return fs.readdirSync(brainDir, { withFileTypes: true })
-                .filter(d => d.isDirectory() && UUID_RE.test(d.name))
-                .map(d => d.name);
-        } catch { // EXPECTED: brain dir inaccessible (e.g., first-time install)
+            const allEntries = fs.readdirSync(brainDir, { withFileTypes: true });
+            const uuidDirs = allEntries.filter(d => d.isDirectory() && UUID_RE.test(d.name));
+            log.diag(`discoverConversationIds: brain dir has ${allEntries.length} total entries, ${uuidDirs.length} are UUID conversation dirs`);
+            return uuidDirs.map(d => d.name);
+        } catch (e: any) {
+            log.warn(`discoverConversationIds: failed to read brain dir: ${e?.message}`);
             return [];
         }
     }

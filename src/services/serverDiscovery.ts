@@ -1,8 +1,11 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS } from '../constants';
+import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('ServerDiscovery');
 
 const execAsync = promisify(exec);
 
@@ -25,11 +28,17 @@ export class ServerDiscoveryService {
                 ? await this.findCandidatesWindows()
                 : await this.findCandidatesUnix();
 
+            log.info(`discover: found ${candidates.length} LS candidate(s) on ${isWindows ? 'Windows' : 'Unix'} (wsFilter=${workspaceId ?? 'none'})`);
+            if (candidates.length > 0) {
+                log.info(`discover: candidates: ${candidates.map(c => `pid=${c.pid} wsId=${c.wsId ?? 'global'} httpsPort=${c.httpsPort ?? 'none'}`).join(' | ')}`);
+            }
+
             // STRICT workspace isolation: if workspaceId is provided,
             // ONLY try candidates from the same workspace.
             // Falling through to other workspaces causes wrong-LS contamination.
             if (workspaceId) {
                 const matching = candidates.filter(c => c.wsId === workspaceId);
+                log.info(`discover: workspace filter '${workspaceId}' → ${matching.length}/${candidates.length} candidates match`);
                 if (matching.length > 0) {
                     candidates = matching; // Only probe our workspace's LS
                 }
@@ -38,17 +47,25 @@ export class ServerDiscoveryService {
 
             for (const cand of candidates) {
                 const ports = await this.getListeningPorts(cand.pid);
-                if (ports.length === 0) continue;
+                log.info(`discover: pid=${cand.pid} wsId=${cand.wsId ?? 'global'} → listening ports: [${ports.join(', ')}]`);
+                if (ports.length === 0) {
+                    log.warn(`discover: pid=${cand.pid} has no listening TCP ports — skipping`);
+                    continue;
+                }
 
                 for (const port of ports) {
                     try {
                         await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
+                        log.info(`discover: ✓ probe succeeded on port ${port} for pid=${cand.pid}`);
                         return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
-                    } catch { /* HTTPS port returns 400 for HTTP → falls through */ }
+                    } catch (e: any) {
+                        log.info(`discover: probe port ${port} failed: ${e?.message?.substring(0, 80)}`);
+                    }
                 }
             }
-        } catch { /* expected: exec may fail if ps/grep not available */
-            // No matching processes found
+            log.warn('discover: no LS server found after probing all candidates');
+        } catch (e: any) {
+            log.warn('discover: exception during discovery:', e?.message);
         }
 
         return null;
@@ -119,18 +136,59 @@ export class ServerDiscoveryService {
         return this.parsePsOutput(stdout);
     }
 
-    /** Windows: use PowerShell + wmic fallback to find candidates */
+    /** Windows: use PowerShell + wmic fallback to find candidates (with PID) */
     private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
-        const lines = await getWindowsProcessLines(LS_PROCESS_GREP);
-        return lines.flatMap(line => {
-            const csrf = line.match(CSRF_TOKEN_RE)?.[1];
-            const pid  = line.match(/--api_server_port[\s=]+(\d+)/)?.[1]  // not used but present
-                      ?? line.match(/ProcessId[=,"\s]*(\d+)/i)?.[1];
-            // PID comes from PowerShell's ExpandProperty — not in the line itself.
-            // Use a sentinel to force port-scan-all-LS-ports fallback when pid unknown.
-            const wsId = line.match(/--workspace_id[\s=]+(\S+)/)?.[1];
-            const httpsPortMatch = line.match(/--https_server_port[\s=]+(\d+)/);
-            return csrf ? [{ pid: pid ?? '0', csrfToken: csrf, wsId, httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined }] : [];
+        // Emit "PID|||CommandLine" per process so we can capture the real PID.
+        // Triple-pipe separator is safe — never appears in process command lines.
+        const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' } | ForEach-Object { ($_.ProcessId.ToString() + '|||' + $_.CommandLine) }"`;
+        const wmicFallback = `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get ProcessId,CommandLine /format:csv 2>nul`;
+
+        let rawLines: string[] = [];
+
+        try {
+            const { stdout } = await execAsync(ps, { timeout: PROCESS_EXEC_TIMEOUT_MS });
+            rawLines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+            log.info(`findCandidatesWindows: PowerShell returned ${rawLines.length} line(s)`);
+        } catch (e: any) {
+            log.warn(`findCandidatesWindows: PowerShell failed (${e?.message}) — trying wmic CSV fallback`);
+            try {
+                // wmic CSV: "Node,CommandLine,ProcessId" header + data rows
+                const { stdout } = await execAsync(wmicFallback, { timeout: PROCESS_EXEC_TIMEOUT_MS });
+                const csvLines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+                // Skip header row, convert "Node,CmdLine,PID" → "PID|||CmdLine"
+                for (const line of csvLines.slice(1)) {
+                    const cols = line.split(',');
+                    if (cols.length >= 3) {
+                        const pid = cols[cols.length - 1].trim();
+                        const cmdLine = cols.slice(1, -1).join(',').trim();
+                        rawLines.push(`${pid}|||${cmdLine}`);
+                    }
+                }
+                log.info(`findCandidatesWindows: wmic CSV returned ${rawLines.length} line(s)`);
+            } catch (e2: any) {
+                log.warn(`findCandidatesWindows: wmic also failed (${e2?.message}) — falling back to CommandLine-only (pid=0)`);
+                rawLines = (await getWindowsProcessLines(LS_PROCESS_GREP)).map(l => `0|||${l}`);
+            }
+        }
+
+        return rawLines.flatMap(line => {
+            const sepIdx = line.indexOf('|||');
+            let pid = '0';
+            let cmdLine = line;
+            if (sepIdx > 0) {
+                const maybePid = line.substring(0, sepIdx).trim();
+                if (/^\d+$/.test(maybePid)) {
+                    pid = maybePid;
+                    cmdLine = line.substring(sepIdx + 3);
+                }
+            }
+            const csrf = cmdLine.match(CSRF_TOKEN_RE)?.[1];
+            const wsId = cmdLine.match(/--workspace_id[\s=]+(\S+)/)?.[1];
+            const httpsPortMatch = cmdLine.match(/--https_server_port[\s=]+(\d+)/);
+            if (csrf) {
+                log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} httpsPort=${httpsPortMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
+            }
+            return csrf ? [{ pid, csrfToken: csrf, wsId, httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined }] : [];
         });
     }
 
