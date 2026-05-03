@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as os from 'os';
+import * as path from 'path';
 import { AccountManager } from './managers/accountManager';
 import { QuotaManager } from './managers/quotaManager';
 import { QuotaViewProvider } from './providers/quotaViewProvider';
@@ -18,8 +20,10 @@ const log = createLogger('Extension');
 export async function activate(context: vscode.ExtensionContext) {
     // Initialize OutputChannel logger FIRST — all modules use this
     initLogger(context);
-    setFileSink('/tmp/ag-panel.log');
-    setDiagSink('/tmp/ag-ctx-diag.log');
+    // Use OS temp dir so file sinks work on Windows too
+    const tmpDir = os.tmpdir();
+    setFileSink(path.join(tmpDir, 'ag-panel.log'));
+    setDiagSink(path.join(tmpDir, 'ag-ctx-diag.log'));
 
     // --- Boot managers ---
     const accountManager = new AccountManager(context);
