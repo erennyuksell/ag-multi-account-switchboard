@@ -120,26 +120,18 @@ export class UsageStatsService {
         onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
         try {
-<<<<<<< HEAD
             this.rawFetchCounts = {};
-=======
             const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
             log.info(`twoPhaseFullFetch: scanning brain dir: ${brainDir}`);
 
->>>>>>> 34b445a (fix: Windows LS discovery broken by missing PID in process enumeration)
             const allIds = this.discoverConversationIds();
             log.info(`twoPhaseFullFetch: found ${allIds.length} conversation(s) on disk`);
             if (allIds.length === 0) {
-<<<<<<< HEAD
-                log.info('No conversations found on disk');
+                log.warn('twoPhaseFullFetch: NO conversations found on disk — check brain dir exists and contains UUID folders');
                 const emptyStats = aggregateFromPerConvo({}, new Map());
                 this.deepStatsCache = emptyStats;
                 if (onBackfillComplete) onBackfillComplete(emptyStats);
                 return emptyStats;
-=======
-                log.warn('twoPhaseFullFetch: NO conversations found — check brain dir exists and contains UUID folders');
-                return null;
->>>>>>> 34b445a (fix: Windows LS discovery broken by missing PID in process enumeration)
             }
 
             // Split into HOT (recent 48h) and COLD
