@@ -61,11 +61,11 @@ export class UsageStatsService {
         /** Called during scan with (done, total) for progress UI */
         onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
-        log.info(`fetchDeepStats: start — port=${serverInfo.port} forceRefresh=${forceRefresh} memCache=${!!this.deepStatsCache}`);
+        log.diag(`fetchDeepStats: port=${serverInfo.port} forceRefresh=${forceRefresh} memCache=${!!this.deepStatsCache}`);
 
         // 1. Instant return from memory cache (fastest) — skip if forceRefresh
         if (this.deepStatsCache && !forceRefresh) {
-            log.info('fetchDeepStats: returning memory cache (no refresh needed)');
+
             return this.deepStatsCache;
         }
 
@@ -73,20 +73,20 @@ export class UsageStatsService {
         const diskCache = this.cache.read();
         if (diskCache) {
             this.deepStatsCache = diskCache.stats;
-            log.info(`fetchDeepStats: disk cache hit — ${diskCache.fetchedIds.length} conversations cached, updatedAt=${diskCache.updatedAt}`);
+            log.diag(`fetchDeepStats: disk cache hit — ${diskCache.fetchedIds.length} conversations`);
 
             // Cross-process lock: only 1 window fetches, others read cache only
             if (!this.processLock.acquire()) {
-                log.info('fetchDeepStats: lock held by another instance — returning disk cache as-is');
+
                 return this.deepStatsCache;
             }
             try {
-                log.info('fetchDeepStats: starting incremental refresh...');
+
                 const updated = await this.incrementalRefresh(serverInfo, diskCache).catch((e: any) => {
                     log.warn('fetchDeepStats: incrementalRefresh threw:', e?.message);
                     return false;
                 });
-                log.info(`fetchDeepStats: incremental refresh done — updated=${updated}`);
+
                 if (updated && onBackfillComplete) onBackfillComplete(this.deepStatsCache!);
             } finally {
                 this.processLock.release();
@@ -96,10 +96,10 @@ export class UsageStatsService {
         }
 
         // 3. Two-phase fetch (first time only — no disk cache exists)
-        log.info('fetchDeepStats: no disk cache — starting cold two-phase fetch');
+        log.diag('fetchDeepStats: no disk cache — cold two-phase fetch');
         //    Lock guard: only 1 window does the expensive cold boot
         if (!this.processLock.acquire()) {
-            log.info('fetchDeepStats: lock held by another instance during cold boot — returning null');
+            log.diag('fetchDeepStats: lock held by another instance — returning null');
             return null;
         }
         try {
@@ -122,10 +122,10 @@ export class UsageStatsService {
         try {
             this.rawFetchCounts = {};
             const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-            log.info(`twoPhaseFullFetch: scanning brain dir: ${brainDir}`);
+
 
             const allIds = this.discoverConversationIds();
-            log.info(`twoPhaseFullFetch: found ${allIds.length} conversation(s) on disk`);
+
             if (allIds.length === 0) {
                 log.warn('twoPhaseFullFetch: NO conversations found on disk — check brain dir exists and contains UUID folders');
                 const emptyStats = aggregateFromPerConvo({}, new Map());
@@ -137,10 +137,10 @@ export class UsageStatsService {
             // Split into HOT (recent 48h) and COLD
             const cutoffMs = Date.now() - HOT_THRESHOLD_MS;
             const { hot, cold } = this.partitionByMtime(allIds, cutoffMs);
-            log.info(`twoPhaseFullFetch: partition done — ${hot.length} hot (recent 48h) + ${cold.length} cold = ${allIds.length} total`);
+            log.diag(`twoPhaseFullFetch: ${hot.length} hot + ${cold.length} cold = ${allIds.length} total`);
 
             // Phase 1: Fetch HOT conversations + trajectory summaries (titles + stepCounts)
-            log.info(`twoPhaseFullFetch: Phase 1 — fetching trajectory summaries + ${hot.length} hot conversations...`);
+
             const [summaries, hotData] = await Promise.all([
                 this.fetchTrajectorySummaries(serverInfo),
                 this.fetchConversationData(serverInfo, hot, onProgress ? (d) => onProgress(d, allIds.length) : undefined),
@@ -167,7 +167,7 @@ export class UsageStatsService {
             // Phase 2: Fetch COLD conversations inline (not background).
             // Returning partial Phase 1 data caused flip-flop ($3 → $177 → $203).
             // Await full result so the UI transitions once: loading → correct data.
-            log.info(`twoPhaseFullFetch: Phase 2 — fetching ${cold.length} cold conversations...`);
+
             const hotDone = hot.length;
             const coldData = await this.fetchConversationData(serverInfo, cold, onProgress ? (d) => onProgress(hotDone + d, allIds.length) : undefined);
             log.diag(`twoPhaseFullFetch: Phase 2 API done — coldData=${Object.keys(coldData).length} convos with data`);
@@ -181,7 +181,7 @@ export class UsageStatsService {
             // Build entryCounts for offset-based delta on next incremental
             const entryCounts = this.buildEntryCounts();
             this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts, entryCounts);
-            log.info(`twoPhaseFullFetch: Phase 2 complete — totalCalls=${fullStats.totalCalls} totalTokens=${fullStats.totalTokens} across ${Object.keys(merged).length} convos`);
+            log.info(`twoPhaseFullFetch: done — ${fullStats.totalCalls} calls, ${Object.keys(merged).length} convos`);
 
             if (onBackfillComplete) onBackfillComplete(fullStats);
             return fullStats;
@@ -362,7 +362,7 @@ export class UsageStatsService {
                 !(cid in result) && (this.currentStepCounts?.get(cid) ?? 0) > 0,
             );
             if (missed.length > 0) {
-                log.info(`fetchConversationData: retry — ${missed.length} conversations had stepCounts but 0 entries — serial, full fetch`);
+                log.diag(`fetchConversationData: retrying ${missed.length} missed conversations (serial)`);
                 let retryHits = 0;
                 await concurrentPool(
                     missed,
@@ -377,7 +377,7 @@ export class UsageStatsService {
                     },
                     1,
                 );
-                log.info(`fetchConversationData: retry complete — ${retryHits}/${missed.length} recovered`);
+                if (retryHits > 0) log.info(`fetchConversationData: retry recovered ${retryHits}/${missed.length}`);
             } else {
                 const zeroEntryCount = conversationIds.filter(cid => !(cid in result)).length;
                 if (zeroEntryCount > 0) {
@@ -592,7 +592,7 @@ export class UsageStatsService {
         }
 
         // Phase 2: Fetch current workspace stats via LS
-        log.info(`fetchTrajectorySummaries: calling ${EP.TRAJECTORIES} on port ${serverInfo.port}`);
+
         try {
             const trajResp = await callLsJson(serverInfo, EP.TRAJECTORIES, {});
             if (!trajResp) {
@@ -601,7 +601,7 @@ export class UsageStatsService {
             }
             const sums = trajResp?.trajectorySummaries || {};
             const entries = Object.entries(sums);
-            log.info(`fetchTrajectorySummaries: API returned ${entries.length} trajectory summaries`);
+
 
             // Debug: log first entry's field names to help diagnose schema changes
             if (entries.length > 0) {

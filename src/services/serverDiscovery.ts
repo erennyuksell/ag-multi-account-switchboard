@@ -28,9 +28,9 @@ export class ServerDiscoveryService {
                 ? await this.findCandidatesWindows()
                 : await this.findCandidatesUnix();
 
-            log.info(`discover: found ${candidates.length} LS candidate(s) on ${isWindows ? 'Windows' : 'Unix'} (wsFilter=${workspaceId ?? 'none'})`);
+            log.diag(`discover: ${candidates.length} candidates on ${isWindows ? 'Windows' : 'Unix'} (wsFilter=${workspaceId ?? 'none'})`);
             if (candidates.length > 0) {
-                log.info(`discover: candidates: ${candidates.map(c => `pid=${c.pid} wsId=${c.wsId ?? 'global'} httpsPort=${c.httpsPort ?? 'none'}`).join(' | ')}`);
+                log.diag(`discover: ${candidates.map(c => `pid=${c.pid} wsId=${c.wsId ?? 'global'}`).join(' | ')}`);
             }
 
             // STRICT workspace isolation: if workspaceId is provided,
@@ -38,7 +38,7 @@ export class ServerDiscoveryService {
             // Falling through to other workspaces causes wrong-LS contamination.
             if (workspaceId) {
                 const matching = candidates.filter(c => c.wsId === workspaceId);
-                log.info(`discover: workspace filter '${workspaceId}' → ${matching.length}/${candidates.length} candidates match`);
+                log.diag(`discover: workspace filter '${workspaceId}' → ${matching.length}/${candidates.length} match`);
                 if (matching.length > 0) {
                     candidates = matching; // Only probe our workspace's LS
                 }
@@ -47,7 +47,7 @@ export class ServerDiscoveryService {
 
             for (const cand of candidates) {
                 const ports = await this.getListeningPorts(cand.pid);
-                log.info(`discover: pid=${cand.pid} wsId=${cand.wsId ?? 'global'} → listening ports: [${ports.join(', ')}]`);
+                log.diag(`discover: pid=${cand.pid} → ports: [${ports.join(', ')}]`);
                 if (ports.length === 0) {
                     log.warn(`discover: pid=${cand.pid} has no listening TCP ports — skipping`);
                     continue;
@@ -56,14 +56,14 @@ export class ServerDiscoveryService {
                 for (const port of ports) {
                     try {
                         await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
-                        log.info(`discover: ✓ probe succeeded on port ${port} for pid=${cand.pid}`);
+                        log.diag(`discover: ✓ port ${port} pid=${cand.pid}`);
                         return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
                     } catch (e: any) {
-                        log.info(`discover: probe port ${port} failed: ${e?.message?.substring(0, 80)}`);
+                        log.diag(`discover: port ${port} failed`);
                     }
                 }
             }
-            log.warn('discover: no LS server found after probing all candidates');
+
         } catch (e: any) {
             log.warn('discover: exception during discovery:', e?.message);
         }

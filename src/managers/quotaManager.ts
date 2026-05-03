@@ -374,7 +374,7 @@ export class QuotaManager {
             if (this.viewProvider && !hasData) this.viewProvider.setLoading();
 
             const serverInfo = await this.resolveServer();
-            log.info(`refresh: serverInfo resolved — found=${!!serverInfo} port=${serverInfo?.port ?? 'N/A'}`);
+
 
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
             const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
@@ -420,20 +420,20 @@ export class QuotaManager {
             // Deep usage stats — fire-and-forget after initial render
             if (serverInfo) {
                 const isSubsequentCall = !!this.lastUsageStats;
-                log.info(`refresh: kicking off fetchDeepStats — isSubsequentCall=${isSubsequentCall} port=${serverInfo.port}`);
+
                 this.usageStatsService.fetchDeepStats(serverInfo, isSubsequentCall, (backfilledStats) => {
                     this.lastUsageStats = backfilledStats;
-                    log.info(`refresh: backfill callback fired — totalCalls=${backfilledStats.totalCalls}`);
+
                     this.pushCachedData();
                 }, (done, total) => {
                     this.viewProvider?.postMessage({ type: 'scanProgress', done, total });
                 }).then(deep => {
                     if (deep) {
-                        log.info(`refresh: fetchDeepStats resolved — totalCalls=${deep.totalCalls} totalTokens=${deep.totalTokens}`);
+                        log.diag(`refresh: fetchDeepStats done — ${deep.totalCalls} calls`);
                         this.lastUsageStats = deep;
                         this.pushCachedData();
                     } else {
-                        log.warn('refresh: fetchDeepStats returned null — usage stats will not update');
+
                     }
                 }).catch(err => {
                     log.warn(`refresh: fetchDeepStats threw: ${err?.message}`);
