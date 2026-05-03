@@ -5,7 +5,7 @@ import { getUSS } from '../utils/uss';
 import {
     encodeString, encodeVarintField,
     encodeMessage, extractField, extractStringField,
-} from '../utils/protobuf';
+} from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
 import { dbExec } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';

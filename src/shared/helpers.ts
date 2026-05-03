@@ -45,12 +45,7 @@ export function formatDurationMs(ms: number): string {
     return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
 }
 
-export function resetDateStr(resetTimeStr: string | undefined | null): string {
-    if (!resetTimeStr) return 'Unknown';
-    const d = new Date(resetTimeStr);
-    if (isNaN(d.getTime())) return 'Unknown';
-    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+
 
 // ─── Model/Tier name helpers ───
 
@@ -79,11 +74,7 @@ export function shortTierName(name: string | undefined | null): string {
 
 // ─── Number formatters ───
 
-export function fmtK(n: number | null | undefined): string {
-    if (n == null) return '';
-    if (n >= 1000) return Math.round(n / 1000) + 'K';
-    return '' + n;
-}
+
 
 /** Number → locale string with separators (28,921) */
 export function fmtNum(n: number): string {

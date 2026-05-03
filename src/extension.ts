@@ -8,6 +8,7 @@ import { updatePricing, setExternalPricingResolver } from './shared/usage-compon
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
 import { ConversationTracker } from './services/conversationTracker';
 import { ConversationGuard } from './services/conversationGuard';
+import { callLsJson } from './utils/lsClient';
 import { initLogger, createLogger, setFileSink, setDiagSink } from './utils/logger';
 
 const log = createLogger('Extension');
@@ -163,7 +164,7 @@ export async function activate(context: vscode.ExtensionContext) {
             try {
                 const si = await quotaManager.getServerInfo();
                 if (si) {
-                    const { callLsJson } = await import('./utils/lsClient');
+                    // callLsJson imported at top level
                     const resp = await callLsJson(si, 'GetAllCascadeTrajectories', {});
                     const sums = resp?.trajectorySummaries || {};
                     lsTitles = new Map<string, string>();

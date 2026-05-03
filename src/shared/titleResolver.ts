@@ -12,6 +12,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { BRAIN_DIR } from './agPaths';
+import { decodeVarint, skipProtobufField } from './protobuf';
+import { dbGet } from './db';
 
 // ─── Generic Title Detection ────────────────────────────────────────
 
@@ -111,16 +113,16 @@ export function getTitleFromTranscript(cid: string, maxLen = 55): string | null 
 
 // ─── Global Index Title Extraction ──────────────────────────────────
 
-type GlobalIndexResult = { titleMap: Map<string, string>, stepCounts: Map<string, number> };
-const EMPTY_RESULT: GlobalIndexResult = { titleMap: new Map(), stepCounts: new Map() };
+type GlobalIndexResult = { titleMap: Map<string, string>, stepCounts: Map<string, number>, allIds: Set<string> };
+const EMPTY_RESULT: GlobalIndexResult = { titleMap: new Map(), stepCounts: new Map(), allIds: new Set() };
 
 /**
  * Parse the raw protobuf bytes from trajectorySummaries into title + stepCount maps.
  */
 function parseTrajectorySummaries(decoded: Buffer): GlobalIndexResult {
-    const { decodeVarint, skipProtobufField } = require('./protobuf');
     const titleMap = new Map<string, string>();
     const stepCounts = new Map<string, number>();
+    const allIds = new Set<string>();
     let pos = 0;
     while (pos < decoded.length) {
         try {
@@ -168,12 +170,13 @@ function parseTrajectorySummaries(decoded: Buffer): GlobalIndexResult {
                 } catch { break; }
             }
             if (id) {
+                allIds.add(id);
                 if (title) titleMap.set(id, title);
                 if (stepCount > 0) stepCounts.set(id, stepCount);
             }
         } catch { break; }
     }
-    return { titleMap, stepCounts };
+    return { titleMap, stepCounts, allIds };
 }
 
 /**
@@ -181,7 +184,6 @@ function parseTrajectorySummaries(decoded: Buffer): GlobalIndexResult {
  * Uses shared db.ts for cross-platform SQLite access (native module + CLI fallback).
  */
 export async function getGlobalIndexData(): Promise<GlobalIndexResult> {
-    const { dbGet } = require('./db');
     const raw: string | null = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
     if (!raw) return EMPTY_RESULT;
 

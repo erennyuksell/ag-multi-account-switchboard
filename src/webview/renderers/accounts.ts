@@ -4,7 +4,7 @@
  * is done in quotaManager.buildAccountCards() on the extension host side.
  */
 
-import { dotClass, fillClass, timeLeft, shortModelName, shortTierName, fmtK, fmtNum } from '../../shared/helpers';
+import { dotClass, fillClass, timeLeft, shortModelName, shortTierName, fmtNum } from '../../shared/helpers';
 
 // SVG icon constants for tracked account action buttons
 const SWITCH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="M16 21l4-4-4-4"/><path d="M20 17H4"/></svg>';

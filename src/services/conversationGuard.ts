@@ -11,9 +11,8 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import { STATE_DB_PATH } from '../constants';
 import { CONVERSATIONS_DIR, BRAIN_DIR } from '../shared/agPaths';
-import { decodeVarint, skipProtobufField } from '../shared/protobuf';
-import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
-import { dbGet, isDbAvailable } from '../shared/db';
+import { getGlobalIndexData, isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
+import { isDbAvailable } from '../shared/db';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ConvGuard');
@@ -99,42 +98,13 @@ export class ConversationGuard implements vscode.Disposable {
         }
     }
 
-    /** Extract conversation IDs from the trajectory summaries protobuf index */
+    /** Extract conversation IDs from the trajectory summaries protobuf index.
+     *  Delegates to titleResolver.getGlobalIndexData() — SSOT for protobuf parsing.
+     *  Uses allIds (not titleMap) to include title-less indexed conversations. */
     private async _readIndexIds(): Promise<Set<string>> {
         try {
-            const raw = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
-            if (!raw) return new Set();
-
-            const ids = new Set<string>();
-            const decoded = Buffer.from(raw, 'base64');
-            let pos = 0;
-            while (pos < decoded.length) {
-                try {
-                    const { value: tag, pos: tagEnd } = decodeVarint(decoded, pos);
-                    if ((tag & 7) !== 2) break;
-                    const { value: entryLen, pos: entryStart } = decodeVarint(decoded, tagEnd);
-                    const entry = decoded.subarray(entryStart, entryStart + entryLen);
-                    pos = entryStart + entryLen;
-
-                    let ep = 0;
-                    while (ep < entry.length) {
-                        const { value: t, pos: tnext } = decodeVarint(entry, ep);
-                        const fn = Math.floor(t / 8);
-                        const wt = t & 7;
-                        if (wt === 2) {
-                            const { value: l, pos: ds } = decodeVarint(entry, tnext);
-                            if (fn === 1) {
-                                ids.add(entry.subarray(ds, ds + l).toString('utf8'));
-                                break;
-                            }
-                            ep = ds + l;
-                        } else {
-                            ep = skipProtobufField(entry, tnext, wt);
-                        }
-                    }
-                } catch { break; }
-            }
-            return ids;
+            const { allIds } = await getGlobalIndexData();
+            return allIds;
         } catch { return new Set(); }
     }
 

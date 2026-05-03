@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { DeepUsageStats } from '../../types';
-import { DiskCacheData, ConvoTokenData } from './types';
+import { DiskCacheData, ConvoTokenData, entryFingerprint } from './types';
 import { aggregateFromPerConvo } from './aggregator';
 import { createLogger } from '../../utils/logger';
 
@@ -35,8 +35,7 @@ export class StatsCache {
                 if (!entries || entries.length === 0) continue;
                 const seen = new Set<string>();
                 const clean = entries.filter(e => {
-                    const tsSec = e.ts?.substring(0, 19) || '';
-                    const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
+                    const fp = entryFingerprint(e);
                     if (seen.has(fp)) return false;
                     seen.add(fp);
                     return true;
@@ -63,6 +62,7 @@ export class StatsCache {
         stats: DeepUsageStats,
         titleMap: Map<string, string>,
         stepCounts?: Map<string, number>,
+        entryCounts?: Record<string, { meta: number; steps: number }>,
     ): void {
         try {
             // Serialize titleMap as plain object for JSON persistence
@@ -75,8 +75,11 @@ export class StatsCache {
                 updatedAt: new Date().toISOString(),
                 titleMap: titleMapObj,
                 stepCounts: stepCounts ? stepCountsObj : undefined,
+                entryCounts,
             };
-            fs.writeFileSync(this.filePath, JSON.stringify(data), 'utf-8');
+            const tmp = this.filePath + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+            fs.renameSync(tmp, this.filePath); // atomic on POSIX
             log.info(`Disk cache written: ${fetchedIds.length} conversations, ${titleMap.size} titles`);
         } catch (e: any) {
             log.warn('Failed to write disk cache:', e?.message);

@@ -6,8 +6,6 @@ import { DeepUsageStats } from '../../types';
 
 // ─── Constants ───
 
-export const API_PAGE_SIZE = 250;         // server's pagination page size
-export const MAX_PAGES = 20;              // safety cap: 5000 entries max
 export const BATCH_CONCURRENCY = 50;      // max parallel API calls per chunk
 export const HOT_THRESHOLD_MS = 48 * 3600 * 1000;  // "hot" if modified within 48h
 export const FETCH_TIMEOUT_MS = 6000;     // per-call timeout for metadata/steps fetch
@@ -45,20 +43,6 @@ export interface MetadataUsage {
     context_tokens?: string;
 }
 
-/** Token usage fields returned by the Steps API */
-export interface StepUsage {
-    inputTokens?: string;
-    input_tokens?: string;
-    outputTokens?: string;
-    output_tokens?: string;
-    cacheReadTokens?: string;
-    cache_read_tokens?: string;
-    thinkingOutputTokens?: string;
-    thinking_output_tokens?: string;
-    reasoningTokens?: string;
-    reasoning_tokens?: string;
-    model?: string;
-}
 
 // ─── Internal Cache Types ───
 
@@ -87,6 +71,16 @@ export interface DiskCacheData {
     updatedAt: string;
     titleMap?: Record<string, string>;
     stepCounts?: Record<string, number>;  // cascade → last known step count (delta detection)
+    entryCounts?: Record<string, { meta: number; steps: number }>;  // offset-based delta fetch
+}
+
+// ─── Shared Fingerprint ───
+
+/** Canonical dedup fingerprint — model EXCLUDED (meta returns resolved, steps returns placeholder).
+ *  Timestamp truncated to millisecond precision (23 chars: YYYY-MM-DDTHH:mm:ss.sss)
+ *  to merge meta+steps duplicates while preserving distinct same-second API calls. */
+export function entryFingerprint(e: TokenEntry): string {
+    return `${e.inp}:${e.out}:${e.cache}:${e.ts?.substring(0, 23) || ''}`;
 }
 
 /** Monthly aggregation accumulator */

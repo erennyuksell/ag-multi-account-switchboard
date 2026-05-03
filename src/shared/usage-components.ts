@@ -656,6 +656,34 @@ export function renderWeekdayChart(weekday: WeekdayBucket[]): string {
 //  Enriched Cascade List (with cost + mini bar)
 // ═══════════════════════════════════════════
 
+/** Render a single cascade row — shared between shown and overflow sections */
+function renderCascadeRow(c: CascadeBucket, cpt: number, maxTokens: number, maxTitleLen: number): string {
+    const total = c.input + c.output + c.cache;
+    const cost = total * cpt;
+    const title = c.title || 'Conversation';
+    const short = title.length > maxTitleLen ? title.substring(0, maxTitleLen) + '…' : title;
+    const barW = (total / maxTokens * 100);
+    const inPct = total > 0 ? (c.input / total * barW) : 0;
+    const caPct = total > 0 ? (c.cache / total * barW) : 0;
+    const ouPct = total > 0 ? (c.output / total * barW) : 0;
+
+    let html = '<div class="cascade-row">';
+    html += '<div class="cascade-header">';
+    html += `<span class="cascade-title">${escHtml(short)}</span>`;
+    html += `<span class="cascade-cost">${fmtDollar(cost)}</span>`;
+    html += '</div>';
+    html += '<div class="cascade-meta">';
+    html += '<div class="cascade-bar">';
+    if (inPct > 0) html += `<div class="usage-bar-seg usage-c-input" style="width:${inPct.toFixed(1)}%"></div>`;
+    if (caPct > 0) html += `<div class="usage-bar-seg usage-c-cache" style="width:${caPct.toFixed(1)}%"></div>`;
+    if (ouPct > 0) html += `<div class="usage-bar-seg usage-c-output" style="width:${ouPct.toFixed(1)}%"></div>`;
+    html += '</div>';
+    html += `<span class="cascade-stats">${fmtBig(total)} · ${fmtNum(c.calls)} calls</span>`;
+    html += '</div>';
+    html += '</div>';
+    return html;
+}
+
 export function renderEnrichedCascadeList(cascades: CascadeBucket[], models: ModelBucket[], limit: number = CASCADE_ENRICHED_LIMIT, maxTitleLen: number = CASCADE_ENRICHED_TITLE_MAX_LEN): string {
     const shown = cascades.slice(0, limit);
     if (shown.length === 0) return '<div class="deep-empty">No conversations</div>';
@@ -668,61 +696,13 @@ export function renderEnrichedCascadeList(cascades: CascadeBucket[], models: Mod
     const maxTokens = Math.max(...shown.map(c => c.input + c.output + c.cache), 1);
 
     let html = '<div class="cascade-enriched">';
-    for (const c of shown) {
-        const total = c.input + c.output + c.cache;
-        const cost = total * cpt;
-        const title = c.title || 'Conversation';
-        const short = title.length > maxTitleLen ? title.substring(0, maxTitleLen) + '…' : title;
-        const barW = (total / maxTokens * 100);
-        const inPct = total > 0 ? (c.input / total * barW) : 0;
-        const caPct = total > 0 ? (c.cache / total * barW) : 0;
-        const ouPct = total > 0 ? (c.output / total * barW) : 0;
-
-        html += '<div class="cascade-row">';
-        html += '<div class="cascade-header">';
-        html += `<span class="cascade-title">${escHtml(short)}</span>`;
-        html += `<span class="cascade-cost">${fmtDollar(cost)}</span>`;
-        html += '</div>';
-        html += '<div class="cascade-meta">';
-        html += '<div class="cascade-bar">';
-        if (inPct > 0) html += `<div class="usage-bar-seg usage-c-input" style="width:${inPct.toFixed(1)}%"></div>`;
-        if (caPct > 0) html += `<div class="usage-bar-seg usage-c-cache" style="width:${caPct.toFixed(1)}%"></div>`;
-        if (ouPct > 0) html += `<div class="usage-bar-seg usage-c-output" style="width:${ouPct.toFixed(1)}%"></div>`;
-        html += '</div>';
-        html += `<span class="cascade-stats">${fmtBig(total)} · ${fmtNum(c.calls)} calls</span>`;
-        html += '</div>';
-        html += '</div>';
-    }
+    for (const c of shown) html += renderCascadeRow(c, cpt, maxTokens, maxTitleLen);
 
     // Render overflow items (hidden by default)
     if (cascades.length > limit) {
         const overflow = cascades.slice(limit);
         html += '<div class="cascade-overflow" style="display:none">';
-        for (const c of overflow) {
-            const total = c.input + c.output + c.cache;
-            const cost = total * cpt;
-            const title = c.title || 'Conversation';
-            const short = title.length > maxTitleLen ? title.substring(0, maxTitleLen) + '…' : title;
-            const barW = (total / maxTokens * 100);
-            const inPct = total > 0 ? (c.input / total * barW) : 0;
-            const caPct = total > 0 ? (c.cache / total * barW) : 0;
-            const ouPct = total > 0 ? (c.output / total * barW) : 0;
-
-            html += '<div class="cascade-row">';
-            html += '<div class="cascade-header">';
-            html += `<span class="cascade-title">${escHtml(short)}</span>`;
-            html += `<span class="cascade-cost">${fmtDollar(cost)}</span>`;
-            html += '</div>';
-            html += '<div class="cascade-meta">';
-            html += '<div class="cascade-bar">';
-            if (inPct > 0) html += `<div class="usage-bar-seg usage-c-input" style="width:${inPct.toFixed(1)}%"></div>`;
-            if (caPct > 0) html += `<div class="usage-bar-seg usage-c-cache" style="width:${caPct.toFixed(1)}%"></div>`;
-            if (ouPct > 0) html += `<div class="usage-bar-seg usage-c-output" style="width:${ouPct.toFixed(1)}%"></div>`;
-            html += '</div>';
-            html += `<span class="cascade-stats">${fmtBig(total)} · ${fmtNum(c.calls)} calls</span>`;
-            html += '</div>';
-            html += '</div>';
-        }
+        for (const c of overflow) html += renderCascadeRow(c, cpt, maxTokens, maxTitleLen);
         html += '</div>';
         html += `<button class="cascade-more-btn" data-cascade-toggle="true" data-overflow-count="${overflow.length}">+${overflow.length} more</button>`;
     }

@@ -21,12 +21,14 @@ import { RpcDirectClient } from '../rpcDirectClient';
 import { callLsJson } from '../../utils/lsClient';
 import { createLogger } from '../../utils/logger';
 import {
-    ConvoTokenData, DiskCacheData,
+    ConvoTokenData, DiskCacheData, TokenEntry,
     EP, BATCH_CONCURRENCY, HOT_THRESHOLD_MS, FETCH_TIMEOUT_MS,
+    entryFingerprint,
 } from './types';
-import { aggregateFromPerConvo, extractTokens, paginateAll } from './aggregator';
+import { aggregateFromPerConvo, extractTokens } from './aggregator';
 import { StatsCache } from './cache';
 import { ProcessLock } from './processLock';
+import { getGlobalIndexData } from '../../shared/titleResolver';
 import { concurrentPool } from './pool';
 
 const log = createLogger('UsageStats');
@@ -40,6 +42,9 @@ export class UsageStatsService {
     private currentPerConvo: Record<string, ConvoTokenData> = {};
     private currentTitleMap: Map<string, string> = new Map();
     private currentStepCounts: Map<string, number> = new Map();
+
+    /** Raw (pre-dedup) meta/steps counts per conversation — for correct offset-based delta */
+    private rawFetchCounts: Record<string, { meta: number; steps: number }> = {};
 
     private readonly cache = new StatsCache();
     private readonly processLock = new ProcessLock();
@@ -103,6 +108,7 @@ export class UsageStatsService {
         onProgress?: (done: number, total: number) => void,
     ): Promise<DeepUsageStats | null> {
         try {
+            this.rawFetchCounts = {};
             const allIds = this.discoverConversationIds();
             if (allIds.length === 0) {
                 log.info('No conversations found on disk');
@@ -133,7 +139,8 @@ export class UsageStatsService {
 
             // If no cold conversations, write final cache and return
             if (cold.length === 0) {
-                this.cache.write(hotData, allIds, hotStats, summaries.titleMap, summaries.stepCounts);
+                const entryCounts = this.buildEntryCounts();
+                this.cache.write(hotData, allIds, hotStats, summaries.titleMap, summaries.stepCounts, entryCounts);
                 return hotStats;
             }
 
@@ -148,7 +155,10 @@ export class UsageStatsService {
 
             const fullStats = aggregateFromPerConvo(merged, summaries.titleMap);
             this.deepStatsCache = fullStats;
-            this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts);
+
+            // Build entryCounts for offset-based delta on next incremental
+            const entryCounts = this.buildEntryCounts();
+            this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts, entryCounts);
             log.info(`Phase 2 complete: ${fullStats.totalCalls} calls total`);
 
             if (onBackfillComplete) onBackfillComplete(fullStats);
@@ -160,32 +170,7 @@ export class UsageStatsService {
         }
     }
 
-    /**
-     * Background backfill: fetch cold conversations, merge, update cache.
-     */
-    private async backgroundBackfill(
-        serverInfo: ServerInfo,
-        coldIds: string[],
-        existingData: Record<string, ConvoTokenData>,
-        allIds: string[],
-        titleMap: Map<string, string>,
-        stepCounts: Map<string, number>,
-        onComplete?: (stats: DeepUsageStats) => void,
-    ): Promise<void> {
-        log.info(`Background backfill: fetching ${coldIds.length} cold conversations...`);
-        const coldData = await this.fetchConversationData(serverInfo, coldIds);
 
-        // Merge hot + cold
-        const merged = { ...existingData, ...coldData };
-        this.currentPerConvo = merged;
-
-        const stats = aggregateFromPerConvo(merged, titleMap);
-        this.deepStatsCache = stats;
-        this.cache.write(merged, allIds, stats, titleMap, stepCounts);
-
-        log.info(`Background backfill complete: ${stats.totalCalls} calls total`);
-        if (onComplete) onComplete(stats);
-    }
 
     /**
      * Partition conversation IDs into hot (mtime > cutoff) and cold.
@@ -216,6 +201,7 @@ export class UsageStatsService {
      */
     private async incrementalRefresh(serverInfo: ServerInfo, diskCache: DiskCacheData): Promise<boolean> {
         try {
+            this.rawFetchCounts = {};
             const allIds = this.discoverConversationIds();
             const cachedSet = new Set(diskCache.fetchedIds);
 
@@ -244,9 +230,18 @@ export class UsageStatsService {
                 return false;
             }
 
-            log.info(`Deep stats: incremental fetch — ${newIds.length} new, ${changedIds.length} changed (stepCount delta)`);
+            // Build offset map for changed conversations (new ones start at 0)
+            const cachedEntryCounts = diskCache.entryCounts || {};
+            const offsetMap = new Map<string, { meta: number; steps: number }>();
+            for (const cid of changedIds) {
+                const cached = cachedEntryCounts[cid];
+                if (cached) offsetMap.set(cid, cached);
+            }
 
-            const freshData = await this.fetchConversationData(serverInfo, dirtyIds);
+            const deltaCount = [...offsetMap.values()].filter(v => v.meta > 0 || v.steps > 0).length;
+            log.info(`Deep stats: incremental fetch — ${newIds.length} new, ${changedIds.length} changed (${deltaCount} offset-based delta)`);
+
+            const freshData = await this.fetchConversationData(serverInfo, dirtyIds, undefined, offsetMap);
 
             // ADDITIVE merge: never delete entries, only add new unique ones.
             // Prevents flip-flop when steps endpoint sporadically returns empty.
@@ -256,21 +251,24 @@ export class UsageStatsService {
                 if (!existing) {
                     merged[cid] = fresh;
                 } else {
-                    const seen = new Set(existing.entries.map(e =>
-                        `${e.inp}:${e.out}:${e.cache}:${e.model}:${e.ts}`));
-                    const newOnly = fresh.entries.filter(e =>
-                        !seen.has(`${e.inp}:${e.out}:${e.cache}:${e.model}:${e.ts}`));
+                    const seen = new Set(existing.entries.map(entryFingerprint));
+                    const newOnly = fresh.entries.filter(e => !seen.has(entryFingerprint(e)));
                     if (newOnly.length > 0) {
                         merged[cid] = { entries: [...existing.entries, ...newOnly] };
                     }
                 }
             }
             const mergedIds = [...new Set([...diskCache.fetchedIds, ...newIds])];
+
+            // Build entryCounts from raw (pre-dedup) fetch counts.
+            // Meta/steps use independent LS offsets — must NOT mix via deduped entry count.
+            const entryCounts = this.buildEntryCounts(cachedEntryCounts);
+
             const stats = aggregateFromPerConvo(merged, summaries.titleMap);
 
             this.deepStatsCache = stats;
             this.currentPerConvo = merged;
-            this.cache.write(merged, mergedIds, stats, summaries.titleMap, summaries.stepCounts);
+            this.cache.write(merged, mergedIds, stats, summaries.titleMap, summaries.stepCounts, entryCounts);
 
             log.info(`Deep stats: incremental complete — ${dirtyIds.length} dirty (${newIds.length} new + ${changedIds.length} changed)`);
             return true;
@@ -288,6 +286,8 @@ export class UsageStatsService {
         serverInfo: ServerInfo,
         conversationIds: string[],
         onProgress?: (done: number) => void,
+        /** Per-conversation offsets for delta fetch (incrementalRefresh only) */
+        offsetMap?: Map<string, { meta: number; steps: number }>,
     ): Promise<Record<string, ConvoTokenData>> {
         const result: Record<string, ConvoTokenData> = {};
         const rpc = new RpcDirectClient(serverInfo);
@@ -300,7 +300,11 @@ export class UsageStatsService {
         await concurrentPool(
             conversationIds,
             async (cid) => {
-                const entries = await this.fetchAndDedup(serverInfo, rpc, useRpc, cid, 1);
+                const offsets = offsetMap?.get(cid);
+                const entries = await this.fetchAndDedup(
+                    serverInfo, rpc, useRpc, cid, 1,
+                    offsets?.meta ?? 0, offsets?.steps ?? 0,
+                );
                 if (entries.length > 0) result[cid] = { entries };
             },
             BATCH_CONCURRENCY,
@@ -313,11 +317,12 @@ export class UsageStatsService {
                 !(cid in result) && (this.currentStepCounts?.get(cid) ?? 0) > 0,
             );
             if (missed.length > 0) {
-                log.info(`Retry: ${missed.length} conversations — serial`);
+                log.info(`Retry: ${missed.length} conversations — serial, full fetch`);
                 await concurrentPool(
                     missed,
                     async (cid) => {
-                        const entries = await this.fetchAndDedup(serverInfo, rpc, false, cid, 2);
+                        // Retry always does full fetch (offset=0) — the delta may have been the issue
+                        const entries = await this.fetchAndDedup(serverInfo, rpc, false, cid, 2, 0, 0);
                         if (entries.length > 0) {
                             result[cid] = { entries };
                             log.info(`RETRY OK: ${cid.substring(0, 12)} — ${entries.length} entries`);
@@ -335,70 +340,119 @@ export class UsageStatsService {
     private async fetchAndDedup(
         serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
         cid: string, timeoutMultiplier: number,
-    ): Promise<import('./types').TokenEntry[]> {
-        const STEPS_TIMEOUT = 12000 * timeoutMultiplier;
+        startMetaOffset = 0, startStepOffset = 0,
+    ): Promise<TokenEntry[]> {
+        const STEPS_TIMEOUT = 20000 * timeoutMultiplier;
         const META_TIMEOUT = FETCH_TIMEOUT_MS * timeoutMultiplier;
 
+        // RPC Direct doesn't support offset — use only for full fetch (offset=0)
+        const canRpc = useRpc && startMetaOffset === 0 && startStepOffset === 0;
+
         const [metaResult, stepsResult] = await Promise.allSettled([
-            this.fetchMetaForConvo(serverInfo, rpc, useRpc, cid, META_TIMEOUT),
-            this.fetchStepsForConvo(serverInfo, rpc, useRpc, cid, STEPS_TIMEOUT),
+            this.fetchMetaForConvo(serverInfo, rpc, canRpc, cid, META_TIMEOUT, startMetaOffset),
+            this.fetchStepsForConvo(serverInfo, rpc, canRpc, cid, STEPS_TIMEOUT, startStepOffset),
         ]);
 
         const meta = metaResult.status === 'fulfilled' ? metaResult.value : null;
         const steps = stepsResult.status === 'fulfilled' ? stepsResult.value : null;
-        const metaEntries = meta ? this.extractEntries({ generatorMetadata: meta }) : [];
-        const stepEntries = steps ? this.extractStepEntries({ steps }) : [];
+
+        // Track raw counts BEFORE dedup — meta/steps use independent LS offsets
+        this.rawFetchCounts[cid] = {
+            meta: startMetaOffset + (meta?.length ?? 0),
+            steps: startStepOffset + (steps?.length ?? 0),
+        };
+
+        const metaEntries = meta ? this.extractEntries(meta) : [];
+        const stepEntries = steps ? this.extractStepEntries(steps) : [];
 
         return this.dedupEntries([...metaEntries, ...stepEntries]);
     }
 
+    /**
+     * Fetch ALL metadata for a conversation using cumulative-offset pagination.
+     *
+     * The LS caps each response at ~8 MB, so large conversations (4000+ entries)
+     * require multiple calls. The `generator_metadata_offset` parameter skips
+     * that many entries from the start. We use the cumulative item count as
+     * the next offset and stop when no new items arrive.
+     *
+     * History: paginateAll (pre-b61) produced 20× redundant 8 MB payloads
+     * because it re-fetched overlapping ranges without a proper stop condition.
+     */
     private async fetchMetaForConvo(
         serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
-        cid: string, timeout: number,
+        cid: string, timeout: number, startOffset = 0,
     ): Promise<any[] | null> {
         if (useRpc) {
             const result = await rpc.getMetadata(cid);
             if (result) return result;
         }
-        const all = await paginateAll(async (offset) => {
+        const all: any[] = [];
+        let offset = startOffset;
+        for (let pg = 0; pg < 30; pg++) {
             const resp = await callLsJson(serverInfo, EP.METADATA,
                 { cascade_id: cid, generator_metadata_offset: offset }, timeout,
-            ).catch(() => null);
-            return resp?.generatorMetadata || resp?.generator_metadata || [];
-        });
+            ).catch((err) => { log.warn(`Meta page ${pg} for ${cid.substring(0,8)}: ${err?.message}`); return null; });
+            const items = resp?.generatorMetadata || resp?.generator_metadata || [];
+            if (items.length === 0) break;
+            all.push(...items);
+            offset = startOffset + all.length;
+        }
         return all.length > 0 ? all : null;
     }
 
+    /**
+     * Fetch ALL steps for a conversation using cumulative-offset pagination.
+     * Same strategy as fetchMetaForConvo — cumulative offset until exhausted.
+     */
     private async fetchStepsForConvo(
         serverInfo: ServerInfo, rpc: RpcDirectClient, useRpc: boolean,
-        cid: string, timeout: number,
+        cid: string, timeout: number, startOffset = 0,
     ): Promise<any[] | null> {
         if (useRpc) {
             const result = await rpc.getSteps(cid);
             if (result) return result;
         }
-        const all = await paginateAll(async (offset) => {
+        const all: any[] = [];
+        let offset = startOffset;
+        for (let pg = 0; pg < 30; pg++) {
             const resp = await callLsJson(serverInfo, EP.STEPS,
                 { cascade_id: cid, step_offset: offset }, timeout,
-            ).catch(() => null);
-            return resp?.steps || [];
-        });
+            ).catch((err) => { log.warn(`Steps page ${pg} for ${cid.substring(0,8)}: ${err?.message}`); return null; });
+            const items = resp?.steps || [];
+            if (items.length === 0) break;
+            all.push(...items);
+            offset = startOffset + all.length;
+        }
         return all.length > 0 ? all : null;
     }
 
     /**
      * Fingerprint-based dedup: token counts + timestamp truncated to seconds.
-     * Meta and steps APIs return the same event with different microsecond timestamps.
+     * Model EXCLUDED — meta returns resolved name, steps returns placeholder.
+     * Uses shared entryFingerprint() from types.ts.
      */
-    private dedupEntries(entries: import('./types').TokenEntry[]): import('./types').TokenEntry[] {
+    private dedupEntries(entries: TokenEntry[]): TokenEntry[] {
         const seen = new Set<string>();
         return entries.filter(e => {
-            const tsSec = e.ts?.substring(0, 19) || '';
-            const fp = `${e.inp}:${e.out}:${e.cache}:${tsSec}`;
+            const fp = entryFingerprint(e);
             if (seen.has(fp)) return false;
             seen.add(fp);
             return true;
         });
+    }
+
+    /**
+     * Build per-conversation entry counts for offset-based delta fetch.
+     * Uses raw (pre-dedup) meta/steps counts from rawFetchCounts.
+     * Critical: generator_metadata_offset and step_offset are independent
+     * LS-side counters. Using deduped entry count (meta+steps combined)
+     * would produce offset > totalMeta → LS returns 0 → silent data loss.
+     */
+    private buildEntryCounts(
+        existingCounts?: Record<string, { meta: number; steps: number }>,
+    ): Record<string, { meta: number; steps: number }> {
+        return { ...(existingCounts || {}), ...this.rawFetchCounts };
     }
 
     /**
@@ -473,7 +527,6 @@ export class UsageStatsService {
 
         // Phase 1: Fetch global data directly from state.vscdb (SSOT for all workspaces)
         try {
-            const { getGlobalIndexData } = require('../../shared/titleResolver');
             const globalData = await getGlobalIndexData();
             for (const [id, title] of globalData.titleMap.entries()) {
                 titleMap.set(id, title);
@@ -550,20 +603,9 @@ export class UsageStatsService {
 
 
 
-    private extractMetadataItems(resp: any): any[] {
-        if (!resp) return [];
-        return resp.generator_metadata || resp.generatorMetadata || resp.metadata || [];
-    }
-
-    private extractStepItems(resp: any): any[] {
-        if (!resp) return [];
-        return resp.steps || resp.cascade_steps || resp.cascadeSteps || [];
-    }
-
-    /** Extract TokenEntry[] from metadata API response */
-    private extractEntries(resp: any): import('./types').TokenEntry[] {
-        const items = this.extractMetadataItems(resp);
-        const entries: import('./types').TokenEntry[] = [];
+    /** Extract TokenEntry[] from metadata items array */
+    private extractEntries(items: any[]): TokenEntry[] {
+        const entries: TokenEntry[] = [];
 
         for (const item of items) {
             const cm = item.chatModel || item.chat_model || {};
@@ -581,10 +623,9 @@ export class UsageStatsService {
         return entries;
     }
 
-    /** Extract TokenEntry[] from steps API response (separate endpoint) */
-    private extractStepEntries(resp: any): import('./types').TokenEntry[] {
-        const steps = this.extractStepItems(resp);
-        const entries: import('./types').TokenEntry[] = [];
+    /** Extract TokenEntry[] from steps items array */
+    private extractStepEntries(steps: any[]): TokenEntry[] {
+        const entries: TokenEntry[] = [];
 
         for (const step of steps) {
             const usage = step.modelUsage || step.model_usage || step.metadata?.modelUsage || {};

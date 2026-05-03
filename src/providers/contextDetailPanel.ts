@@ -287,7 +287,7 @@ export class ContextDetailPanel {
             if (e.target.closest('.cd-collapse-all')) {
                 document.querySelectorAll('.cd-group').forEach(function(g) { g.classList.remove('expanded'); });
                 document.querySelectorAll('.cd-child').forEach(function(c) { c.classList.remove('expanded'); });
-                closeAllPreviews();
+                closeOtherPreviews(null);
                 return;
             }
             // Filter chips

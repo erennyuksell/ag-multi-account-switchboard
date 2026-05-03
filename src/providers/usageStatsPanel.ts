@@ -11,11 +11,11 @@ import { DeepUsageStats } from '../types';
 import { createLogger } from '../utils/logger';
 import { fmtBig, fmtNum, fmtShortDate, escHtml, getNonce } from '../shared/helpers';
 import {
-    kpiCard, renderDailyBars, renderDailyGrid, renderHourlyHeatmap,
-    renderModelBreakdown, renderCostEstimate, renderCascadeList,
+    renderDailyGrid, renderHourlyHeatmap,
+    renderModelBreakdown, renderCostEstimate,
     rangeLabel, calculateTotalCost, fmtDollar, renderMonthlySummary,
     getAvailableYears, renderYearSelector, getMonthlyYears,
-    renderProviderBreakdown, renderWeekdayChart, renderEnrichedCascadeList,
+    renderWeekdayChart, renderEnrichedCascadeList,
 } from '../shared/usage-components';
 
 const log = createLogger('UsagePanel');
@@ -291,23 +291,7 @@ export class UsageStatsPanel {
             + '</div>';
     }
 
-    // ─── Daily Breakdown Card (shared) ───
 
-    private renderDailyCard(s: DeepUsageStats): string {
-        const totalCost = calculateTotalCost(s.models);
-        const costPerToken = s.totalTokens > 0 ? totalCost / s.totalTokens : 0;
-
-        let html = '<div class="up-card">';
-        html += '<div class="up-card-hdr">Daily Breakdown</div>';
-        html += '<div class="up-inline-legend">';
-        html += '<span class="up-legend-item"><span class="up-dot" style="background:#4f9cf7"></span>Input</span>';
-        html += '<span class="up-legend-item"><span class="up-dot" style="background:#a78bfa"></span>Cache</span>';
-        html += '<span class="up-legend-item"><span class="up-dot" style="background:#4ade80"></span>Output</span>';
-        html += '</div>';
-        html += renderDailyBars(s.daily, costPerToken);
-        html += '</div>';
-        return html;
-    }
 
     // ─── GitHub Contribution Heatmap Card (shared) ───
 
@@ -328,19 +312,7 @@ export class UsageStatsPanel {
         return html;
     }
 
-    // ─── Hourly Pattern Card (HALF-WIDTH — side by side with weekday) ───
 
-    private renderHourlyCard(s: DeepUsageStats): string {
-        let html = '<div class="up-card">';
-        html += '<div class="up-card-hdr">Hourly Pattern <span class="up-badge">24h</span></div>';
-        if (!s.hourly || s.hourly.length === 0) {
-            html += '<div class="up-empty">No data</div>';
-        } else {
-            html += renderHourlyHeatmap(s.hourly);
-        }
-        html += '</div>';
-        return html;
-    }
 
     // ─── Weekday Distribution Card (HALF-WIDTH) ───
 

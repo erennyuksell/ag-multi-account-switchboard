@@ -12,7 +12,7 @@
 import * as vscode from 'vscode';
 import type { USSRow, USSTopic } from '../types';
 import { QuotaManager } from '../managers/quotaManager';
-import { extractField, extractStringField } from '../utils/protobuf';
+import { extractField, extractStringField } from '../shared/protobuf';
 import { getUSS } from '../utils/uss';
 import { createLogger } from '../utils/logger';
 

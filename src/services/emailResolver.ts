@@ -7,9 +7,10 @@
 
 import * as vscode from 'vscode';
 import { USSApi } from '../types';
-import { extractStringField } from '../utils/protobuf';
+import { extractStringField } from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
 import { getUSS } from '../utils/uss';
+import { dbGet } from '../shared/db';
 
 const log = createLogger('EmailResolver');
 
@@ -35,7 +36,6 @@ export class EmailResolver {
 
         try {
             // Fallback: read from antigravityAuthStatus in state.vscdb
-            const { dbGet } = require('../shared/db');
             const result = await dbGet('antigravityAuthStatus');
             if (result) {
                 try {

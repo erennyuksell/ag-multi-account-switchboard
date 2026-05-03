@@ -583,6 +583,15 @@ export class QuotaManager {
 
     // ── Workspace Cascade Ownership ────────────────────────────
 
+    /** Shared helper: resolve server + fetch cascade trajectory summaries */
+    private async fetchCascadeSummaries(): Promise<Record<string, any> | null> {
+        const server = await this.resolveServer();
+        if (!server) return null;
+        const resp = await callLsJson(server, 'GetAllCascadeTrajectories', {});
+        const sums = resp?.trajectorySummaries;
+        return (sums && typeof sums === 'object') ? sums : null;
+    }
+
     /**
      * Fetch all cascade IDs belonging to this workspace.
      * Uses GetAllCascadeTrajectories from the workspace LS — only returns cascades
@@ -590,11 +599,8 @@ export class QuotaManager {
      */
     async getWorkspaceCascadeIds(): Promise<Set<string> | null> {
         try {
-            const server = await this.resolveServer();
-            if (!server) return null;
-            const resp = await callLsJson(server, 'GetAllCascadeTrajectories', {});
-            const sums = resp?.trajectorySummaries;
-            if (!sums || typeof sums !== 'object') return null;
+            const sums = await this.fetchCascadeSummaries();
+            if (!sums) return null;
             const ids = new Set(Object.keys(sums));
             return ids.size > 0 ? ids : null;
         } catch (e: unknown) {
@@ -609,11 +615,8 @@ export class QuotaManager {
      */
     async getMostRecentCascadeId(): Promise<string | null> {
         try {
-            const server = await this.resolveServer();
-            if (!server) return null;
-            const resp = await callLsJson(server, 'GetAllCascadeTrajectories', {});
-            const sums = resp?.trajectorySummaries;
-            if (!sums || typeof sums !== 'object') return null;
+            const sums = await this.fetchCascadeSummaries();
+            if (!sums) return null;
 
             let best: { id: string; time: number } | null = null;
             for (const [id, summary] of Object.entries(sums) as [string, any][]) {

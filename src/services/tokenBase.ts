@@ -1,6 +1,6 @@
 import { createLogger } from '../utils/logger';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, callLsProto } from '../utils/lsClient';
-import { readFields, type ProtoField } from '../utils/protobuf';
+import { readFields, type ProtoField } from '../shared/protobuf';
 import { ServerInfo } from '../types';
 import { LS_SERVICE_PATH, FILE_HEADER_READ_BYTES, DEFAULT_LS_TIMEOUT_MS } from '../constants';
 import * as fs from 'fs';
@@ -67,7 +67,7 @@ export interface TokenBaseData {
     usedPercent: number;
 }
 
-// Protobuf decoders → unified in utils/protobuf.ts (readFields, ProtoField)
+// Protobuf decoders → unified in shared/protobuf.ts (readFields, ProtoField)
 
 
 // ==================== Response Parser ====================

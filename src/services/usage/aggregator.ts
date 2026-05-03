@@ -6,7 +6,6 @@
 import {
     TokenEntry, ConvoTokenData, MonthlyAccumulator, MetadataUsage,
     PLACEHOLDER_MAP, OPUS_46_CUTOFF, PROVIDER_DISPLAY,
-    API_PAGE_SIZE, MAX_PAGES,
 } from './types';
 import {
     DeepUsageStats, DailyBucket, HourlyBucket, ModelBucket,
@@ -15,6 +14,7 @@ import {
 } from '../../types';
 import { matchPricing } from '../../shared/usage-components';
 import { HOURS_IN_DAY } from '../../shared/uiConstants';
+import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../../shared/titleResolver';
 
 // ─── Model Display Name Resolution ───
 
@@ -83,32 +83,6 @@ export function extractTokens(usage: MetadataUsage): { inp: number; out: number;
         cacheWrite: parseInt(usage.cacheCreationInputTokens || usage.cache_creation_input_tokens || usage.cacheWriteTokens || usage.cache_write_tokens || '0', 10) || 0,
         reasoning: parseInt(usage.reasoningTokens || usage.reasoning_tokens || usage.thinkingOutputTokens || usage.thinking_output_tokens || '0', 10) || 0,
     };
-}
-
-// ─── Pagination Helper ───
-
-/**
- * Generic paginated fetch — DRY helper for metadata and steps pagination.
- *
- * The LS server treats `offset` as "start from item N" and returns ALL remaining
- * items from that position (not a fixed-size page). So we use cumulative item
- * count as the next offset, and stop when the server returns no new items.
- */
-export async function paginateAll(
-    fetcher: (offset: number) => Promise<any[] | null>,
-    _pageSize = API_PAGE_SIZE,
-    maxPages = MAX_PAGES,
-): Promise<any[]> {
-    const all: any[] = [];
-    for (let pg = 0; pg < maxPages; pg++) {
-        const items = await fetcher(all.length);
-        if (!items || !Array.isArray(items) || items.length === 0) break;
-        all.push(...items);
-        // Server returns everything from offset — if we got items,
-        // probe the next offset to see if there's more beyond what was returned.
-        // For most conversations, one call returns everything → second call returns 0 → done.
-    }
-    return all;
 }
 
 // ─── Bucket Builders ───
@@ -309,7 +283,6 @@ export function aggregateFromPerConvo(
 
         if (cCalls > 0) {
             let title = titleMap.get(cid) || '';
-            const { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } = require('../../shared/titleResolver');
             
             if (isGenericTitle(title)) {
                 title = getTitleFromBrain(cid, 50) || '';
