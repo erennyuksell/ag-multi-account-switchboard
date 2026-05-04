@@ -67,8 +67,7 @@ export class QuotaApiService {
     /**
      * Parse retrieveUserQuota buckets[] response.
      * Each bucket: { tokenType, modelId, remainingFraction, resetTime? }
-     * Shows ALL models — no filtering. Uses display name overrides when available,
-     * otherwise auto-humanizes the model slug.
+     * Filters models to only show those explicitly mapped in Antigravity.
      */
     private parseBuckets(buckets: any[]): QuotaModel[] {
         const models: QuotaModel[] = [];
@@ -78,6 +77,12 @@ export class QuotaApiService {
             if (!modelId) continue;
 
             const cleanId = modelId.split('/').pop()!;
+            
+            // Only include models that are explicitly mapped in Antigravity
+            if (!MODEL_DISPLAY_NAMES[cleanId] && !MODEL_DISPLAY_NAMES[modelId]) {
+                continue;
+            }
+
             const displayName = MODEL_DISPLAY_NAMES[cleanId]
                 || MODEL_DISPLAY_NAMES[modelId]
                 || QuotaApiService.humanizeModelId(cleanId);
