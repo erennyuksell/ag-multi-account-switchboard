@@ -6,6 +6,7 @@
 import { AccountQuota, AccountCard, ModelCard, LocalQuotaData } from '../types';
 import { shortModelName, normalizeModelKey } from '../shared/helpers';
 import { parseUserTier, parsePlanStatus } from '../utils/lsTypes';
+import { MODEL_DISPLAY_NAMES } from '../constants';
 
 /**
  * Build a normKey → LS label lookup map from local protobuf data.
@@ -70,8 +71,9 @@ export function buildAccountCards(
     const localEmail = (status?.email || '').toLowerCase();
 
     if (status) {
+        const knownDisplayNames = new Set(Object.values(MODEL_DISPLAY_NAMES));
         const rawModels = (status.cascadeModelConfigData?.clientModelConfigs || [])
-            .filter((m: any) => m.quotaInfo)
+            .filter((m: any) => m.quotaInfo && knownDisplayNames.has(m.label || shortModelName(m.modelOrAlias?.model)))
             .sort((a: any, b: any) => (a.label || '').localeCompare(b.label || ''));
 
         const models: ModelCard[] = rawModels.map((m: any) => ({
