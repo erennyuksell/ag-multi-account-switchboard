@@ -12,7 +12,7 @@ import {
     CascadeBucket, MonthlyBucket, MonthlyModelEntry,
     ProviderBucket, WeekdayBucket,
 } from '../../types';
-import { matchPricing } from '../../shared/usage-components';
+import { matchPricing, usageTotal } from '../../shared/usage-components';
 import { HOURS_IN_DAY } from '../../shared/uiConstants';
 import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../../shared/titleResolver';
 
@@ -140,7 +140,7 @@ function buildModelBuckets(entries: Array<TokenEntry & { _caW: number; _reas: nu
         map[dn].reasoning += e._reas;
         map[dn].calls++;
     }
-    return Object.values(map).sort((a, b) => (b.input + b.output + b.cache) - (a.input + a.output + a.cache));
+    return Object.values(map).sort((a, b) => usageTotal(b) - usageTotal(a));
 }
 
 /** Build provider usage buckets from filtered entries. */
@@ -159,7 +159,7 @@ function buildProviderBuckets(entries: Array<TokenEntry & { _caW: number; _reas:
         map[prov].reasoning += e._reas;
         map[prov].calls++;
     }
-    return Object.values(map).sort((a, b) => (b.input + b.output + b.cache) - (a.input + a.output + a.cache));
+    return Object.values(map).sort((a, b) => usageTotal(b) - usageTotal(a));
 }
 
 /** Build day-of-week buckets from filtered entries (Mon=0 .. Sun=6). */
@@ -205,11 +205,12 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
         mm.reasoning += e.reasoning || 0;
         mm.calls++;
         const dn = getModelDisplayName(e.model, e.provider, e.ts);
-        if (!mm.models[dn]) mm.models[dn] = { tokens: 0, inp: 0, out: 0, cache: 0, reas: 0 };
-        mm.models[dn].tokens += e.inp + e.out + e.cache;
+        if (!mm.models[dn]) mm.models[dn] = { tokens: 0, inp: 0, out: 0, cache: 0, cacheWrite: 0, reas: 0 };
+        mm.models[dn].tokens += e.inp + e.out + e.cache + (e.cacheWrite || 0) + (e.reasoning || 0);
         mm.models[dn].inp += e.inp;
         mm.models[dn].out += e.out;
         mm.models[dn].cache += e.cache;
+        mm.models[dn].cacheWrite += e.cacheWrite || 0;
         mm.models[dn].reas += e.reasoning || 0;
     }
 
@@ -220,18 +221,18 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
     for (const key of Object.keys(monthlyMap).sort()) {
         const md = monthlyMap[key];
         const monthIdx = parseInt(key.slice(5, 7), 10) - 1;
-        const total = md.input + md.output + md.cache;
+        const total = usageTotal(md);
         const allModels = Object.entries(md.models)
             .sort((a, b) => b[1].tokens - a[1].tokens);
         // Cost from ALL models (not just top 5)
         let monthCost = 0;
         for (const [name, d] of allModels) {
             const p = matchPricing(name);
-            monthCost += (d.inp * p.input + d.cache * p.cache + d.out * p.output + d.reas * p.reasoning) / 1_000_000;
+            monthCost += (d.inp * p.input + d.cache * p.cache + d.cacheWrite * (p.input * 1.25) + d.out * p.output + d.reas * p.reasoning) / 1_000_000;
         }
         const topModels: MonthlyModelEntry[] = allModels
             .slice(0, 5)
-            .map(([name, d]) => ({ displayName: name, tokens: d.tokens, cost: 0, inp: d.inp, out: d.out, cache: d.cache, reas: d.reas }));
+            .map(([name, d]) => ({ displayName: name, tokens: d.tokens, cost: 0, inp: d.inp, out: d.out, cache: d.cache, cacheWrite: d.cacheWrite, reas: d.reas }));
         monthly.push({
             key, label: MNAMES[monthIdx],
             input: md.input, output: md.output,
@@ -246,16 +247,20 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
 
 // ─── Main Aggregation Composer ───
 
+export type DateFilter = string | { from?: string; to?: string };
+
 /**
  * Aggregate DeepUsageStats from per-conversation cached data.
  * Composes pure bucket builders into the final stats object.
- * @param dateCutoff — Full ISO timestamp to filter entries. Empty = no filter.
+ * @param dateFilter — Full ISO cutoff string, or bounded ISO range.
  */
 export function aggregateFromPerConvo(
     perConvo: Record<string, ConvoTokenData>,
     titleMap: Map<string, string>,
-    dateCutoff: string = '',
+    dateFilter: DateFilter = '',
 ): DeepUsageStats {
+    const from = typeof dateFilter === 'string' ? dateFilter : (dateFilter.from || '');
+    const to = typeof dateFilter === 'string' ? '' : (dateFilter.to || '');
     // Collect ALL entries for monthly (unfiltered) and filtered entries for other buckets
     const allEntries: TokenEntry[] = [];
     const filteredEntries: Array<TokenEntry & { _caW: number; _reas: number; _displayName: string }> = [];
@@ -268,8 +273,9 @@ export function aggregateFromPerConvo(
         for (const e of data.entries) {
             allEntries.push(e);
 
-            // Date range filter: skip entries before cutoff
-            if (dateCutoff && e.ts < dateCutoff) continue;
+            // Date range filter: skip entries outside the selected window
+            if (from && e.ts < from) continue;
+            if (to && e.ts >= to) continue;
 
             const eCaW = e.cacheWrite || 0;
             const eReas = e.reasoning || 0;
@@ -306,9 +312,9 @@ export function aggregateFromPerConvo(
     const weekday = buildWeekdayBuckets(filteredEntries);
     const monthly = buildMonthlyBuckets(allEntries);
 
-    cascadeList.sort((a, b) => (b.input + b.output + b.cache) - (a.input + a.output + a.cache));
+    cascadeList.sort((a, b) => usageTotal(b) - usageTotal(a));
 
-    const totalTokens = totalIn + totalOut + totalCa;
+    const totalTokens = totalIn + totalOut + totalCa + totalCaW + totalReas;
     const dateRange = daily.length > 0
         ? { from: daily[0].date, to: daily[daily.length - 1].date }
         : { from: '', to: '' };

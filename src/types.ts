@@ -252,6 +252,7 @@ export interface MonthlyModelEntry {
     inp: number;
     out: number;
     cache: number;
+    cacheWrite?: number;
     reas: number;
 }
 

@@ -85,6 +85,15 @@ export class UsageStatsPanel {
         this.panel.webview.postMessage({ type: 'statsUpdate', html, range: this.currentRange });
     }
 
+    public updateLatestStats(stats: DeepUsageStats) {
+        if (this.currentRange === 'all') {
+            this.updateStats(stats);
+            return;
+        }
+        const filtered = this.onRangeFilter?.(this.currentRange);
+        this.updateStats(filtered || stats);
+    }
+
     public dispose() {
         UsageStatsPanel.currentPanel = undefined;
         this.panel.dispose();

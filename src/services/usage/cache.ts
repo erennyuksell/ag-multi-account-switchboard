@@ -7,7 +7,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { DeepUsageStats } from '../../types';
-import { DiskCacheData, ConvoTokenData, entryFingerprint } from './types';
+import {
+    CACHE_SCHEMA_VERSION,
+    DiskCacheData,
+    ConvoTokenData,
+    entryFingerprint,
+    mergePreferredEntry,
+} from './types';
 import { aggregateFromPerConvo } from './aggregator';
 import { createLogger } from '../../utils/logger';
 
@@ -26,6 +32,10 @@ export class StatsCache {
             const raw = fs.readFileSync(this.filePath, 'utf-8');
             const data = JSON.parse(raw) as DiskCacheData;
             if (!data.perConvo || !data.fetchedIds || !data.stats) return null;
+            if (data.schemaVersion !== CACHE_SCHEMA_VERSION) {
+                log.info(`Cache read: ignoring schema v${data.schemaVersion ?? 1}; rebuild required for v${CACHE_SCHEMA_VERSION}`);
+                return null;
+            }
 
             // Sanitize: remove duplicate entries that may have been persisted
             // by older versions with the RPC pagination overlap bug.
@@ -33,13 +43,13 @@ export class StatsCache {
             for (const cid of Object.keys(data.perConvo)) {
                 const entries = data.perConvo[cid].entries;
                 if (!entries || entries.length === 0) continue;
-                const seen = new Set<string>();
-                const clean = entries.filter(e => {
+                const byFingerprint = new Map<string, typeof entries[number]>();
+                for (const e of entries) {
                     const fp = entryFingerprint(e);
-                    if (seen.has(fp)) return false;
-                    seen.add(fp);
-                    return true;
-                });
+                    const existing = byFingerprint.get(fp);
+                    byFingerprint.set(fp, existing ? mergePreferredEntry(existing, e) : e);
+                }
+                const clean = [...byFingerprint.values()];
                 if (clean.length < entries.length) {
                     totalRemoved += entries.length - clean.length;
                     data.perConvo[cid] = { entries: clean };
@@ -71,6 +81,7 @@ export class StatsCache {
             const stepCountsObj: Record<string, number> = {};
             if (stepCounts) { for (const [k, v] of stepCounts) stepCountsObj[k] = v; }
             const data: DiskCacheData = {
+                schemaVersion: CACHE_SCHEMA_VERSION,
                 perConvo, fetchedIds, stats,
                 updatedAt: new Date().toISOString(),
                 titleMap: titleMapObj,
@@ -95,16 +106,13 @@ export class StatsCache {
         const cache = this.read();
         if (!cache) return null;
 
-        let stats: DeepUsageStats;
         let titleMap = currentTitleMap;
 
         if (cache.titleMap) {
             titleMap = new Map(Object.entries(cache.titleMap));
-            // Re-aggregate with restored titleMap for correct cascade titles
-            stats = aggregateFromPerConvo(cache.perConvo, titleMap);
-        } else {
-            stats = cache.stats;
         }
+        // Re-aggregate from raw entries so semantic fixes apply to older caches.
+        const stats = aggregateFromPerConvo(cache.perConvo, titleMap);
 
         log.info(`loadSync: loaded ${cache.fetchedIds.length} conversations, titles: ${titleMap.size}`);
         return { stats, titleMap };

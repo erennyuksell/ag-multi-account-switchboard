@@ -5,11 +5,24 @@
  */
 
 import { fmtNum, fmtBig, fmtShortDate, escHtml } from './helpers';
-import { DailyBucket, HourlyBucket, ModelBucket, CascadeBucket, MonthlyBucket, ProviderBucket, WeekdayBucket } from '../types';
+import { DailyBucket, HourlyBucket, ModelBucket, CascadeBucket, MonthlyBucket, MonthlyModelEntry, ProviderBucket, WeekdayBucket } from '../types';
 import {
     CASCADE_LIST_LIMIT, CASCADE_TITLE_MAX_LEN,
     CASCADE_ENRICHED_LIMIT, CASCADE_ENRICHED_TITLE_MAX_LEN,
 } from './uiConstants';
+
+export type UsageTotals = {
+    input: number;
+    output: number;
+    cache?: number;
+    cacheWrite?: number;
+    reasoning?: number;
+};
+
+/** All token telemetry for a bucket/model/month. */
+export function usageTotal(u: UsageTotals): number {
+    return u.input + u.output + (u.cache || 0) + (u.cacheWrite || 0) + (u.reasoning || 0);
+}
 
 // ═══════════════════════════════════════════
 //  KPI Cards
@@ -32,15 +45,16 @@ export function renderDailyBars(daily: DailyBucket[], costPerToken: number = 0):
     if (!daily || daily.length === 0) return '<div class="deep-empty">No data for this period</div>';
 
     const sorted = [...daily].sort((a, b) => b.date.localeCompare(a.date));
-    const maxTokens = Math.max(...sorted.map(d => d.input + d.output + d.cache), 1);
+    const maxTokens = Math.max(...sorted.map(d => usageTotal(d)), 1);
 
     let html = '<div class="deep-daily-chart">';
     for (const d of sorted) {
-        const total = d.input + d.output + d.cache;
+        const total = usageTotal(d);
         const barW = (total / maxTokens) * 100;
         const inPct = total > 0 ? (d.input / total * barW) : 0;
         const caPct = total > 0 ? (d.cache / total * barW) : 0;
         const ouPct = total > 0 ? (d.output / total * barW) : 0;
+        const rePct = total > 0 ? ((d.reasoning || 0) / total * barW) : 0;
 
         let tipText = fmtShortDate(d.date) + '&#10;Input: ' + fmtBig(d.input) + '&#10;Cache: ' + fmtBig(d.cache) + '&#10;Output: ' + fmtBig(d.output) + '&#10;Total: ' + fmtBig(total) + ' (' + fmtNum(d.calls) + ' calls)';
         if (costPerToken > 0) {
@@ -52,6 +66,7 @@ export function renderDailyBars(daily: DailyBucket[], costPerToken: number = 0):
         if (inPct > 0) html += '<div class="usage-bar-seg usage-c-input" style="width:' + inPct.toFixed(1) + '%"></div>';
         if (caPct > 0) html += '<div class="usage-bar-seg usage-c-cache" style="width:' + caPct.toFixed(1) + '%"></div>';
         if (ouPct > 0) html += '<div class="usage-bar-seg usage-c-output" style="width:' + ouPct.toFixed(1) + '%"></div>';
+        if (rePct > 0) html += '<div class="usage-bar-seg usage-c-reasoning" style="width:' + rePct.toFixed(1) + '%"></div>';
         html += '</div>';
         html += '<span class="deep-daily-total">' + fmtBig(total) + '</span>';
         html += '</div>';
@@ -67,14 +82,14 @@ export function renderDailyBars(daily: DailyBucket[], costPerToken: number = 0):
 export function renderHourlyHeatmap(hourly: HourlyBucket[], costPerToken: number = 0): string {
     if (!hourly || hourly.length === 0) return '';
 
-    const maxTokens = Math.max(...hourly.map(h => h.input + h.output + h.cache), 1);
+    const maxTokens = Math.max(...hourly.map(h => usageTotal(h)), 1);
     const peakHour = hourly.reduce((best, cur) =>
-        (cur.input + cur.output + cur.cache) > (best.input + best.output + best.cache) ? cur : best, hourly[0]);
+        usageTotal(cur) > usageTotal(best) ? cur : best, hourly[0]);
 
     let html = '<div class="deep-heatmap-wrap">';
     html += '<div class="deep-heatmap">';
     for (const h of hourly) {
-        const total = h.input + h.output + h.cache;
+        const total = usageTotal(h);
         const intensity = maxTokens > 0 ? (total / maxTokens) : 0;
         const isPeak = h.hour === peakHour.hour;
         const cls = isPeak ? ' deep-heatmap-peak' : '';
@@ -95,7 +110,7 @@ export function renderHourlyHeatmap(hourly: HourlyBucket[], costPerToken: number
         html += '</div>';
     }
     html += '</div>';
-    html += '<div class="deep-heatmap-info">Peak: <strong>' + String(peakHour.hour).padStart(2, '0') + ':00</strong> (' + fmtBig(peakHour.input + peakHour.output + peakHour.cache) + ')</div>';
+    html += '<div class="deep-heatmap-info">Peak: <strong>' + String(peakHour.hour).padStart(2, '0') + ':00</strong> (' + fmtBig(usageTotal(peakHour)) + ')</div>';
     html += '</div>';
     return html;
 }
@@ -120,7 +135,7 @@ export function renderDailyGrid(daily: DailyBucket[], large: boolean = false, ye
     const dateMap = new Map<string, { total: number; calls: number }>();
     for (const d of daily) {
         if (!d.date.startsWith(String(selectedYear))) continue; // filter to selected year
-        const total = d.input + d.output + d.cache;
+        const total = usageTotal(d);
         dateMap.set(d.date, { total, calls: d.calls });
     }
 
@@ -238,7 +253,7 @@ export function renderModelBreakdown(models: ModelBucket[], totalTokens: number)
 
     let html = '';
     for (const m of models) {
-        const mTotal = m.input + m.output + m.cache;
+        const mTotal = usageTotal(m);
         const pct = totalTokens > 0 ? (mTotal / totalTokens * 100).toFixed(1) : '0';
         const barPct = totalTokens > 0 ? (mTotal / totalTokens * 100) : 0;
 
@@ -254,9 +269,11 @@ export function renderModelBreakdown(models: ModelBucket[], totalTokens: number)
             const inW = (m.input / mTotal * 100).toFixed(1);
             const caW = (m.cache / mTotal * 100).toFixed(1);
             const ouW = (m.output / mTotal * 100).toFixed(1);
+            const reW = ((m.reasoning || 0) / mTotal * 100).toFixed(1);
             html += '<div class="usage-bar-seg usage-c-input" style="width:' + inW + '%"></div>';
             html += '<div class="usage-bar-seg usage-c-cache" style="width:' + caW + '%"></div>';
             html += '<div class="usage-bar-seg usage-c-output" style="width:' + ouW + '%"></div>';
+            if ((m.reasoning || 0) > 0) html += '<div class="usage-bar-seg usage-c-reasoning" style="width:' + reW + '%"></div>';
         } else {
             html += '<div class="deep-model-fill" style="width:0%"></div>';
         }
@@ -266,6 +283,9 @@ export function renderModelBreakdown(models: ModelBucket[], totalTokens: number)
         html += '<span><span class="usage-dot usage-c-input"></span>' + fmtNum(m.input) + ' in</span>';
         html += '<span><span class="usage-dot usage-c-cache"></span>' + fmtNum(m.cache) + ' cache</span>';
         html += '<span><span class="usage-dot usage-c-output"></span>' + fmtNum(m.output) + ' out</span>';
+        if ((m.reasoning || 0) > 0) {
+            html += '<span><span class="usage-dot usage-c-reasoning"></span>' + fmtNum(m.reasoning) + ' reas.</span>';
+        }
         html += '</div>';
         html += '<div class="deep-model-calls">' + fmtNum(m.calls) + ' calls</div>';
         html += '</div>';
@@ -282,7 +302,7 @@ export function renderCascadeList(cascades: CascadeBucket[], limit: number = CAS
 
     let html = '<div class="deep-cascade-list">';
     for (const c of shown) {
-        const total = c.input + c.output + c.cache;
+        const total = usageTotal(c);
         const title = c.title || 'Conversation';
         const short = title.length > maxTitleLen ? title.substring(0, maxTitleLen) + '…' : title;
 
@@ -405,7 +425,7 @@ export function renderCompactModelBreakdown(models: ModelBucket[], totalTokens: 
 
     let html = '';
     for (const m of models) {
-        const mTotal = m.input + m.output + (m.cache || 0) + (m.cacheWrite || 0) + (m.reasoning || 0);
+        const mTotal = usageTotal(m);
         const pct = totalTokens > 0 ? (mTotal / totalTokens * 100).toFixed(1) : '0';
         const barPct = totalTokens > 0 ? (mTotal / totalTokens * 100) : 0;
 
@@ -433,15 +453,12 @@ export function renderCompactModelBreakdown(models: ModelBucket[], totalTokens: 
 // ═══════════════════════════════════════════
 
 /** Estimate cost for a single month bucket using per-model pricing */
-function estimateMonthCost(m: MonthlyBucket): number {
-    let totalCost = 0;
-    for (const tm of m.topModels) {
+function estimateTopModelCosts(m: MonthlyBucket): MonthlyModelEntry[] {
+    return m.topModels.map(tm => {
         const p = matchPricing(tm.displayName);
-        const cost = (tm.inp * p.input + tm.cache * p.cache + tm.out * p.output + tm.reas * p.reasoning) / 1_000_000;
-        tm.cost = cost;
-        totalCost += cost;
-    }
-    return totalCost;
+        const cost = (tm.inp * p.input + tm.cache * p.cache + (tm.cacheWrite || 0) * (p.input * 1.25) + tm.out * p.output + tm.reas * p.reasoning) / 1_000_000;
+        return { ...tm, cost };
+    });
 }
 
 /** Extract unique years from monthly data (newest first) */
@@ -484,11 +501,6 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
 
     if (displayMonths.length === 0) return '';
 
-    // Calculate cost for each month
-    for (const m of displayMonths) {
-        m.cost = estimateMonthCost(m);
-    }
-
     const now = new Date();
     const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const maxTotal = Math.max(...displayMonths.map(m => m.total), 1);
@@ -497,12 +509,14 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
     let html = '<div class="deep-mchart">';
 
     for (const m of displayMonths) {
+        const topModels = estimateTopModelCosts(m);
         const isCurrent = m.key === currentMonthKey;
         const isEmpty = m.total === 0;
         const totalH = (m.total / maxTotal) * BAR_HEIGHT;
         const inH = m.total > 0 ? (m.input / m.total * totalH) : 0;
         const caH = m.total > 0 ? (m.cache / m.total * totalH) : 0;
         const ouH = m.total > 0 ? (m.output / m.total * totalH) : 0;
+        const reH = m.total > 0 ? ((m.reasoning || 0) / m.total * totalH) : 0;
 
         const colCls = 'deep-mcol' + (isCurrent ? ' deep-mcol-current' : '') + (isEmpty ? ' deep-mcol-empty' : '');
 
@@ -522,10 +536,10 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
             if (m.reasoning > 0) {
                 html += '<div class="deep-mcol-tip-row"><span class="deep-mcol-tip-dotlabel"><span class="deep-mcol-tip-dot" style="background:#f59e0b"></span>Reasoning</span><span>' + fmtBig(m.reasoning) + '</span></div>';
             }
-            if (m.topModels.length > 0) {
+            if (topModels.length > 0) {
                 html += '<div class="deep-mcol-tip-sep"></div>';
                 html += '<div class="deep-mcol-tip-models-hdr">Models</div>';
-                for (const tm of m.topModels.slice(0, 5)) {
+                for (const tm of topModels.slice(0, 5)) {
                     html += '<div class="deep-mcol-tip-model">';
                     html += '<span>' + escHtml(tm.displayName) + '</span>';
                     html += '<span>' + fmtBig(tm.tokens) + ' · ' + fmtDollar(tm.cost) + '</span>';
@@ -542,8 +556,9 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
             html += '<div class="deep-mcol-val deep-mcol-val-empty">—</div>';
         }
         // Stacked bar
-        html += '<div class="deep-mcol-stack" style="height:' + BAR_HEIGHT + 'px">';
+            html += '<div class="deep-mcol-stack" style="height:' + BAR_HEIGHT + 'px">';
         if (!isEmpty) {
+            if (reH > 0) html += '<div class="deep-mcol-seg" style="height:' + reH.toFixed(1) + 'px;background:#f59e0b"></div>';
             html += '<div class="deep-mcol-seg" style="height:' + ouH.toFixed(1) + 'px;background:#4ade80"></div>';
             html += '<div class="deep-mcol-seg" style="height:' + caH.toFixed(1) + 'px;background:#a78bfa"></div>';
             html += '<div class="deep-mcol-seg" style="height:' + inH.toFixed(1) + 'px;background:#4f9cf7"></div>';
@@ -566,6 +581,7 @@ export function renderMonthlySummary(monthly: MonthlyBucket[], filterYear?: numb
     html += '<span><span class="usage-dot usage-c-input"></span>Input</span>';
     html += '<span><span class="usage-dot usage-c-cache"></span>Cache</span>';
     html += '<span><span class="usage-dot usage-c-output"></span>Output</span>';
+    html += '<span><span class="usage-dot usage-c-reasoning"></span>Reasoning</span>';
     html += '</div>';
     return html;
 }
@@ -588,7 +604,7 @@ export function renderProviderBreakdown(providers: ProviderBucket[], totalTokens
     // Stacked horizontal bar
     html += '<div class="provider-stack-bar">';
     for (const p of providers) {
-        const total = p.input + p.output + p.cache;
+        const total = usageTotal(p);
         const pct = totalTokens > 0 ? (total / totalTokens * 100) : 0;
         if (pct < 0.5) continue;
         const color = PROVIDER_COLORS[p.displayName] || '#666';
@@ -598,7 +614,7 @@ export function renderProviderBreakdown(providers: ProviderBucket[], totalTokens
 
     // Legend rows
     for (const p of providers) {
-        const total = p.input + p.output + p.cache;
+        const total = usageTotal(p);
         const pct = totalTokens > 0 ? (total / totalTokens * 100).toFixed(1) : '0';
         const color = PROVIDER_COLORS[p.displayName] || '#666';
         html += '<div class="provider-row">';
@@ -658,7 +674,7 @@ export function renderWeekdayChart(weekday: WeekdayBucket[]): string {
 
 /** Render a single cascade row — shared between shown and overflow sections */
 function renderCascadeRow(c: CascadeBucket, cpt: number, maxTokens: number, maxTitleLen: number): string {
-    const total = c.input + c.output + c.cache;
+    const total = usageTotal(c);
     const cost = total * cpt;
     const title = c.title || 'Conversation';
     const short = title.length > maxTitleLen ? title.substring(0, maxTitleLen) + '…' : title;
@@ -666,6 +682,7 @@ function renderCascadeRow(c: CascadeBucket, cpt: number, maxTokens: number, maxT
     const inPct = total > 0 ? (c.input / total * barW) : 0;
     const caPct = total > 0 ? (c.cache / total * barW) : 0;
     const ouPct = total > 0 ? (c.output / total * barW) : 0;
+    const rePct = total > 0 ? ((c.reasoning || 0) / total * barW) : 0;
 
     let html = '<div class="cascade-row">';
     html += '<div class="cascade-header">';
@@ -677,6 +694,7 @@ function renderCascadeRow(c: CascadeBucket, cpt: number, maxTokens: number, maxT
     if (inPct > 0) html += `<div class="usage-bar-seg usage-c-input" style="width:${inPct.toFixed(1)}%"></div>`;
     if (caPct > 0) html += `<div class="usage-bar-seg usage-c-cache" style="width:${caPct.toFixed(1)}%"></div>`;
     if (ouPct > 0) html += `<div class="usage-bar-seg usage-c-output" style="width:${ouPct.toFixed(1)}%"></div>`;
+    if (rePct > 0) html += `<div class="usage-bar-seg usage-c-reasoning" style="width:${rePct.toFixed(1)}%"></div>`;
     html += '</div>';
     html += `<span class="cascade-stats">${fmtBig(total)} · ${fmtNum(c.calls)} calls</span>`;
     html += '</div>';
@@ -690,10 +708,10 @@ export function renderEnrichedCascadeList(cascades: CascadeBucket[], models: Mod
 
     // Compute average cost-per-token from model data for estimation
     const totalCost = calculateTotalCost(models);
-    const totalT = models.reduce((s, m) => s + m.input + m.output + m.cache, 0);
+    const totalT = models.reduce((s, m) => s + usageTotal(m), 0);
     const cpt = totalT > 0 ? totalCost / totalT : 0;
 
-    const maxTokens = Math.max(...shown.map(c => c.input + c.output + c.cache), 1);
+    const maxTokens = Math.max(...shown.map(c => usageTotal(c)), 1);
 
     let html = '<div class="cascade-enriched">';
     for (const c of shown) html += renderCascadeRow(c, cpt, maxTokens, maxTitleLen);

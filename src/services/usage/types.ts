@@ -9,6 +9,7 @@ import { DeepUsageStats } from '../../types';
 export const BATCH_CONCURRENCY = 50;      // max parallel API calls per chunk
 export const HOT_THRESHOLD_MS = 48 * 3600 * 1000;  // "hot" if modified within 48h
 export const FETCH_TIMEOUT_MS = 6000;     // per-call timeout for metadata/steps fetch
+export const CACHE_SCHEMA_VERSION = 2;
 
 export const EP = {
     TRAJECTORIES: 'GetAllCascadeTrajectories',
@@ -41,13 +42,19 @@ export interface MetadataUsage {
     model?: string;
     contextTokens?: string;
     context_tokens?: string;
+    responseId?: string;
+    response_id?: string;
 }
 
 
 // ─── Internal Cache Types ───
 
+export type TokenEntrySource = 'metadata' | 'steps';
+
 /** Single API call's token data (stored in disk cache) */
 export interface TokenEntry {
+    responseId?: string; // stable model-call id from metadata/steps APIs
+    source?: TokenEntrySource;
     inp: number;
     out: number;
     cache: number;       // cacheRead
@@ -65,6 +72,7 @@ export interface ConvoTokenData {
 
 /** Disk cache structure */
 export interface DiskCacheData {
+    schemaVersion?: number;
     perConvo: Record<string, ConvoTokenData>;
     fetchedIds: string[];
     stats: DeepUsageStats;
@@ -76,11 +84,26 @@ export interface DiskCacheData {
 
 // ─── Shared Fingerprint ───
 
-/** Canonical dedup fingerprint — model EXCLUDED (meta returns resolved, steps returns placeholder).
- *  Timestamp truncated to millisecond precision (23 chars: YYYY-MM-DDTHH:mm:ss.sss)
- *  to merge meta+steps duplicates while preserving distinct same-second API calls. */
+/** Canonical dedup fingerprint.
+ *  Prefer responseId: metadata and steps often describe the same model call with
+ *  slightly different timestamps. The token/timestamp fallback is only for API drift.
+ */
 export function entryFingerprint(e: TokenEntry): string {
-    return `${e.inp}:${e.out}:${e.cache}:${e.ts?.substring(0, 23) || ''}`;
+    if (e.responseId) return `rid:${e.responseId}`;
+    return `${e.inp}:${e.out}:${e.cache}:${e.cacheWrite}:${e.reasoning}:${e.ts?.substring(0, 23) || ''}`;
+}
+
+export function mergePreferredEntry(existing: TokenEntry, next: TokenEntry): TokenEntry {
+    if (existing.source === 'metadata') return existing;
+    if (next.source === 'metadata') {
+        return {
+            ...next,
+            model: next.model || existing.model,
+            provider: next.provider || existing.provider,
+            ts: next.ts || existing.ts,
+        };
+    }
+    return existing;
 }
 
 /** Monthly aggregation accumulator */
@@ -91,7 +114,7 @@ export interface MonthlyAccumulator {
     cacheWrite: number;
     reasoning: number;
     calls: number;
-    models: Record<string, { tokens: number; inp: number; out: number; cache: number; reas: number }>;
+    models: Record<string, { tokens: number; inp: number; out: number; cache: number; cacheWrite: number; reas: number }>;
 }
 
 // ─── Model Placeholder Maps ───

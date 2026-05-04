@@ -23,7 +23,7 @@ import { createLogger } from '../../utils/logger';
 import {
     ConvoTokenData, DiskCacheData, TokenEntry,
     EP, BATCH_CONCURRENCY, HOT_THRESHOLD_MS, FETCH_TIMEOUT_MS,
-    entryFingerprint,
+    entryFingerprint, mergePreferredEntry,
 } from './types';
 import { aggregateFromPerConvo, extractTokens } from './aggregator';
 import { StatsCache } from './cache';
@@ -279,10 +279,20 @@ export class UsageStatsService {
                 if (!existing) {
                     merged[cid] = fresh;
                 } else {
-                    const seen = new Set(existing.entries.map(entryFingerprint));
-                    const newOnly = fresh.entries.filter(e => !seen.has(entryFingerprint(e)));
-                    if (newOnly.length > 0) {
-                        merged[cid] = { entries: [...existing.entries, ...newOnly] };
+                    const byFingerprint = new Map<string, TokenEntry>();
+                    for (const e of existing.entries) {
+                        byFingerprint.set(entryFingerprint(e), e);
+                    }
+                    let changed = false;
+                    for (const e of fresh.entries) {
+                        const fp = entryFingerprint(e);
+                        const previous = byFingerprint.get(fp);
+                        const next = previous ? mergePreferredEntry(previous, e) : e;
+                        if (!previous || next !== previous) changed = true;
+                        byFingerprint.set(fp, next);
+                    }
+                    if (changed) {
+                        merged[cid] = { entries: [...byFingerprint.values()] };
                     }
                 }
             }
@@ -480,19 +490,15 @@ export class UsageStatsService {
         return all.length > 0 ? all : null;
     }
 
-    /**
-     * Fingerprint-based dedup: token counts + timestamp truncated to seconds.
-     * Model EXCLUDED — meta returns resolved name, steps returns placeholder.
-     * Uses shared entryFingerprint() from types.ts.
-     */
+    /** Dedup usage entries by responseId when present, preferring metadata over steps. */
     private dedupEntries(entries: TokenEntry[]): TokenEntry[] {
-        const seen = new Set<string>();
-        return entries.filter(e => {
+        const byFingerprint = new Map<string, TokenEntry>();
+        for (const e of entries) {
             const fp = entryFingerprint(e);
-            if (seen.has(fp)) return false;
-            seen.add(fp);
-            return true;
-        });
+            const existing = byFingerprint.get(fp);
+            byFingerprint.set(fp, existing ? mergePreferredEntry(existing, e) : e);
+        }
+        return [...byFingerprint.values()];
     }
 
     /**
@@ -532,10 +538,11 @@ export class UsageStatsService {
 
         if (!perConvo) return this.deepStatsCache;
 
-        let cutoffStr = '';
+        let dateFilter: string | { from?: string; to?: string } = '';
         if (range !== 'all') {
             const now = new Date();
             let cutoff: Date | null = null;
+            let upperBound: Date | null = null;
 
             switch (range) {
                 // Rolling presets (relative to now)
@@ -557,16 +564,19 @@ export class UsageStatsService {
                     break;
                 case 'last-month':
                     cutoff = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+                    upperBound = new Date(now.getFullYear(), now.getMonth(), 1);
                     break;
                 default: break;
             }
 
             if (cutoff) {
-                cutoffStr = cutoff.toISOString();
+                dateFilter = upperBound
+                    ? { from: cutoff.toISOString(), to: upperBound.toISOString() }
+                    : cutoff.toISOString();
             }
         }
 
-        return aggregateFromPerConvo(perConvo, titleMap, cutoffStr);
+        return aggregateFromPerConvo(perConvo, titleMap, dateFilter);
     }
 
     // ─── Trajectory Summaries (titles + stepCounts) ───
@@ -679,13 +689,21 @@ export class UsageStatsService {
             const cm = item.chatModel || item.chat_model || {};
             const usage = cm.usage || {};
             const { inp, out, cache, cacheWrite, reasoning } = extractTokens(usage);
-            if (inp === 0 && out === 0 && cache === 0) continue;
+            if (inp === 0 && out === 0 && cache === 0 && cacheWrite === 0 && reasoning === 0) continue;
 
             const rawModel = cm.responseModel || cm.response_model || usage.model || cm.model || 'Unknown';
             const apiProvider = usage.apiProvider || usage.api_provider || '';
+            const responseId = usage.responseId || usage.response_id || '';
 
             const ts = cm.chatStartMetadata?.createdAt || cm.chat_start_metadata?.created_at || '';
-            entries.push({ inp, out, cache, cacheWrite, reasoning, model: rawModel, provider: apiProvider, ts });
+            entries.push({
+                responseId: responseId || undefined,
+                source: 'metadata',
+                inp, out, cache, cacheWrite, reasoning,
+                model: rawModel,
+                provider: apiProvider,
+                ts,
+            });
         }
 
         return entries;
@@ -699,7 +717,8 @@ export class UsageStatsService {
             const usage = step.modelUsage || step.model_usage || step.metadata?.modelUsage || {};
             const rawModel = usage.model || 'Unknown';
             const { inp, out, cache, cacheWrite, reasoning } = extractTokens(usage);
-            if (inp === 0 && out === 0 && cache === 0) continue;
+            if (inp === 0 && out === 0 && cache === 0 && cacheWrite === 0 && reasoning === 0) continue;
+            const responseId = usage.responseId || usage.response_id || '';
 
             // Protobuf schema: real timestamp lives inside step.metadata (CortexStepMetadata)
             const meta = step.metadata || {};
@@ -712,7 +731,14 @@ export class UsageStatsService {
                     ts = new Date(epoch > 1e12 ? epoch : epoch * 1000).toISOString();
                 }
             }
-            entries.push({ inp, out, cache, cacheWrite, reasoning, model: rawModel, provider: '', ts });
+            entries.push({
+                responseId: responseId || undefined,
+                source: 'steps',
+                inp, out, cache, cacheWrite, reasoning,
+                model: rawModel,
+                provider: '',
+                ts,
+            });
         }
 
         return entries;

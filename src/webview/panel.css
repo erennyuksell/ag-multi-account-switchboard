@@ -741,6 +741,30 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.foot-meta,
+.foot-controls {
+    display: inline-flex;
+    align-items: center;
+}
+
+.foot-meta {
+    gap: 6px;
+    min-width: 0;
+}
+
+#lastUpdated {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.foot-controls {
+    gap: 6px;
+    margin-left: auto;
     flex-shrink: 0;
 }
 
@@ -757,8 +781,13 @@ body {
 .build-tag {
     font-size: 9px;
     color: var(--muted);
-    opacity: .5;
+    opacity: .72;
+    line-height: 1;
+    padding: 2px 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
     font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
 }
 
 /* Interval picker */
@@ -766,7 +795,6 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    margin-left: auto;
 }
 
 .interval-pick .iv-btn {

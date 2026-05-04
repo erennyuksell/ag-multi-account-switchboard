@@ -12,6 +12,7 @@ import { ContextWindowService, ContextWindowData } from '../services/contextWind
 import { LiveStream } from '../services/liveStream';
 import { StatusBarService } from '../services/statusBar';
 import { ContextDetailPanel } from '../providers/contextDetailPanel';
+import { UsageStatsPanel } from '../providers/usageStatsPanel';
 import { EmailResolver } from '../services/emailResolver';
 
 import { QuotaViewProvider } from '../providers/quotaViewProvider';
@@ -423,6 +424,7 @@ export class QuotaManager {
 
                 this.usageStatsService.fetchDeepStats(serverInfo, isSubsequentCall, (backfilledStats) => {
                     this.lastUsageStats = backfilledStats;
+                    UsageStatsPanel.currentPanel?.updateLatestStats(backfilledStats);
 
                     this.pushCachedData();
                 }, (done, total) => {
@@ -431,6 +433,7 @@ export class QuotaManager {
                     if (deep) {
                         log.diag(`refresh: fetchDeepStats done — ${deep.totalCalls} calls`);
                         this.lastUsageStats = deep;
+                        UsageStatsPanel.currentPanel?.updateLatestStats(deep);
                         this.pushCachedData();
                     } else {
 
