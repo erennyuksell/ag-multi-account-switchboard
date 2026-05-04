@@ -99,7 +99,7 @@ Antigravity can silently lose conversations from the sidebar after crashes or mu
 
 ### 📈 Usage Stats — Deep Token Analytics
 
-Track token usage and estimated costs across **every** Antigravity conversation you've ever had. Data is cached to disk for instant load.
+Track token usage and estimated costs across **every** Antigravity conversation you've ever had. Data is cached to disk for instant load, with response-aware deduplication so totals stay stable when Antigravity reports the same model response through multiple local telemetry streams.
 
 **Sidebar (compact dashboard):**
 
@@ -109,6 +109,7 @@ Track token usage and estimated costs across **every** Antigravity conversation 
 
 - Hero KPIs: Total Tokens + Estimated Cost
 - Token breakdown chips: Input, Cache, Output, Reasoning
+- Response-aware cache rebuilds for accurate all-time totals after telemetry schema changes
 - Time range selector (24h / 7d / 30d / All Time)
 - Activity heatmap (GitHub contribution style) or hourly pattern (24h mode)
 - Top models with stacked token bars

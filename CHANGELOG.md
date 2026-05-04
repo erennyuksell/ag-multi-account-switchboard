@@ -2,12 +2,21 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
-## [3.2.1] — 2026-05-01
+## [3.2.1] — 2026-05-04
+
+> First 3.2.x marketplace release. Includes the 3.2.0 Conversation Guard release plus the Usage Stats accuracy fixes below.
 
 ### Fixed
+- **Usage Stats duplicate counting** — Deduplicates model responses by stable `responseId` when Antigravity exposes the same usage telemetry through both generator metadata and trajectory steps.
+- **Usage Stats total token semantics** — Total Tokens now consistently includes input, cache read, cache write, output, and reasoning tokens across sidebar KPIs, full dashboard cards, model totals, and conversation totals.
+- **Usage Stats cache rebuild** — Bumped the disk cache schema to v2 so old fingerprint-based caches are discarded and rebuilt with response-aware entries.
+- **Usage Stats refresh lifecycle** — The full Usage Statistics editor panel now receives refresh pushes from quota refreshes instead of staying stale until reopened.
+- **Usage Stats monthly filters** — Monthly summaries use bounded date filtering and pure aggregation so switching ranges does not mutate cached totals.
+- **Footer build number placement** — Build tags render in the footer build badge instead of drifting into the updated timestamp.
 - **Quota 100% display bug** — Restored `projectId` parameter in `retrieveUserQuota` API call. Without it, Google returned generic empty buckets showing 100% for all models. (via [#3](https://github.com/erennyuksell/ag-multi-account-switchboard/pull/3) by [@ameenalasady](https://github.com/ameenalasady))
 
 ### Changed
+- **Usage Stats entry preference** — When the same response appears in multiple local sources, generator metadata is preferred over step snapshots because it carries the canonical token accounting.
 - **Model whitelist removed** — All models returned by the API are now displayed, not just hardcoded ones. Unknown model IDs are auto-humanized (`gemini-3.1-pro-high` → `Gemini 3.1 Pro (High)`). The old `MODEL_WHITELIST` is now `MODEL_DISPLAY_NAMES` — a cosmetic override map, not a filter.
 
 ## [3.2.0] — 2026-05-01
