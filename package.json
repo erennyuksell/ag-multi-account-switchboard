@@ -146,6 +146,11 @@
           "type": "boolean",
           "default": false,
           "description": "Enable verbose file logging to /tmp/ag-ctx-diag.log for troubleshooting. Restart not required."
+        },
+        "ag-switchboard.devControl": {
+          "type": "boolean",
+          "default": false,
+          "description": "Developer only: accept test commands (switch, state, restart) from files in ~/.ag-switchboard-dev. Leave off."
         }
       }
     }

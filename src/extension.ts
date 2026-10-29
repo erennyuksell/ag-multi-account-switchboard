@@ -10,6 +10,7 @@ import { updatePricing, setExternalPricingResolver } from './shared/usage-compon
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
 import { ConversationTracker } from './services/conversationTracker';
 import { ConversationGuard } from './services/conversationGuard';
+import { DevControl } from './dev/devControl';
 import { AgyHubKeeper } from './services/agyHub';
 import { isAgyMode } from './services/agyAuth';
 import { callLsJson } from './utils/lsClient';
@@ -52,6 +53,18 @@ export async function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(keeper);
         log.info('Antigravity 2.6 hub mode');
     }
+
+    // --- Dev control channel (off by default; see src/dev/devControl.ts) ---
+    const devControl = new DevControl(context, quotaManager);
+    context.subscriptions.push(devControl);
+    const applyDevControl = () => {
+        if (vscode.workspace.getConfiguration('ag-switchboard').get<boolean>('devControl')) devControl.start();
+        else devControl.stop();
+    };
+    applyDevControl();
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('ag-switchboard.devControl')) applyDevControl();
+    }));
 
     // --- Load model pricing from settings ---
     applyPricingFromSettings();
