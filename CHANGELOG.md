@@ -4,14 +4,17 @@ All notable changes to **AG Multi-Account Switchboard** are documented here.
 
 ## [3.3.0] — Unreleased
 
-> Compatibility release for **Antigravity 2.5.x and 2.6.x**. 2.5 renamed every install location and changed how the language server takes an account; 2.6 replaced the language server with one agent hub per window and moved account storage out of the IDE. Older builds stay supported: the install layout and the server generation are detected at runtime.
+> Compatibility release for **Antigravity 2.5.x and 2.6.x**. 2.5 renamed every install location and changed how the language server takes an account; 2.6 replaced the language server with one agent hub per window and moved account storage out of the IDE. Older builds stay supported: the install layout, the server generation and the Antigravity version are detected at runtime.
 
 ### Platform support for account switching
 
 | Antigravity | macOS | Linux | Windows |
 |---|---|---|---|
-| 2.0.x / 2.5.x | tested | untested | untested |
+| before 2.5 | 3.2.1 flow, unchanged | 3.2.1 flow, unchanged | 3.2.1 flow, unchanged |
+| 2.5.x | tested | untested | untested |
 | 2.6.x | tested | **not supported yet** | **not supported yet** |
+
+Builds before 2.5 keep the account switch that shipped in 3.2.1. The 2.5 rework below was never run on them, and Open VSX cannot hold a release back from them: it picks a release only by the VS Code version the host reports, and the app before the IDE line, 2.5 and 2.6 all report 1.107.0. The build is read from the running app's `product.json` (`ideVersion`, or its data folder name when that is missing); a build that cannot be identified gets the current flow. The legacy flow differs from 3.2.1 only in fixes that hold on any build: its confirmation poll is paced, a superseded switch stays silent, and it never pushes another account into USS while settling.
 
 On 2.6 the account lives in the OS credential store. Only the macOS Keychain is written today; on Linux (Secret Service) and Windows (Credential Manager) the hubs keep the previous account. Quotas, Usage Stats and Token Budget work on 2.6 regardless.
 
@@ -32,7 +35,7 @@ On 2.6 the account lives in the OS credential store. Only the macOS Keychain is 
 ### Fixed — Account switching, all versions
 
 - **A token stored under the wrong account is refused.** Before switching, the token's owner is checked with Google; a mismatch is reported instead of silently switching the IDE to someone else.
-- **Switching to the account already in use** reports "Already on …" instead of running the whole flow and claiming a switch.
+- **Switching to the account already in use** (2.5 and later) reports "Already on …" instead of running the whole flow and claiming a switch.
 - **A switch superseded by a newer one** (same window or another window) stops quietly instead of waiting out its timeout and showing a warning.
 
 ### Fixed — Panel

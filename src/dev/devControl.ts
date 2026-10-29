@@ -29,6 +29,7 @@ import { extractField, extractStringField } from '../shared/protobuf';
 import { LS_SERVICE_PATH } from '../constants';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
 import { isAgyMode, readAgyIdentity, readAgyKeychainIdentity, writeAgyToken } from '../services/agyAuth';
+import { ideVersion, isLegacyAntigravity } from '../services/ideBuild';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('DevControl');
@@ -271,7 +272,8 @@ export class DevControl implements vscode.Disposable {
             workspace: this.workspaceName(),
             build: this.buildStamp(),
             uss: { email: ussEmail, oauth: oauthFp },
-            agy: isAgyMode() ? { fileEmail: readAgyIdentity(), keychainEmail: await readAgyKeychainIdentity() } : null,
+            ide: { version: ideVersion(), legacy: isLegacyAntigravity() },
+            agy: isAgyMode() ?{ fileEmail: readAgyIdentity(), keychainEmail: await readAgyKeychainIdentity() } : null,
             panel: this.quotaManager.getDebugSnapshot(),
             servers,
         };

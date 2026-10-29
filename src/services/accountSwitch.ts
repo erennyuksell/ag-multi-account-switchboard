@@ -10,6 +10,7 @@ import { createLogger } from '../utils/logger';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
 import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity } from './agyAuth';
 import { agyState, findOwnHub } from './agyHub';
+import { isLegacyAntigravity } from './ideBuild';
 import { dbExec, dbGet } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache, LsEndpoint } from '../utils/lsClient';
 import {
@@ -198,6 +199,9 @@ export class AccountSwitchService {
 
             if (isAgyMode()) {
                 return await this.switchAgy(opts, generation, uss);
+            }
+            if (isLegacyAntigravity()) {
+                return await this.switchLegacy(opts, generation, uss);
             }
 
             // 1. Credentials first. This is the value the language server reads
@@ -435,6 +439,124 @@ export class AccountSwitchService {
         log.warn(`agy: hubs not all on ${email} after ${AccountSwitchService.AGY_MAX_WAIT_MS}ms`);
         this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
         vscode.window.showInformationMessage(`Switching to ${email} — some windows are still restarting their agent`);
+        return { confirmed: false };
+    }
+
+    // ==================== Antigravity before 2.5 ====================
+
+    private static readonly LEGACY_POLL_MAX_WAIT_MS = 12_000;
+
+    /**
+     * The 3.2.1 switch, kept for builds before Antigravity IDE 2.5 (see
+     * ideBuild.ts). The flow in switchAccount was reworked against 2.5 and
+     * never run on these builds; this one shipped on them.
+     *
+     * Differences from 3.2.1, all fixes that hold on any build: the poll waits
+     * between reads instead of spinning on the LS, a superseded switch stays
+     * silent, and stabilizeUSS stops rather than push another account.
+     * Discovery now also returns the global LS, which 3.2.1 could not see, so
+     * it is filtered out here to watch the same instances 3.2.1 did.
+     */
+    private async switchLegacy(opts: SwitchAccountOptions, generation: number, uss: USSApi)
+        : Promise<{ confirmed: boolean; superseded?: boolean }> {
+        const { email, name, accessToken, refreshToken, expiryTimestamp } = opts;
+        log.info(`Switch → ${email}: pre-2.5 Antigravity, 3.2.1 flow`);
+
+        // 1. Instant name/email display via USS
+        await this.pushUserStatusToUSS(uss,
+            Buffer.concat([encodeVarintField(2, 1), encodeString(3, name), encodeString(7, email)]));
+
+        // 2. Legacy auth status JSON, read by these builds
+        this.writeAuthStatusToDb(name, email, accessToken)
+            .catch(err => log.warn('Legacy DB write failed:', err?.message));
+
+        // 3. Set OAuth token, with the real expiry
+        await uss.OAuthPreferences.setOAuthTokenInfo({
+            accessToken, refreshToken, expiryDateSeconds: expiryTimestamp, tokenType: 'Bearer', isGcpTos: false,
+        });
+
+        // 4. handleAuthRefresh — propagates the new session to the LS before registerGdmUser
+        try {
+            await vscode.commands.executeCommand(AG_CMD_AUTH_REFRESH);
+        } catch (e: any) {
+            log.warn(`${AG_CMD_AUTH_REFRESH} failed (non-fatal):`, e?.message);
+        }
+
+        // 5-6. Readiness gate, then registerGdmUser on the endpoints it found
+        const { endpoints } = await this.awaitLSReadiness();
+        const workspaceEndpoints = workspaceOnly(endpoints);
+        await this.callRegisterGdmUser(workspaceEndpoints);
+
+        // 7. Await email confirmation from LS
+        const result = await this.pollLegacy(uss, generation, email, workspaceEndpoints);
+        if (result.superseded) {
+            log.info(`Switch to ${email} superseded by a newer switch — no toast, no renewal`);
+            return result;
+        }
+        if (!result.confirmed) {
+            log.warn('Email confirmation timed out — LS may not have adopted the new email yet');
+        }
+
+        // 8. Schedule proactive token renewal before expiry
+        this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+
+        // 9. Toast reflects actual state
+        if (result.confirmed) {
+            vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+        } else {
+            vscode.window.showWarningMessage(`⚠️ Switching to ${email} — model update may take a moment`);
+        }
+        return result;
+    }
+
+    /** 3.2.1's confirmation poll: one workspace LS, 12s, push on the first match. */
+    private async pollLegacy(
+        uss: USSApi, generation: number, targetEmail: string, initialEndpoints: LsEndpoint[],
+    ): Promise<{ confirmed: boolean; superseded?: boolean }> {
+        let lsProcesses = initialEndpoints.length > 0 ? initialEndpoints : workspaceOnly(await findLSEndpoints());
+        if (lsProcesses.length === 0) return { confirmed: false };
+        const ca = loadLSCert();
+        let ls = lsProcesses[0];
+        const targetNorm = targetEmail.toLowerCase();
+        const maxWaitMs = AccountSwitchService.LEGACY_POLL_MAX_WAIT_MS;
+        const intervalMs = AccountSwitchService.POLL_INTERVAL_MS;
+        const start = Date.now();
+
+        await delay(AccountSwitchService.POLL_INITIAL_DELAY_MS);
+
+        while (Date.now() - start < maxWaitMs) {
+            if (generation !== this.switchGeneration) {
+                log.info('Polling aborted — newer switch detected');
+                return { confirmed: false, superseded: true };
+            }
+            try {
+                const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetUserStatus`, ca);
+                const userStatus = body ? extractField(body, 1) : null;
+                const lsEmail = userStatus ? extractStringField(userStatus, 7) : '';
+                if (userStatus && userStatus.length > 5 && lsEmail.toLowerCase() === targetNorm) {
+                    log.info(`EMAIL_MATCH @${Date.now() - start}ms on :${ls.port} — pushing to USS`);
+                    await this.pushUserStatusToUSS(uss, userStatus);
+                    await vscode.commands.executeCommand(AG_CMD_AUTH_REFRESH);
+                    this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs,
+                        maxWaitMs - (Date.now() - start), targetEmail)
+                        .catch(err => log.warn('USS stabilization error:', err?.message));
+                    return { confirmed: true };
+                }
+            } catch (e: any) {
+                const msg = e?.message || '';
+                // CSRF token regenerated after registerGdmUser — re-discover endpoints
+                if (msg.includes('401') || msg.includes('CSRF') || msg.includes('unauthenticated')) {
+                    invalidateLsEndpointCache();
+                    lsProcesses = workspaceOnly(await findLSEndpoints());
+                    if (lsProcesses.length > 0) ls = lsProcesses[0];
+                } else {
+                    log.warn('UserStatus poll iteration failed:', msg);
+                }
+            }
+            // 3.2.1 skipped this on a non-matching read and spun on the LS.
+            await delay(intervalMs);
+        }
+        log.info(`Polling timed out after ${maxWaitMs}ms`);
         return { confirmed: false };
     }
 
@@ -1063,6 +1185,12 @@ function decodeUserStatus(serialized: string | null | undefined): Buffer | null 
     } catch {
         return null;
     }
+}
+
+/** Workspace instances only, as 3.2.1's discovery returned; all of them if there are none. */
+function workspaceOnly(endpoints: LsEndpoint[]): LsEndpoint[] {
+    const ws = endpoints.filter(ep => !ep.isGlobal);
+    return ws.length > 0 ? ws : endpoints;
 }
 
 function delay(ms: number): Promise<void> {

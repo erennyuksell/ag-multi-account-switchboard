@@ -148,7 +148,7 @@ The extension reads from the servers the Antigravity IDE runs locally. Which one
 
 Both serve the same RPCs, so quota, token budget and context window code is shared. Server discovery uses PID-based process scanning with `lsof` port resolution (macOS/Linux) or `PowerShell`/`netstat` (Windows), filtered to the current workspace.
 
-**Switching accounts** writes the new account where that IDE version reads it, then makes every window's server pick it up: on 2.5 by changing the email in USS (the IDE restarts the server) and re-broadcasting the credentials once it is back; on 2.6 by restarting each window's hub, within the IDE's crash-recovery budget. A switch is confirmed only when every window's server reports the new account.
+**Switching accounts** writes the new account where that IDE version reads it, then makes every window's server pick it up: on 2.5 by changing the email in USS (the IDE restarts the server) and re-broadcasting the credentials once it is back; on 2.6 by restarting each window's hub, within the IDE's crash-recovery budget. A switch is confirmed only when every window's server reports the new account. Builds before 2.5 keep the 3.2.1 switch, which shipped on them; the build is read from the app's `product.json`, since every generation reports the same VS Code version to Open VSX.
 
 ---
 
