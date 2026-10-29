@@ -25,6 +25,42 @@ function extractVersion(raw: string): string {
 }
 
 /**
+ * Effort tiers Antigravity appends to a model id (`gemini-3.7-flash-high`).
+ * These are distinct models with their own quota, so they must not collapse
+ * into one another — without this the three 3.7 Flash tiers all reported as a
+ * single "Gemini 3.7 Flash" row and their tokens and costs were summed together.
+ * `-lite` is deliberately absent: that is part of a family name, not a tier.
+ */
+const EFFORT_SUFFIX_RE = /-(extra-low|low|medium|high)$/i;
+
+function formatEffort(raw: string): string {
+    return raw.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+/** Family name without the effort tier — the tier is re-attached by the caller. */
+function familyName(name: string, v: string): string {
+    if (/claude.*opus.*thinking/i.test(name)) return `Claude Opus${v} (Thinking)`;
+    if (/claude.*opus/i.test(name)) return `Claude Opus${v}`;
+    if (/claude.*sonnet.*thinking/i.test(name)) return `Claude Sonnet${v} (Thinking)`;
+    // Sonnet 4.6+ is always the thinking variant — merge with above
+    if (/claude.*sonnet/i.test(name)) {
+        const version = parseFloat(v.trim());
+        return version >= 4.6 ? `Claude Sonnet${v} (Thinking)` : `Claude Sonnet${v}`;
+    }
+    if (/claude.*haiku/i.test(name)) return `Claude Haiku${v}`;
+    if (/claude/i.test(name)) return `Claude${v}`;
+
+    if (/gemini.*pro.*image/i.test(name)) return `Gemini${v} Pro (Image)`;
+    if (/gemini.*pro/i.test(name)) return `Gemini${v} Pro`;
+    if (/gemini.*flash.*lite/i.test(name)) return `Gemini${v} Flash Lite`;
+    if (/gemini.*flash/i.test(name)) return `Gemini${v} Flash`;
+
+    if (/gpt.*oss/i.test(name)) return `GPT-OSS 120B`;
+
+    return name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
  * Resolve raw model string to display name.
  * @param ts — ISO timestamp for date-aware placeholder resolution (optional)
  */
@@ -45,31 +81,17 @@ export function getModelDisplayName(raw: string, apiProvider?: string, ts?: stri
         return `Placeholder ${id}`;
     }
 
-    const name = resolved.replace(/^models[/\-_]/, '');
+    const full = resolved.replace(/^models[/\-_]/, '');
+    const effortMatch = full.match(EFFORT_SUFFIX_RE);
+    const effort = effortMatch ? formatEffort(effortMatch[1].toLowerCase()) : '';
+    const name = effort ? full.replace(EFFORT_SUFFIX_RE, '') : full;
+
     const ver = extractVersion(name);
     const v = ver ? ` ${ver}` : '';
 
-    if (/claude.*opus.*thinking/i.test(name)) return `Claude Opus${v} (Thinking)`;
-    if (/claude.*opus/i.test(name)) return `Claude Opus${v}`;
-    if (/claude.*sonnet.*thinking/i.test(name)) return `Claude Sonnet${v} (Thinking)`;
-    // Sonnet 4.6+ is always the thinking variant — merge with above
-    if (/claude.*sonnet/i.test(name)) {
-        const version = parseFloat(ver);
-        return version >= 4.6 ? `Claude Sonnet${v} (Thinking)` : `Claude Sonnet${v}`;
-    }
-    if (/claude.*haiku/i.test(name)) return `Claude Haiku${v}`;
-    if (/claude/i.test(name)) return `Claude${v}`;
-
-    if (/gemini.*pro.*high/i.test(name)) return `Gemini${v} Pro`;
-    if (/gemini.*pro.*low/i.test(name)) return `Gemini${v} Pro (Low)`;
-    if (/gemini.*pro.*image/i.test(name)) return `Gemini${v} Pro (Image)`;
-    if (/gemini.*pro/i.test(name)) return `Gemini${v} Pro`;
-    if (/gemini.*flash.*lite/i.test(name)) return `Gemini${v} Flash Lite`;
-    if (/gemini.*flash/i.test(name)) return `Gemini${v} Flash`;
-
-    if (/gpt.*oss/i.test(name)) return `GPT-OSS 120B`;
-
-    return name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const base = familyName(name, v);
+    // Families that already carry a qualifier (Thinking, Image) keep it as-is.
+    return effort && !base.includes('(') ? `${base} (${effort})` : base;
 }
 
 // ─── Token Extraction ───

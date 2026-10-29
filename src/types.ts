@@ -62,6 +62,8 @@ export interface ModelCard {
     pct: number;
     resetTime: string;
     isLocal: boolean;
+    /** Effort tiers collapsed into this row, e.g. ['Low','Medium','High']. */
+    tiers?: string[];
 }
 
 /**
@@ -91,6 +93,19 @@ export interface AccountCard {
     isTransitioning?: boolean;
     /** Target email during transition (the email being switched TO) */
     pendingEmail?: string;
+    /**
+     * This account was requested but the language server still reports another
+     * one. Distinct from isActive so the panel can never present a switch as
+     * finished before it has actually taken effect.
+     */
+    isPendingTarget?: boolean;
+    /**
+     * Epoch ms of the quota reading shown on this card, or 0 when nothing has
+     * been fetched yet. The panel renders cards before the first refresh lands
+     * and keeps the previous numbers when an account times out, so without this
+     * the user cannot tell live figures from an old snapshot.
+     */
+    dataTimestamp?: number;
 }
 
 /** Unified state object passed to viewProvider.updateData() */

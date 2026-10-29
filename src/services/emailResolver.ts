@@ -11,12 +11,19 @@ import { extractStringField } from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
 import { getUSS } from '../utils/uss';
 import { dbGet } from '../shared/db';
+import { isAgyMode, readAgyIdentity } from './agyAuth';
 
 const log = createLogger('EmailResolver');
 
 export class EmailResolver {
     /** Read active IDE email from USS API or antigravityAuthStatus */
     async getActiveEmail(): Promise<string> {
+        // Antigravity 2.6+: the hubs take identity from the shared token file;
+        // USS keeps whatever account was last written there and goes stale.
+        if (isAgyMode()) {
+            const email = readAgyIdentity();
+            if (email) return email;
+        }
         try {
             // Try USS API first (in-memory, most accurate)
             const uss = getUSS();

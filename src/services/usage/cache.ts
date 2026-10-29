@@ -5,7 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { BRAIN_DIR } from '../../shared/agPaths';
 import { DeepUsageStats } from '../../types';
 import {
     CACHE_SCHEMA_VERSION,
@@ -22,7 +22,7 @@ const log = createLogger('StatsCache');
 export class StatsCache {
     /** Path to the disk cache file */
     get filePath(): string {
-        return path.join(os.homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.json');
+        return path.join(BRAIN_DIR, '.deep_stats_cache.json');
     }
 
     /** Read cached data from disk. Returns null if missing or corrupted. */
@@ -73,6 +73,7 @@ export class StatsCache {
         titleMap: Map<string, string>,
         stepCounts?: Map<string, number>,
         entryCounts?: Record<string, { meta: number; steps: number }>,
+        mtimes?: Record<string, number>,
     ): void {
         try {
             // Serialize titleMap as plain object for JSON persistence
@@ -87,6 +88,7 @@ export class StatsCache {
                 titleMap: titleMapObj,
                 stepCounts: stepCounts ? stepCountsObj : undefined,
                 entryCounts,
+                mtimes,
             };
             const tmp = this.filePath + '.tmp';
             fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');

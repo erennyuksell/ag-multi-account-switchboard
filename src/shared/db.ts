@@ -71,6 +71,37 @@ export async function dbQuery(sql: string): Promise<string | null> {
     return cliQuery(dbPath, sql);
 }
 
+/**
+ * All rows of a read-only query against any SQLite file (not state.vscdb).
+ * Native module first; CLI fallback via `sqlite3 -json`. Returns [] on any
+ * failure — callers treat a missing database as "no data".
+ */
+export async function dbAllAt(dbPath: string, sql: string): Promise<Array<Record<string, unknown>>> {
+    if (!dbPath || !fs.existsSync(dbPath)) return [];
+    const native = await new Promise<Array<Record<string, unknown>> | undefined>((resolve) => {
+        const sqlite3 = getNativeModule();
+        if (!sqlite3) { resolve(undefined); return; }
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err: any) => {
+            if (err) { resolve(undefined); return; }
+            db.all(sql, (err2: any, rows: any[]) => {
+                db.close();
+                resolve(err2 ? undefined : rows);
+            });
+        });
+    });
+    if (native) return native;
+    return new Promise((resolve) => {
+        try {
+            const cp = require('child_process');
+            cp.execFile('sqlite3', ['-readonly', '-json', dbPath, sql], { timeout: TIMEOUT, maxBuffer: MAX_BUFFER },
+                (err: any, stdout: string) => {
+                    if (err || !stdout.trim()) { resolve([]); return; }
+                    try { resolve(JSON.parse(stdout)); } catch { resolve([]); }
+                });
+        } catch { resolve([]); }
+    });
+}
+
 // ─── Write ───────────────────────────────────────────────────────────
 
 /**

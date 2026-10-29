@@ -193,4 +193,41 @@ export async function getGlobalIndexData(): Promise<GlobalIndexResult> {
     } catch { return EMPTY_RESULT; }
 }
 
+/**
+ * Antigravity 2.6 keeps its conversation index in
+ * <data dir>/conversation_summaries.db instead of the trajectorySummaries
+ * blob in state.vscdb (which stops being updated), and the hubs answer
+ * GetAllCascadeTrajectories with an empty map. Rows carry step_count and a
+ * raw_summary proto whose field 1 is the title — the same message the blob
+ * used to hold.
+ */
+export async function getConversationSummariesData(): Promise<GlobalIndexResult> {
+    const { AG_DATA_DIR } = require('./agPaths');
+    const { dbAllAt } = require('./db');
+    const rows: Array<Record<string, unknown>> = await dbAllAt(
+        require('path').join(AG_DATA_DIR, 'conversation_summaries.db'),
+        'SELECT conversation_id AS id, step_count AS steps, hex(raw_summary) AS raw FROM conversation_summaries',
+    );
+    if (rows.length === 0) return EMPTY_RESULT;
 
+    const titleMap = new Map<string, string>();
+    const stepCounts = new Map<string, number>();
+    const allIds = new Set<string>();
+    for (const row of rows) {
+        const id = String(row.id || '');
+        if (!id) continue;
+        allIds.add(id);
+        const steps = Number(row.steps) || 0;
+        if (steps > 0) stepCounts.set(id, steps);
+        try {
+            const raw = Buffer.from(String(row.raw || ''), 'hex');
+            const { value: tag, pos } = decodeVarint(raw, 0);
+            if (tag === 10) { // field 1, length-delimited
+                const { value: len, pos: start } = decodeVarint(raw, pos);
+                const title = raw.subarray(start, start + len).toString('utf8');
+                if (title) titleMap.set(id, title);
+            }
+        } catch { /* untitled */ }
+    }
+    return { titleMap, stepCounts, allIds };
+}

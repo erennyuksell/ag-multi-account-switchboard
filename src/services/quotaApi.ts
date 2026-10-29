@@ -1,17 +1,39 @@
 import * as https from 'https';
-import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, MODEL_DISPLAY_NAMES, USER_AGENT } from '../constants';
+import { QUOTA_API_ENDPOINTS, LOAD_CODE_ASSIST_ENDPOINTS, MODEL_DISPLAY_NAMES, USER_AGENT, isInternalModelId } from '../constants';
 import { QuotaModel, QuotaResult, HttpError } from '../types';
 import { collectBody } from '../utils/http';
+import { createLogger } from '../utils/logger';
+
+const log = createLogger('QuotaApi');
+
+/** Account-level metadata returned by loadCodeAssist */
+interface ProjectInfo {
+    projectId: string;
+    tier: string | null;
+    tierName: string | null;
+}
 
 export class QuotaApiService {
 
     /** Timeout for Google Cloud quota API requests */
     private static readonly CLOUD_API_TIMEOUT_MS = 25_000;
 
-    /** Fetch quota for a remote account using its access token */
-    async fetchRemoteQuota(accessToken: string): Promise<QuotaResult> {
+    /**
+     * projectId/tier rarely change, but fetching them costs a full round trip
+     * that runs BEFORE the quota call — doubling the latency of every refresh.
+     * Cached per account so a refresh is one request instead of two.
+     */
+    private static readonly PROJECT_INFO_TTL_MS = 30 * 60_000;
+    private readonly projectInfoCache = new Map<string, { info: ProjectInfo; ts: number }>();
+
+    /**
+     * Fetch quota for a remote account using its access token.
+     * @param cacheKey - Stable account identifier (email). Enables project-info
+     *   caching across refreshes; omit to always re-fetch.
+     */
+    async fetchRemoteQuota(accessToken: string, cacheKey?: string): Promise<QuotaResult> {
         // 1. Get tier info and projectId
-        const { projectId, tier, tierName } = await this.loadProjectInfo(accessToken);
+        const { projectId, tier, tierName } = await this.getProjectInfo(accessToken, cacheKey);
 
         // 2. Fetch quota via retrieveUserQuota
         let quotaData: any = null;
@@ -39,7 +61,24 @@ export class QuotaApiService {
 
     // --- Private ---
 
-    private async loadProjectInfo(accessToken: string): Promise<{ projectId: string; tier: string | null; tierName: string | null }> {
+    /** Cached wrapper around loadProjectInfo. A 401 drops the entry so the next call re-fetches. */
+    private async getProjectInfo(accessToken: string, cacheKey?: string): Promise<ProjectInfo> {
+        if (!cacheKey) return this.loadProjectInfo(accessToken);
+
+        const hit = this.projectInfoCache.get(cacheKey);
+        if (hit && Date.now() - hit.ts < QuotaApiService.PROJECT_INFO_TTL_MS) return hit.info;
+
+        try {
+            const info = await this.loadProjectInfo(accessToken);
+            this.projectInfoCache.set(cacheKey, { info, ts: Date.now() });
+            return info;
+        } catch (e) {
+            this.projectInfoCache.delete(cacheKey);
+            throw e;
+        }
+    }
+
+    private async loadProjectInfo(accessToken: string): Promise<ProjectInfo> {
         let projectId = 'cloudaicompanion-enterprise';
         let tier: string | null = null;
         let tierName: string | null = null;
@@ -73,11 +112,21 @@ export class QuotaApiService {
     private parseBuckets(buckets: any[]): QuotaModel[] {
         const models: QuotaModel[] = [];
 
+        // The API returns internal/backend buckets (Tab_*, Chat_<id>) alongside
+        // user-selectable models. Log the raw tokenType/modelId pairs under
+        // diagnosticMode so the filter can be designed from real data instead of
+        // guesswork — see the discussion on PR #7.
+        if (buckets.length > 0) {
+            log.diag(`quota buckets: ${buckets.map((b: any) =>
+                `${b.tokenType ?? b.token_type ?? '?'}|${b.modelId ?? b.model_id ?? '?'}`).join(', ')}`);
+        }
+
         for (const bucket of buckets) {
             const modelId = bucket.modelId || '';
             if (!modelId) continue;
 
             const cleanId = modelId.split('/').pop()!;
+            if (isInternalModelId(cleanId)) continue;
             const displayName = MODEL_DISPLAY_NAMES[cleanId]
                 || MODEL_DISPLAY_NAMES[modelId]
                 || QuotaApiService.humanizeModelId(cleanId);

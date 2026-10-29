@@ -14,6 +14,32 @@ const TRASH_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 /** Track previous active email to detect account switches and auto-collapse */
 let _lastActiveEmail = '';
 
+/**
+ * Only flag readings older than one full refresh cycle. Anything younger is
+ * simply the current figure and a badge on it would be noise.
+ */
+const STALE_AFTER_MS = 90_000;
+
+/**
+ * Badge describing how old a card's numbers are.
+ *
+ * The panel paints cards before the first fetch returns, and keeps the previous
+ * numbers when an account's refresh overruns its deadline. Both look identical
+ * to live data without this.
+ */
+function freshnessBadge(dataTimestamp: number | undefined, isError: boolean): string {
+    if (isError) return '';
+    if (!dataTimestamp) {
+        return '<span class="stale-tag pending" title="Waiting for the first quota fetch">LOADING</span>';
+    }
+    const age = Date.now() - dataTimestamp;
+    if (age < STALE_AFTER_MS) return '';
+    const mins = Math.floor(age / 60_000);
+    const label = mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h';
+    return '<span class="stale-tag" title="Could not refresh — showing the last reading">'
+        + label + ' AGO</span>';
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function renderAll(cards: any[], pinnedModels: Record<string, string>): void {
     const list = document.getElementById('accountList')!;
@@ -76,11 +102,16 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
               + '</div>'
             : '';
 
-        const activeBadge = a.isActive ? '<span class="active-tag">ACTIVE</span>' : '';
+        const activeBadge = a.isActive
+            ? '<span class="active-tag">ACTIVE</span>'
+            : (a.isPendingTarget
+                ? '<span class="pending-tag" title="Requested — the language server is still on the previous account">SWITCHING</span>'
+                : '');
         const transitionBadge = a.isTransitioning && a.pendingEmail
             ? '<span class="transition-tag">→ ' + a.pendingEmail + '</span>'
             : '';
         const tierBadge = a.tierName ? '<span class="tier-tag">' + shortTierName(a.tierName) + '</span>' : '';
+        const freshBadge = freshnessBadge(a.dataTimestamp, a.isError);
 
         // Credits as pill badges
         let creditsLine = '';
@@ -127,7 +158,7 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
         html += '<div class="acct-hdr" data-action="toggle-open">';
         html += '<div class="acct-dot ' + dotCls + '"></div>';
         html += '<div class="acct-info">';
-        html += '<div class="acct-email">' + a.email + ' ' + activeBadge + ' ' + tierBadge + transitionBadge + '</div>';
+        html += '<div class="acct-email">' + a.email + ' ' + activeBadge + ' ' + tierBadge + transitionBadge + freshBadge + '</div>';
         html += subBlock;
         html += creditsLine;
         html += '</div>';
@@ -153,6 +184,10 @@ export function renderAll(cards: any[], pinnedModels: Record<string, string>): v
                 html += '<div class="m-content">';
                 html += '<div class="m-top">';
                 html += '<span class="m-label">' + m.label + '</span>';
+                if (m.tiers && m.tiers.length > 1) {
+                    html += '<span class="m-tiers" title="' + m.tiers.join(' / ') + ' share one quota pool">'
+                        + m.tiers.map((t: string) => t === 'Extra Low' ? 'XL' : t.charAt(0)).join('·') + '</span>';
+                }
                 html += '<div class="m-right">';
                 html += '<span class="m-pct">' + m.pct + '%</span>';
                 if (m.isLocal) {

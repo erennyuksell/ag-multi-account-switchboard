@@ -80,6 +80,8 @@ export interface DiskCacheData {
     titleMap?: Record<string, string>;
     stepCounts?: Record<string, number>;  // cascade → last known step count (delta detection)
     entryCounts?: Record<string, { meta: number; steps: number }>;  // offset-based delta fetch
+    /** cascade → brain dir mtime at last fetch. Primary change signal (see index.ts). */
+    mtimes?: Record<string, number>;
 }
 
 // ─── Shared Fingerprint ───

@@ -11,6 +11,7 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import { STATE_DB_PATH } from '../constants';
 import { CONVERSATIONS_DIR, BRAIN_DIR } from '../shared/agPaths';
+import { isAgyMode } from './agyAuth';
 import { getGlobalIndexData, isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
 import { isDbAvailable } from '../shared/db';
 import { createLogger } from '../utils/logger';
@@ -58,6 +59,12 @@ export class ConversationGuard implements vscode.Disposable {
      */
     async detect(): Promise<ConversationStatus | null> {
         try {
+            // 2.6 indexes conversations in conversation_summaries.db and
+            // reconciles it against disk on every hub start; the state.vscdb
+            // index this compares against is no longer maintained, so every
+            // newer conversation would be reported "missing" and the fix
+            // would rewrite a table 2.6 does not read.
+            if (isAgyMode()) return null;
             if (!fs.existsSync(CONVERSATIONS_DIR)) return null;
 
             const pbFiles = fs.readdirSync(CONVERSATIONS_DIR).filter(f => f.endsWith('.pb'));

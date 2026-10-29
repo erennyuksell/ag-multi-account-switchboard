@@ -10,6 +10,8 @@ import { updatePricing, setExternalPricingResolver } from './shared/usage-compon
 import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPricing';
 import { ConversationTracker } from './services/conversationTracker';
 import { ConversationGuard } from './services/conversationGuard';
+import { AgyHubKeeper } from './services/agyHub';
+import { isAgyMode } from './services/agyAuth';
 import { callLsJson } from './utils/lsClient';
 import { initLogger, createLogger, setFileSink, setDiagSink } from './utils/logger';
 
@@ -42,6 +44,14 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(tracker);
 
     log.info('Extension activated');
+
+    // --- Antigravity 2.6: keep this window's agent hub on the stored account ---
+    if (isAgyMode()) {
+        const keeper = new AgyHubKeeper(email => quotaManager.onIdentityChanged(email));
+        keeper.start();
+        context.subscriptions.push(keeper);
+        log.info('Antigravity 2.6 hub mode');
+    }
 
     // --- Load model pricing from settings ---
     applyPricingFromSettings();

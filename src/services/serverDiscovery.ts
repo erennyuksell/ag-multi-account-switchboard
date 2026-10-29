@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
+import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
 
@@ -10,6 +10,9 @@ const log = createLogger('ServerDiscovery');
 const execAsync = promisify(exec);
 
 export class ServerDiscoveryService {
+
+    /** Timeout for a single port probe during discovery. */
+    private static readonly PROBE_TIMEOUT_MS = 1_500;
 
     /**
      * Discover the local Antigravity language server.
@@ -53,15 +56,22 @@ export class ServerDiscoveryService {
                     continue;
                 }
 
-                for (const port of ports) {
-                    try {
-                        await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
-                        log.diag(`discover: ✓ port ${port} pid=${cand.pid}`);
-                        return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
-                    } catch (e: any) {
-                        log.diag(`discover: port ${port} failed`);
-                    }
+                // Probe concurrently. Sequentially, every non-RPC socket (the LSP
+                // port, for one) burned the full probe timeout before the next was
+                // tried — two dead ports meant a 6s wait behind the status bar's
+                // "Loading..." on every cold start.
+                const infos: ServerInfo[] = ports.map(port => ({
+                    port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort,
+                }));
+                const answered = await Promise.all(infos.map(info =>
+                    this.probe(info).then(() => true).catch(() => false)));
+
+                const idx = answered.indexOf(true);
+                if (idx >= 0) {
+                    log.diag(`discover: ✓ port ${infos[idx].port} pid=${cand.pid}`);
+                    return infos[idx];
                 }
+                log.diag(`discover: pid=${cand.pid} — no port answered`);
             }
 
         } catch (e: any) {
@@ -131,7 +141,7 @@ export class ServerDiscoveryService {
     /** macOS / Linux: use ps to find candidates */
     private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         const { stdout } = await execAsync(
-            `ps -A -ww -o pid,args | grep "${LS_PROCESS_GREP}" | grep -v grep`
+            `ps -A -ww -o pid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`
         );
         return this.parsePsOutput(stdout);
     }
@@ -201,12 +211,12 @@ export class ServerDiscoveryService {
             if (!pidMatch) continue;
             const tokenMatch = line.match(CSRF_TOKEN_RE);
             if (!tokenMatch) continue;
-            const wsMatch = line.match(/--workspace_id\s+(\S+)/);
+            const wsId = workspaceIdFromArgs(line);
             const httpsPortMatch = line.match(/--https_server_port\s+(\d+)/);
             candidates.push({
                 pid: pidMatch[1],
                 csrfToken: tokenMatch[1],
-                wsId: wsMatch?.[1],
+                wsId,
                 httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined,
             });
         }
@@ -249,8 +259,14 @@ export class ServerDiscoveryService {
         }, CASCADE_PROBE_TIMEOUT_MS);
     }
 
-    /** Quick probe to validate a server candidate */
+    /**
+     * Quick probe to validate a server candidate.
+     * A live LS answers in ~10ms, so the timeout only bounds dead sockets —
+     * keep it short, this runs across every listening port of every candidate.
+     */
     private probe(serverInfo: ServerInfo): Promise<void> {
-        return this.fetchLocalQuota(serverInfo).then(() => {});
+        return callLsJson(serverInfo, 'GetUserStatus', {
+            metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' },
+        }, ServerDiscoveryService.PROBE_TIMEOUT_MS).then(() => {});
     }
 }

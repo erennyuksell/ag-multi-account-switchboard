@@ -4,25 +4,31 @@ import { SwitchAccountOptions, USSApi } from '../types';
 import { getUSS } from '../utils/uss';
 import {
     encodeString, encodeVarintField,
-    encodeMessage, extractField, extractStringField,
+    encodeMessage, extractField, extractStringField, stripFieldFromProtobuf,
 } from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
-import { dbExec } from '../shared/db';
-import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
-import { LS_SERVICE_PATH, RENEWAL_RETRY_DELAY_MS } from '../constants';
+import { tokenFingerprint } from '../utils/tokenFingerprint';
+import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity } from './agyAuth';
+import { agyState, findOwnHub } from './agyHub';
+import { dbExec, dbGet } from '../shared/db';
+import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache, LsEndpoint } from '../utils/lsClient';
+import {
+    LS_SERVICE_PATH, RENEWAL_RETRY_DELAY_MS,
+    AG_CMD_AUTH_REFRESH,
+} from '../constants';
 
 const log = createLogger('AccountSwitch');
 
+/** Legacy auth-status key — present in Antigravity 2.0.x and earlier, dropped in 2.5.x */
+const LEGACY_AUTH_STATUS_KEY = 'antigravityAuthStatus';
+
 /**
- * AccountSwitchService — Programmatic IDE account switching (NO RELOAD)
+ * AccountSwitchService — Programmatic IDE account switching (no window reload)
  *
- * WHY HTTP calls are necessary (reverse-engineered from IDE source):
- *
- *   registerGdmUser (the call that makes LS fetch models + profile from backend)
- *   is ONLY called inside initializeAuthSession(), which runs ONCE during
- *   extension activation. Subsequent token changes (uss-oauth onDidChange)
- *   call handleAuthSessionChange(AuthenticationEvent) which does NOT call
- *   registerGdmUser. Therefore we MUST call it ourselves via HTTP.
+ * Antigravity has no account switcher of its own: the only supported path is
+ * sign out and sign back in, which clears both the OAuth token and the cached
+ * UserStatus and then restarts everything. This service reproduces the parts
+ * of that sequence that matter, without dropping the window.
  *
  * Token Renewal Strategy (Proactive Token Renewal):
  *   The LS binary caches its session token and does NOT auto-refresh on its own
@@ -34,14 +40,34 @@ const log = createLogger('AccountSwitch');
  *   This is the production-standard "Proactive Token Renewal" pattern used by
  *   AWS SDK, Azure SDK, and google-auth-library's eagerRefreshThreshold.
  *
+ * How the LS learns who you are (Antigravity 2.5.x, read from its extension.js):
+ *   The extension host spawns the LS and writes the OAuth access token from
+ *   USS to its stdin. Every second it recomputes the LS launch inputs, which
+ *   include the email parsed from USS UserStatus; when that email changes it
+ *   kills the LS and spawns a new one. So the IDE's own switch is: token into
+ *   USS, then email into USS. Measured: restart ~0.5s after the email write,
+ *   new LS authenticated ~1s later, every open window restarts at once.
+ *
+ *   A running LS can also re-key in place without a restart, but on its own
+ *   clock (measured 5s to 54s). Earlier versions of this service waited for
+ *   that and only wrote the email once it landed, which is why switching took
+ *   half a minute.
+ *
+ *   The workspace instance is the authority for confirmation: it serves this
+ *   window's chat. The main-process instance (no --workspace_id) is not
+ *   restarted by the email change and can lag.
+ *
  * Flow:
- *   1. pushSerializedUpdateIPC → instant name/email in USS
- *   2. setOAuthTokenInfo       → uss-oauth topic update (minimal internal handling)
- *   3. handleAuthRefresh       → createSession → _sessionChangeEmitter (profile UI)
- *   4. HTTP registerGdmUser    → LS fetches models + profile from backend
- *   5. HTTP GetUserStatus      → read rich UserStatus from LS memory
- *   6. pushSerializedUpdateIPC → push rich UserStatus to USS → instant model selector + avatar
- *   7. scheduleTokenRenewal    → proactive renewal before expiry (keeps LS alive)
+ *   1. setOAuthTokenInfo       → new token into USS (read by the next spawn)
+ *   2. writeAuthStatusToDb     → legacy key, older builds only
+ *   3. UserStatus email → USS  → IDE restarts the LS on the new account
+ *   4. handleAuthRefresh       → profile UI
+ *   5. Readiness gate          → some instance reachable
+ *   6. HTTP registerGdmUser    → matches what the IDE does post-spawn
+ *   7. HTTP GetUserStatus      → poll until the workspace LS reports the target
+ *   8. pushSerializedUpdateIPC → push the LS's rich UserStatus to USS
+ *   9. watchForLateAdoption    → detached; covers adoption past the wait
+ *  10. scheduleTokenRenewal    → proactive renewal before expiry
  */
 export class AccountSwitchService {
 
@@ -56,6 +82,9 @@ export class AccountSwitchService {
     // Polling loops check this to abort if a newer switch has started.
     private switchGeneration = 0;
 
+    /** Refresh-token fingerprint → account it was verified to belong to. */
+    private readonly verifiedOwners = new Map<string, string>();
+
     /** Buffer before expiry to trigger refresh (10 minutes in seconds) */
     private static readonly RENEWAL_BUFFER_SECS = 10 * 60;
     /** Minimum delay to prevent tight loops on clock skew (30 seconds) */
@@ -64,13 +93,63 @@ export class AccountSwitchService {
     private static readonly MAX_TIMEOUT_MS = 2_147_483_647;
 
     // ── LS Readiness Gate timing ──
+    /**
+     * The gate only proves some LS is reachable before the adoption wait starts.
+     * The restart triggered by the email write takes 2-3s, and instances that
+     * are not restarted answer immediately, so this ceiling is only reached
+     * when the IDE itself is still coming up.
+     */
     private static readonly LS_READY_MAX_WAIT_MS = 8_000;
     private static readonly LS_READY_POLL_INTERVAL_MS = 400;
 
     // ── Email Confirmation Polling timing ──
-    private static readonly POLL_MAX_WAIT_MS = 12_000;
+    /**
+     * How long to wait before telling the user anything. With the email write
+     * driving a restart, adoption is expected in ~3s; the ceiling stays wide
+     * for machines where the LS boots slowly. Beyond it the detached watch
+     * takes over.
+     */
+    private static readonly POLL_MAX_WAIT_MS = 60_000;
     private static readonly POLL_INTERVAL_MS = 800;
     private static readonly POLL_INITIAL_DELAY_MS = 300;
+    /**
+     * How often to re-issue registerGdmUser while polling. Cheap, and its
+     * effect on adoption is unproven — so a slow cadence rather than a tight
+     * retry loop pretending it is the mechanism.
+     */
+    private static readonly REGISTER_RETRY_MS = 4_000;
+    /**
+     * Minimum gap between endpoint re-discoveries while polling. Discovery is
+     * fired without awaiting, so this bounds how often it starts, not how long
+     * the loop waits.
+     */
+    private static readonly REDISCOVER_MIN_INTERVAL_MS = 2_000;
+    /**
+     * Detached watch that outlives the foreground wait. Sized from field
+     * reports where adoption landed around two minutes on Windows; costs one
+     * request per instance every few seconds and stops on the first match or
+     * as soon as a newer switch supersedes it.
+     */
+    private static readonly LATE_ADOPT_MAX_WAIT_MS = 120_000;
+    private static readonly LATE_ADOPT_INTERVAL_MS = 3_000;
+    /** Settle time before a late match is believed — see the recheck. */
+    private static readonly LATE_ADOPT_CONFIRM_MS = 2_500;
+    /** Consecutive stabilize failures tolerated before the loop gives up. */
+    private static readonly STABILIZE_MAX_FAILURES = 3;
+    /**
+     * Per-request timeout inside the poll loop. Must stay well under the poll
+     * interval: the loop walks every endpoint sequentially, so at the default
+     * 10s request timeout a single hung socket — routine while the LS restarts
+     * mid-switch — stretched one iteration to 10s, or 20s with two endpoints.
+     */
+    private static readonly POLL_REQUEST_TIMEOUT_MS = 2_000;
+    /**
+     * Cadence and cap for re-broadcasting the credentials while polling. The
+     * first round lands once the IDE's restart of the workspace LS (~2s) has
+     * produced servers that are subscribed and listening.
+     */
+    private static readonly REASSERT_INTERVAL_MS = 2_500;
+    private static readonly MAX_REASSERTS = 12;
 
     constructor(_context: vscode.ExtensionContext, authService: GoogleAuthService) {
         this.authService = authService;
@@ -88,7 +167,7 @@ export class AccountSwitchService {
         log.info('Token renewal stopped');
     }
 
-    async switchAccount(opts: SwitchAccountOptions): Promise<{ confirmed: boolean }> {
+    async switchAccount(opts: SwitchAccountOptions): Promise<{ confirmed: boolean; alreadyActive?: boolean; superseded?: boolean }> {
         const { email, name, accessToken, refreshToken, expiryTimestamp } = opts;
 
         // Bump generation FIRST — aborts any in-flight polling from previous switch
@@ -102,14 +181,29 @@ export class AccountSwitchService {
                 return { confirmed: false };
             }
 
-            // 1. Instant name/email display via USS
-            await uss.pushSerializedUpdateIPC(this.buildUserStatusUpdate(name, email));
+            // 0. Make sure the stored token really is this account's. The IDE
+            //    takes identity from the token, not from the email we announce,
+            //    so a token filed under the wrong account switches the IDE to
+            //    someone else while the panel claims success.
+            const fp = tokenFingerprint(refreshToken);
+            const owner = this.verifiedOwners.get(fp) ?? await this.authService.fetchUserInfo(accessToken)
+                .then(u => u.email).catch(() => '');
+            if (owner) this.verifiedOwners.set(fp, owner);
+            log.info(`Switch → ${email}: token owner=${owner || 'unverified'} refresh=${tokenFingerprint(refreshToken)}`);
+            if (owner && owner.toLowerCase() !== email.toLowerCase()) {
+                vscode.window.showErrorMessage(
+                    `The saved token for ${email} belongs to ${owner}. Re-add ${email} to fix it.`);
+                return { confirmed: false };
+            }
 
-            // 2. Legacy auth status JSON (safe — no SQL injection, async to not block)
-            this.writeAuthStatusToDb(name, email, accessToken);
+            if (isAgyMode()) {
+                return await this.switchAgy(opts, generation, uss);
+            }
 
-            // 3. Set OAuth token — triggers internal uss-oauth subscriber
-            //    (but this does NOT call registerGdmUser — see header comment)
+            // 1. Credentials first. This is the value the language server reads
+            //    when it re-keys, so nothing that might wake it should land
+            //    before it — the previous order announced the new email while
+            //    the old token was still the one on file.
             //    CRITICAL: use the REAL expiry timestamp, not a hardcoded +3600.
             //    IDE's google-auth-library uses this to decide when to auto-refresh.
             //    A wrong value causes auto-refresh to miss, leading to 401s.
@@ -120,29 +214,124 @@ export class AccountSwitchService {
                 tokenType: 'Bearer',
                 isGcpTos: false,
             });
+            const readBack = await uss.OAuthPreferences.getOAuthTokenInfo().catch(() => null);
+            log.info(`USS oauth read-back: ${readBack ? 'present' : 'empty'}`);
 
-            // 4. handleAuthRefresh FIRST — fires IDE's createSession + sessionChangeEmitter.
-            //    This propagates the new token context to LS via USS IPC notification,
-            //    ensuring LS is aware of the new session BEFORE we call registerGdmUser.
-            try {
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-                log.info('handleAuthRefresh completed — session context propagated to LS');
-            } catch (e: any) {
-                log.warn('handleAuthRefresh failed (non-fatal):', e?.message);
+            // 2. Legacy auth status JSON (safe — no SQL injection, async to not block)
+            this.writeAuthStatusToDb(name, email, accessToken)
+                .catch(err => log.warn('Legacy DB write failed:', err?.message));
+
+            // 3. Announce the new identity in USS — this is what actually
+            //    switches the IDE.
+            //
+            //    Antigravity 2.5.x re-derives each language server's launch
+            //    inputs once a second (LanguageServerManager.maybeUpdate) and
+            //    one of those inputs is the email parsed out of USS UserStatus.
+            //    When it differs, the extension host restarts its LS, and the
+            //    replacement reads the OAuth token from USS at spawn. Measured:
+            //    restart within ~0.5s of the write, "Auth succeeded" ~1s later,
+            //    fully up in 2-3s, in every open window at once.
+            //
+            //    Without this write the running LS has to re-key itself on its
+            //    own schedule — measured 5s to 54s — and the restart only came
+            //    once our poll matched and pushed the rich record, i.e. at the
+            //    very end. That wait was the whole of the slow switch.
+            //
+            //    Token first (step 1), then email: a restart triggered before
+            //    the token lands would come up on the previous account.
+            //
+            //    The record written is the current one with name and email
+            //    replaced, not a bare stub. The model picker reads this record
+            //    straight out of USS, and a three-field stub is what emptied it
+            //    ("No models available") whenever the confirmation poll failed
+            //    to put the real one back.
+            const priorStatus = await uss.UserStatus.getUserStatus().catch(() => '');
+            const priorBytes = decodeUserStatus(priorStatus);
+            const priorEmail = priorBytes ? extractStringField(priorBytes, 7) : '';
+
+            // Already there: USS and every workspace server name the target.
+            // Checked before the write, because afterwards the restarted
+            // servers would report the target and every switch would look like
+            // a no-op. A single agreeing server is not enough: the global one
+            // routinely is while the workspace ones sit on a stale account, and
+            // re-running the flow below is exactly what repairs that.
+            if (priorEmail.toLowerCase() === email.toLowerCase()) {
+                const ids = await this.probeIdentities(await findLSEndpoints());
+                const ws = ids.filter(i => !i.isGlobal);
+                const pool = ws.length > 0 ? ws : ids;
+                if (pool.length > 0 && pool.every(i => i.email.toLowerCase() === email.toLowerCase())) {
+                    log.info(`${email} is already the active account on every LS — nothing to switch`);
+                    this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+                    vscode.window.showInformationMessage(`Already on ${email}`);
+                    return { confirmed: true, alreadyActive: true };
+                }
+                log.info(`USS already names ${email} but LS report [${ids.map(i => i.email).join(', ')}] — re-running the switch to repair`);
             }
 
-            // 5. Readiness Gate — wait for LS to confirm its USS IPC reconnect.
-            //    Returns discovered endpoints so downstream functions don't need
-            //    to re-discover (Gate-Once-Pass-Down pattern).
-            //    handleAuthRefresh can temporarily kill LS — the gate retries
-            //    endpoint discovery inside its loop until LS comes back.
-            const { ready, endpoints } = await this.awaitLSReadiness();
+            const base = priorBytes
+                ? stripFieldFromProtobuf(stripFieldFromProtobuf(priorBytes, 3), 7)
+                : encodeVarintField(2, 1);
+            const patched = Buffer.concat([base, encodeString(3, name), encodeString(7, email)]);
+            // Same content, different bytes — see the re-broadcast below.
+            const patchedAlt = Buffer.concat([base, encodeString(7, email), encodeString(3, name)]);
+            await this.pushUserStatusToUSS(uss, patched);
+            log.info(`USS userStatus → ${email} (${priorBytes ? 'patched existing record' : 'no prior record, minimal'}; was ${priorEmail || 'empty'})`);
+
+            // 4. Nudge the IDE's own auth path (profile UI). Cheap, harmless.
+            try {
+                await vscode.commands.executeCommand(AG_CMD_AUTH_REFRESH);
+            } catch (e: any) {
+                log.warn(`${AG_CMD_AUTH_REFRESH} failed (non-fatal):`, e?.message);
+            }
+
+            // 5. Readiness Gate — confirm some LS is reachable and hand the
+            //    endpoints down. The restart from step 3 may be in progress;
+            //    the poll rediscovers as the replacements come up.
+            const { endpoints, email: staleEmail } = await this.awaitLSReadiness();
 
             // 6. registerGdmUser — uses gate-provided endpoints (no independent discovery)
             await this.callRegisterGdmUser(endpoints);
 
-            // 7. Await email confirmation from LS
-            const result = await this.pollRichUserStatus(uss, generation, email, endpoints);
+            // 7. Await confirmation, re-broadcasting the credentials while we
+            //    wait. This is the step that actually lands the switch.
+            //
+            //    A freshly spawned LS asks its window's extension host for the
+            //    uss-oauth and uss-userStatus topics. The extension host answers
+            //    with the snapshot it took when the window opened, not current
+            //    state, and then forwards only updates made after that. Probed
+            //    directly on 2026-10-15: every restarted LS was handed the token
+            //    of whichever account was active when its window opened (Oct 10
+            //    or Oct 12), so the restart put each window on a different stale
+            //    account and the write we had just made never reached them.
+            //
+            //    A new write after the restart does reach them as a live update.
+            //    It has to differ from the last one, so each round shifts the
+            //    expiry by a second and swaps the field order of the identical
+            //    UserStatus record. Same token, same account, new update.
+            let rebroadcasts = 0;
+            const reassert = async () => {
+                rebroadcasts++;
+                await uss.OAuthPreferences.setOAuthTokenInfo({
+                    accessToken, refreshToken,
+                    expiryDateSeconds: expiryTimestamp - rebroadcasts,
+                    tokenType: 'Bearer', isGcpTos: false,
+                });
+                await this.pushUserStatusToUSS(uss, rebroadcasts % 2 ? patchedAlt : patched);
+            };
+
+            const result = await this.pollRichUserStatus(
+                uss, generation, email, endpoints, staleEmail, reassert,
+            );
+
+            // A superseded switch must stay silent. The switch that replaced it
+            // owns the outcome and raises its own toast; warning here made a
+            // double-click look like a failure while the real switch was still
+            // in flight and about to succeed.
+            if (result.superseded) {
+                log.info(`Switch to ${email} superseded by a newer switch — no toast, no renewal`);
+                return { confirmed: false, superseded: true };
+            }
+
             if (!result.confirmed) {
                 log.warn('Email confirmation timed out — LS may not have adopted the new email yet');
             }
@@ -154,7 +343,11 @@ export class AccountSwitchService {
             if (result.confirmed) {
                 vscode.window.showInformationMessage(`✅ Switched to ${email}`);
             } else {
-                vscode.window.showWarningMessage(`⚠️ Switching to ${email} — model update may take a moment`);
+                // Not a failure: the detached watch is still on it and will
+                // announce the switch when it lands. Phrasing this as a warning
+                // read as "it didn't work" on switches that completed moments
+                // later.
+                vscode.window.showInformationMessage(`Switching to ${email} — the language server is still catching up, models will update on their own`);
             }
             return result;
         } catch (err: any) {
@@ -162,6 +355,87 @@ export class AccountSwitchService {
             log.error('Switch failed:', err);
             return { confirmed: false };
         }
+    }
+
+    // ==================== Antigravity 2.6 (agent hubs) ====================
+
+    private static readonly AGY_POLL_MS = 500;
+    private static readonly AGY_MAX_WAIT_MS = 60_000;
+
+    /**
+     * 2.6 switch: store the account where the hubs read it, then let every
+     * window's AgyHubKeeper restart its own hub onto it (see agyHub.ts), and
+     * confirm once every hub reports the target.
+     */
+    private async switchAgy(opts: SwitchAccountOptions, generation: number, uss: USSApi)
+        : Promise<{ confirmed: boolean; alreadyActive?: boolean; superseded?: boolean }> {
+        const { email, name, accessToken, refreshToken, expiryTimestamp } = opts;
+        const target = email.toLowerCase();
+        const ca = loadLSCert();
+
+        const probe = async () => {
+            invalidateLsEndpointCache();
+            const out: Array<{ ep: LsEndpoint; email: string; status: Buffer }> = [];
+            for (const ep of await findLSEndpoints()) {
+                const body = await callLSEndpoint(ep, `${LS_SERVICE_PATH}/GetUserStatus`, ca,
+                    AccountSwitchService.POLL_REQUEST_TIMEOUT_MS).catch(() => null);
+                const status = body ? extractField(body, 1) : null;
+                if (status) out.push({ ep, email: extractStringField(status, 7).toLowerCase(), status });
+            }
+            return out;
+        };
+
+        const stored = ((await readAgyKeychainIdentity()) || readAgyIdentity()).toLowerCase();
+        const before = await probe();
+        if (stored === target && before.length > 0 && before.every(h => h.email === target)) {
+            log.info(`${email} is already the account of every hub — nothing to switch`);
+            this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+            vscode.window.showInformationMessage(`Already on ${email}`);
+            return { confirmed: true, alreadyActive: true };
+        }
+
+        const start = Date.now();
+        await writeAgyToken({ email, accessToken, refreshToken, expiryTimestamp });
+        log.info(`agy: stored ${email} (was ${stored || 'none'}); hubs [${before.map(h => h.email).join(', ')}]`);
+
+        // Keep USS in step for anything in the IDE still reading it. The hubs
+        // ignore it, so failures here do not affect the switch.
+        try {
+            await uss.OAuthPreferences.setOAuthTokenInfo({
+                accessToken, refreshToken, expiryDateSeconds: expiryTimestamp, tokenType: 'Bearer', isGcpTos: false,
+            });
+        } catch (e: any) { log.warn('agy: USS token write failed:', e?.message); }
+
+        agyState.switching = true;
+        try {
+        const ownPid = (await findOwnHub())?.pid;
+        while (Date.now() - start < AccountSwitchService.AGY_MAX_WAIT_MS) {
+            if (generation !== this.switchGeneration) return { confirmed: false, superseded: true };
+            // Another window switched after us: the store names someone else.
+            if (readAgyIdentity().toLowerCase() !== target) {
+                log.info(`agy: switch to ${email} superseded by ${readAgyIdentity()} from another window`);
+                return { confirmed: false, superseded: true };
+            }
+            await delay(AccountSwitchService.AGY_POLL_MS);
+            const hubs = await probe();
+            // This window's hub moves only once the extension host restarts,
+            // which waits for us — so do not wait for it.
+            const relevant = agyState.hostRestartPending ? hubs.filter(h => h.ep.pid !== ownPid) : hubs;
+            if (relevant.length > 0 && relevant.every(h => h.email === target)) {
+                log.info(`agy: every hub on ${email} after ${Date.now() - start}ms`);
+                await this.pushUserStatusToUSS(uss, hubs[0].status).catch(() => { /* cosmetic */ });
+                this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+                vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+                return { confirmed: true };
+            }
+        }
+        } finally {
+            agyState.switching = false;
+        }
+        log.warn(`agy: hubs not all on ${email} after ${AccountSwitchService.AGY_MAX_WAIT_MS}ms`);
+        this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+        vscode.window.showInformationMessage(`Switching to ${email} — some windows are still restarting their agent`);
+        return { confirmed: false };
     }
 
     // ==================== Proactive Token Renewal ====================
@@ -176,6 +450,10 @@ export class AccountSwitchService {
             clearTimeout(this.renewalTimer);
             this.renewalTimer = null;
         }
+        // 2.6 hubs refresh their own token from the stored refresh token. A
+        // renewal timer here would only keep writing this window's last
+        // account into USS after another window switched elsewhere.
+        if (isAgyMode()) return;
 
         this.activeRefreshToken = refreshToken;
         this.activeEmail = email;
@@ -238,26 +516,24 @@ export class AccountSwitchService {
     // ==================== LS Readiness Gate ====================
 
     /**
-     * Readiness Gate — confirms LS has a working USS IPC channel.
+     * Readiness Gate — waits for an LS that answers.
      *
-     * After IDE reload, the LS process reconnects to the new extension_server_port
-     * asynchronously. Until this reconnect completes, registerGdmUser calls are
-     * accepted (HTTP 200) but INEFFECTIVE — LS can't fetch the new token from USS,
-     * so it silently uses stale credentials.
+     * Discovery lives inside the loop because instances come and go: the IDE
+     * restarts them on its own schedule, and a new one listens on a different
+     * port with a different CSRF token.
      *
-     * This gate polls GetUserStatus; a non-empty response with an email field
-     * proves the IPC channel is live. This is the Kubernetes Readiness Probe
-     * pattern — don't send traffic until the target is ready.
+     * Passing the gate proves an LS is *reachable*, not that it adopted the new
+     * identity. The email it reports here is usually still the old account —
+     * often from the main-process LS, which this restart does not touch. It is
+     * returned so the caller can tell adoption from mere reachability.
      *
      * Gate-Once-Pass-Down: returns discovered endpoints so downstream functions
      * (registerGdmUser, pollRichUserStatus) don't need independent discovery.
-     * Endpoint discovery is INSIDE the retry loop — handles LS temporarily
-     * going down after handleAuthRefresh.
      */
     private async awaitLSReadiness(
         maxWaitMs = AccountSwitchService.LS_READY_MAX_WAIT_MS,
         intervalMs = AccountSwitchService.LS_READY_POLL_INTERVAL_MS,
-    ): Promise<{ ready: boolean; endpoints: LsEndpoint[] }> {
+    ): Promise<{ ready: boolean; endpoints: LsEndpoint[]; email: string }> {
         const ca = loadLSCert();
         const start = Date.now();
 
@@ -282,15 +558,29 @@ export class AccountSwitchService {
                 const email = extractStringField(userStatus, 7);
                 if (!email) { await delay(intervalMs); continue; }
 
-                log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
-                return { ready: true, endpoints };
+                log.info(`LS readiness gate: REACHABLE (current identity=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
+                return { ready: true, endpoints, email };
             } catch (e: any) {
                 log.info(`LS readiness gate: probe failed (${e?.message}), waiting...`);
             }
             await delay(intervalMs);
         }
         log.warn(`LS readiness gate: TIMEOUT after ${maxWaitMs}ms — proceeding best-effort`);
-        return { ready: false, endpoints: [] };
+        return { ready: false, endpoints: [], email: '' };
+    }
+
+    /** Ask every endpoint which account it is on. Unreachable ones are skipped. */
+    private async probeIdentities(endpoints: LsEndpoint[]): Promise<Array<{ email: string; isGlobal: boolean }>> {
+        const ca = loadLSCert();
+        const out: Array<{ email: string; isGlobal: boolean }> = [];
+        for (const ep of endpoints) {
+            const body = await callLSEndpoint(ep, `${LS_SERVICE_PATH}/GetUserStatus`, ca,
+                AccountSwitchService.POLL_REQUEST_TIMEOUT_MS).catch(() => null);
+            const status = body ? extractField(body, 1) : null;
+            const email = status ? extractStringField(status, 7) : '';
+            if (email) out.push({ email, isGlobal: !!ep.isGlobal });
+        }
+        return out;
     }
 
     // ==================== LS HTTP Communication ====================
@@ -330,75 +620,286 @@ export class AccountSwitchService {
     /**
      * @param initialEndpoints - Endpoints from awaitLSReadiness gate.
      *   Falls back to independent discovery if these go stale (CSRF rotation).
+     * @param previousEmail - Identity the LS still reported at the gate.
+     *   Used only to spot the anomalous case where the LS adopts some third
+     *   account instead of the requested one.
      */
     private async pollRichUserStatus(
         uss: USSApi,
         generation: number,
         targetEmail: string,
         initialEndpoints: LsEndpoint[],
+        previousEmail = '',
+        /** Re-push the new credentials to the IDE. See the retry block for why. */
+        reassert?: () => Promise<void>,
         maxWaitMs = AccountSwitchService.POLL_MAX_WAIT_MS,
         intervalMs = AccountSwitchService.POLL_INTERVAL_MS,
-    ): Promise<{ confirmed: boolean }> {
+    ): Promise<{ confirmed: boolean; superseded?: boolean }> {
+        // Starting empty is normal, not fatal: the switch restarts the LS, so
+        // there is a window with nothing listening. Bailing out here made a
+        // slow respawn look like a failed switch. The loop re-discovers.
         let lsProcesses = initialEndpoints.length > 0 ? initialEndpoints : await findLSEndpoints();
-        if (lsProcesses.length === 0) return { confirmed: false };
         const ca = loadLSCert();
-        let ls = lsProcesses[0];
 
         let emailMatched = false;
         const targetNorm = targetEmail.toLowerCase();
+        const previousNorm = previousEmail.toLowerCase();
         const start = Date.now();
         let pollCount = 0;
+        let lastRegisterAt = Date.now();
+        let lastRediscoverAt = 0;
+        let rediscoverInFlight = false;
+        let lastReassertAt = Date.now();
+        let reassertCount = 0;
+        let driftWarned = false;
+        let globalPartialLogged = false;
 
         await delay(AccountSwitchService.POLL_INITIAL_DELAY_MS);
 
         while (Date.now() - start < maxWaitMs) {
             if (generation !== this.switchGeneration) {
                 log.info('Polling aborted — newer switch detected');
-                return { confirmed: false };
+                return { confirmed: false, superseded: true };
             }
 
             pollCount++;
-            try {
-                const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetUserStatus`, ca);
-                const userStatus = body ? extractField(body, 1) : null;
+            const elapsed = Date.now() - start;
 
-                // ── FORENSIC: log every poll iteration ──
-                const elapsed = Date.now() - start;
-                const lsEmail = userStatus ? extractStringField(userStatus, 7) : '';
-                log.info(`FORENSIC poll#${pollCount} @${elapsed}ms: bodyLen=${body?.length ?? 0} statusLen=${userStatus?.length ?? 0} email=${lsEmail || '(empty)'} target=${targetEmail} matched=${emailMatched}`);
+            // Check EVERY reachable instance — they carry independent
+            // identities and adopt at different times (measured in one sample:
+            // global on erenyk75 while the workspace instance was already on
+            // dietlioapp).
+            //
+            // But they are not equally authoritative. The workspace instance is
+            // the one serving this window's chat, so it decides. Accepting a
+            // global-only match declared the switch done while every request
+            // from the editor still went to the previous account.
+            //
+            // Every workspace instance has to agree, not just one: each window
+            // runs its own, the IDE restarts all of them on a switch, and each
+            // comes back on its own stale snapshot (see the re-broadcast). Stopping
+            // at the first match left the other windows on old accounts.
+            let matched: { status: Buffer; endpoint: LsEndpoint } | null = null;
+            let globalOnly: { status: Buffer; endpoint: LsEndpoint } | null = null;
+            const haveWorkspaceLs = lsProcesses.some(ep => !ep.isGlobal);
+            const seen: string[] = [];
+            let wsAnswered = 0;
+            let wsOnTarget: { status: Buffer; endpoint: LsEndpoint } | null = null;
+            let wsAllTarget = true;
 
-                // Guard: skip if no useful status, already matched, or wrong email
-                if (!userStatus || userStatus.length <= 5 || emailMatched) continue;
-                if (!lsEmail || lsEmail.toLowerCase() !== targetNorm) continue;
+            for (const ep of lsProcesses) {
+                const body = await callLSEndpoint(ep, `${LS_SERVICE_PATH}/GetUserStatus`, ca,
+                    AccountSwitchService.POLL_REQUEST_TIMEOUT_MS)
+                    .catch(() => null);
+                const status = body ? extractField(body, 1) : null;
+                if (!status || status.length <= 5) continue;
+                const em = extractStringField(status, 7) || '';
+                seen.push(`${ep.isGlobal ? 'global' : 'ws'}#${ep.pid ?? '?'}:${ep.port}=${em || '(empty)'}`);
+                const onTarget = em.toLowerCase() === targetNorm;
 
-                emailMatched = true;
-                log.info(`FORENSIC EMAIL_MATCH @${elapsed}ms: statusLen=${userStatus.length}B — THIS is pushed to USS`);
-
-                await this.pushUserStatusToUSS(uss, userStatus);
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-
-                // Continue USS stabilization in background (profile pic, data growth)
-                this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs, maxWaitMs - (Date.now() - start))
-                    .catch(err => log.warn('USS stabilization error:', err?.message));
-
-                return { confirmed: true };
-            } catch (e: any) {
-                const msg = e?.message || '';
-                log.info(`FORENSIC poll#${pollCount} ERROR: ${msg}`);
-                // CSRF token regenerated after registerGdmUser — re-discover endpoints
-                if (msg.includes('401') || msg.includes('CSRF') || msg.includes('unauthenticated')) {
-                    log.info('Poll: CSRF invalid, re-discovering LS endpoints');
-                    lsProcesses = await findLSEndpoints();
-                    if (lsProcesses.length > 0) ls = lsProcesses[0];
-                } else {
-                    log.warn('UserStatus poll iteration failed:', msg);
+                if (!ep.isGlobal) {
+                    wsAnswered++;
+                    if (onTarget) { wsOnTarget = wsOnTarget ?? { status, endpoint: ep }; } else { wsAllTarget = false; }
+                } else if (onTarget) {
+                    globalOnly = { status, endpoint: ep };
+                }
+                // Identity moved, but not to the account we asked for.
+                if (!onTarget && !driftWarned && em && previousNorm && em.toLowerCase() !== previousNorm) {
+                    driftWarned = true;
+                    log.warn(`LS ${ep.port} adopted an unexpected identity: ${em} (asked for ${targetEmail})`);
                 }
             }
 
+            if (wsAnswered > 0 && wsAllTarget && wsOnTarget) {
+                matched = wsOnTarget;
+            } else if (!haveWorkspaceLs && globalOnly) {
+                // An empty window, or one still starting: the global instance
+                // is all there is.
+                matched = globalOnly;
+            }
+
+            if (!matched && globalOnly && !globalPartialLogged) {
+                globalPartialLogged = true;
+                log.info(`Global LS is on ${targetEmail} but the workspace LS is not — still waiting, the workspace instance serves the editor`);
+            }
+
+            log.info(`poll#${pollCount} @${elapsed}ms: [${seen.join(' ')}] target=${targetEmail}`);
+
+            if (matched) {
+                emailMatched = true;
+                log.info(`EMAIL_MATCH @${elapsed}ms after ${pollCount} poll(s) on ${matched.endpoint.isGlobal ? 'global' : 'workspace'} LS :${matched.endpoint.port} — pushing to USS`);
+
+                await this.pushUserStatusToUSS(uss, matched.status);
+                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+
+                // Continue USS stabilization in background (profile pic, data growth)
+                this.stabilizeUSS(uss, matched.endpoint, ca, generation, matched.status.length, intervalMs, maxWaitMs - (Date.now() - start), targetEmail)
+                    .catch(err => log.warn('USS stabilization error:', err?.message));
+
+                return { confirmed: true };
+            }
+
+            // Nothing reports the target yet, so keep the endpoint list fresh
+            // — a language server can restart underneath us and come back on a
+            // different port with a different CSRF token, and the stale-but-
+            // healthy instance answering every probe would otherwise mask that.
+            //
+            // Fired WITHOUT awaiting. Discovery costs a process listing plus a
+            // port scan, and awaiting it inside the loop stretched each tick
+            // from 800ms to ~3.9s — 8 probes across a 30s window instead of 37,
+            // which is a far worse trade than a slightly stale endpoint list.
+            if (!rediscoverInFlight
+                && Date.now() - lastRediscoverAt >= AccountSwitchService.REDISCOVER_MIN_INTERVAL_MS) {
+                lastRediscoverAt = Date.now();
+                rediscoverInFlight = true;
+                invalidateLsEndpointCache();
+                void findLSEndpoints()
+                    .then(fresh => {
+                        if (fresh.length === 0) return;
+                        const added = fresh.filter(f => !lsProcesses.some(p => p.port === f.port));
+                        if (added.length > 0) {
+                            log.info(`Poll: discovered ${added.map(a => `${a.isGlobal ? 'global' : 'ws'}:${a.port}`).join(' ')}`);
+                        }
+                        lsProcesses = fresh;
+                    })
+                    .catch(() => { /* next tick tries again */ })
+                    .finally(() => { rediscoverInFlight = false; });
+            }
+
+            // Whether this call drives adoption or merely coincides with it is
+            // unproven. It answers 200 with an empty body and nothing changed
+            // 6s later when measured directly — but adoption has been observed
+            // landing anywhere from ~10s to two minutes out, so that window was
+            // simply too short to conclude from. Antigravity issues the call
+            // once after startup; we re-issue it periodically because it is
+            // cheap and because the endpoint list moves underneath us.
+            if (Date.now() - lastRegisterAt >= AccountSwitchService.REGISTER_RETRY_MS) {
+                lastRegisterAt = Date.now();
+                log.info('Poll: re-issuing registerGdmUser (identity not adopted yet)');
+                this.callRegisterGdmUser(lsProcesses).catch(err =>
+                    log.warn('registerGdmUser retry failed:', err?.message));
+            }
+
+            if (reassert && reassertCount < AccountSwitchService.MAX_REASSERTS
+                && Date.now() - lastReassertAt >= AccountSwitchService.REASSERT_INTERVAL_MS) {
+                // The probes above can take seconds; a newer switch may have
+                // started meanwhile, and re-broadcasting now would put this
+                // switch's account back over it.
+                if (generation !== this.switchGeneration) {
+                    return { confirmed: false, superseded: true };
+                }
+                lastReassertAt = Date.now();
+                reassertCount++;
+                log.info(`Poll: re-broadcasting credentials (${reassertCount}/${AccountSwitchService.MAX_REASSERTS})`);
+                // Awaited: a round still in flight must not land after the
+                // rich record pushed on a match and overwrite it.
+                await reassert().catch(err => log.warn('re-broadcast failed:', err?.message));
+            }
+
+            // Always pace the loop. The previous "no match" guards used
+            // `continue`, which skipped this delay and turned the poll into a
+            // ~320 req/s flood — 3800+ calls in a 12s window — against the very
+            // LS we were waiting on.
             await delay(intervalMs);
         }
-        log.info(`Polling timed out after ${maxWaitMs}ms (emailMatched=${emailMatched})`);
+        log.info(`Polling timed out after ${maxWaitMs}ms and ${pollCount} poll(s) (emailMatched=${emailMatched})`);
+
+        // Giving up on the toast must not mean giving up on the switch. The
+        // model list lives in the rich UserStatus, and that is only written to
+        // USS on a match — so a bare timeout leaves USS holding the new email
+        // with no models behind it, which surfaces as "No models available"
+        // even though the account did change. Field reports on Windows put
+        // adoption anywhere from 11s to about two minutes, well past any
+        // timeout we would want the user to sit through. So keep watching
+        // quietly and push the moment it lands.
+        this.watchForLateAdoption(uss, generation, targetEmail, lsProcesses, ca);
         return { confirmed: emailMatched };
+    }
+
+    /**
+     * Keep polling for adoption after the foreground wait has already returned.
+     *
+     * Runs detached, on a slow cadence, and writes the rich UserStatus to USS
+     * as soon as the target appears. That write is what repopulates the model
+     * picker, and it also wakes the panel: the extension subscribes to the USS
+     * userStatus topic and refreshes on change.
+     */
+    private watchForLateAdoption(
+        uss: USSApi,
+        generation: number,
+        targetEmail: string,
+        endpoints: LsEndpoint[],
+        ca: Buffer | undefined,
+    ): void {
+        const targetNorm = targetEmail.toLowerCase();
+        const start = Date.now();
+        let lsProcesses = endpoints;
+
+        void (async () => {
+            while (Date.now() - start < AccountSwitchService.LATE_ADOPT_MAX_WAIT_MS) {
+                await delay(AccountSwitchService.LATE_ADOPT_INTERVAL_MS);
+                if (generation !== this.switchGeneration) return;
+
+                // Same authority rule as the foreground poll: the workspace
+                // instance serves the editor, so it decides. Pushing a
+                // global-only match would repopulate the model picker for an
+                // account the editor is not actually using.
+                const haveWorkspaceLs = lsProcesses.some(ep => !ep.isGlobal);
+                let found: { status: Buffer; endpoint: LsEndpoint } | null = null;
+                for (const ep of lsProcesses) {
+                    if (ep.isGlobal && haveWorkspaceLs) continue;
+                    const body = await callLSEndpoint(ep, `${LS_SERVICE_PATH}/GetUserStatus`, ca,
+                        AccountSwitchService.POLL_REQUEST_TIMEOUT_MS).catch(() => null);
+                    const status = body ? extractField(body, 1) : null;
+                    if (!status || status.length <= 5) continue;
+                    if ((extractStringField(status, 7) || '').toLowerCase() === targetNorm) {
+                        found = { status, endpoint: ep };
+                        break;
+                    }
+                }
+
+                if (found) {
+                    // Confirm against the same process before believing it.
+                    // The workspace instance restarts frequently and its
+                    // replacement takes over the same port, so a single
+                    // matching read can belong to a process that is already
+                    // gone — which is exactly how a switch that never reached
+                    // the editor got announced as finished.
+                    await delay(AccountSwitchService.LATE_ADOPT_CONFIRM_MS);
+                    if (generation !== this.switchGeneration) return;
+
+                    const recheck = await callLSEndpoint(found.endpoint,
+                        `${LS_SERVICE_PATH}/GetUserStatus`, ca,
+                        AccountSwitchService.POLL_REQUEST_TIMEOUT_MS).catch(() => null);
+                    const stillStatus = recheck ? extractField(recheck, 1) : null;
+                    const stillEmail = stillStatus
+                        ? (extractStringField(stillStatus, 7) || '').toLowerCase()
+                        : '';
+
+                    if (stillEmail !== targetNorm) {
+                        log.warn(`Late adoption: ${targetEmail} seen on ${found.endpoint.isGlobal ? 'global' : 'ws'}#${found.endpoint.pid ?? '?'}:${found.endpoint.port} but the recheck read ${stillEmail || '(nothing)'} — not counting it`);
+                        invalidateLsEndpointCache();
+                        const fresh = await findLSEndpoints();
+                        if (fresh.length > 0) lsProcesses = fresh;
+                        continue;
+                    }
+
+                    const elapsed = Math.round((Date.now() - start) / 1000);
+                    log.info(`Late adoption: ${targetEmail} confirmed on ws#${found.endpoint.pid ?? '?'}:${found.endpoint.port} ${elapsed}s after the wait ended — pushing models to USS`);
+                    await this.pushUserStatusToUSS(uss, stillStatus!);
+                    // Close the loop the timeout left open. Without this the
+                    // user's last word on the switch is a warning, even though
+                    // it went on to succeed moments later.
+                    vscode.window.showInformationMessage(`✅ Switched to ${targetEmail}`);
+                    return;
+                }
+
+                invalidateLsEndpointCache();
+                const fresh = await findLSEndpoints();
+                if (fresh.length > 0) lsProcesses = fresh;
+            }
+            log.info(`Late adoption watch for ${targetEmail} gave up after ${AccountSwitchService.LATE_ADOPT_MAX_WAIT_MS}ms`);
+        })();
     }
 
     /**
@@ -410,10 +911,13 @@ export class AccountSwitchService {
         uss: USSApi, ls: any, ca: Buffer | undefined,
         generation: number, initialSize: number,
         intervalMs: number, remainingMs: number,
+        targetEmail: string,
     ): Promise<void> {
         let lastSize = initialSize;
         let stableCount = 0;
+        let failures = 0;
         const start = Date.now();
+        const targetNorm = targetEmail.toLowerCase();
 
         while (Date.now() - start < remainingMs) {
             if (generation !== this.switchGeneration) return;
@@ -423,6 +927,18 @@ export class AccountSwitchService {
                 const body = await callLSEndpoint(ls, `${LS_SERVICE_PATH}/GetUserStatus`, ca);
                 let userStatus = body ? extractField(body, 1) : null;
                 if (!userStatus || userStatus.length <= 5) continue;
+
+                // This loop pushes whatever the LS reports straight into USS. If
+                // the LS has meanwhile moved to a different account, pushing it
+                // would silently switch the user back — which is exactly what
+                // happened: a confirmed switch reverted seconds later, and the
+                // reverting write was ours. Only stabilize the account we just
+                // switched to.
+                const liveEmail = extractStringField(userStatus, 7) || '';
+                if (liveEmail.toLowerCase() !== targetNorm) {
+                    log.warn(`USS stabilize: LS now reports ${liveEmail || '(empty)'}, expected ${targetEmail} — stopping rather than reverting the account`);
+                    return;
+                }
 
                 // Append profile picture URL if available
                 const profilePicUrl = await this.fetchProfilePicUrl(ls, ca);
@@ -442,7 +958,22 @@ export class AccountSwitchService {
                 lastSize = userStatus.length;
                 stableCount = 0;
             } catch (e: any) {
-                log.warn('USS stabilize iteration failed:', e?.message);
+                // The instance we latched onto is gone or rotated its CSRF —
+                // it restarts on its own and the successor answers 401 on the
+                // same port. There is nothing to stabilize against any more, so
+                // stop: retrying only produced a warning every 800ms for the
+                // rest of the budget, twenty-odd identical lines deep.
+                const msg = e?.message || '';
+                if (msg.includes('401') || msg.includes('CSRF') || msg.includes('unauthenticated')) {
+                    invalidateLsEndpointCache();
+                    log.info('USS stabilize: endpoint no longer accepts our token — stopping');
+                    return;
+                }
+                if (++failures >= AccountSwitchService.STABILIZE_MAX_FAILURES) {
+                    log.warn(`USS stabilize: giving up after ${failures} failures (${msg})`);
+                    return;
+                }
+                log.warn('USS stabilize iteration failed:', msg);
             }
         }
     }
@@ -473,28 +1004,32 @@ export class AccountSwitchService {
         await uss.pushSerializedUpdateIPC(req.toString('base64'));
     }
 
-    private buildUserStatusUpdate(name: string, email: string): string {
-        const proto = Buffer.concat([encodeVarintField(2, 1), encodeString(3, name), encodeString(7, email)]);
-        const row = encodeString(1, proto.toString('base64'));
-        const update = Buffer.concat([encodeString(1, 'userStatusSentinelKey'), encodeMessage(2, row)]);
-        return Buffer.concat([encodeString(1, 'uss-userStatus'), encodeMessage(5, update)]).toString('base64');
-    }
-
     // ==================== Legacy ====================
 
     /**
      * Write auth status to the IDE's state database (async — does not block extension host).
      * Uses hex-encoded JSON as SQLite X'...' blob to prevent SQL injection.
      * Delegates to shared/db which: (1) creates a backup first, (2) uses cross-platform CLI args.
+     *
+     * Kept for Antigravity 2.0.x and earlier, which still read this key. 2.5.x
+     * dropped it, so we probe before writing: dbExec copies the entire state DB
+     * as a backup first, and paying that on every switch for an UPDATE that
+     * matches zero rows is pure waste.
      */
-    private writeAuthStatusToDb(name: string, email: string, apiKey: string): void {
+    private async writeAuthStatusToDb(name: string, email: string, apiKey: string): Promise<void> {
+        const existing = await dbGet(LEGACY_AUTH_STATUS_KEY).catch(() => null);
+        if (existing === null) {
+            log.info('Legacy auth status key absent — skipping legacy DB write');
+            return;
+        }
+
         const proto = Buffer.concat([encodeVarintField(2, 1), encodeString(3, name), encodeString(7, email)]);
         const json = JSON.stringify({ name, apiKey, email, userStatusProtoBinaryBase64: proto.toString('base64') });
 
         const hexValue = Buffer.from(json, 'utf-8').toString('hex');
-        const sql = `UPDATE ItemTable SET value = CAST(X'${hexValue}' AS TEXT) WHERE key = 'antigravityAuthStatus';`;
+        const sql = `UPDATE ItemTable SET value = CAST(X'${hexValue}' AS TEXT) WHERE key = '${LEGACY_AUTH_STATUS_KEY}';`;
 
-        dbExec(sql).catch(err => log.warn('Legacy DB write failed:', err?.message));
+        await dbExec(sql);
     }
 
     async testApiAccess(): Promise<boolean> {
@@ -514,6 +1049,21 @@ export class AccountSwitchService {
 // to reduce class size and improve testability.
 
 
+
+/**
+ * USS hands UserStatus back as base64 of the proto. Returns null unless it
+ * decodes to something carrying an email, so a malformed or empty record is
+ * never patched and re-published as if it were real.
+ */
+function decodeUserStatus(serialized: string | null | undefined): Buffer | null {
+    if (!serialized) return null;
+    try {
+        const bytes = Buffer.from(serialized, 'base64');
+        return extractStringField(bytes, 7).includes('@') ? bytes : null;
+    } catch {
+        return null;
+    }
+}
 
 function delay(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));

@@ -60,10 +60,21 @@ export class AccountManager {
 
     // --- Quota Fetching ---
 
+    /**
+     * Wall-clock ceiling for one account's quota refresh.
+     *
+     * A single account can otherwise hold the whole panel hostage: the refresh
+     * does an OAuth renewal and then two cloud calls back to back, each with a
+     * 25s timeout of its own, so one unreachable account measured 61s — and the
+     * panel shows nothing until every account has settled. Past this deadline
+     * we stop waiting and use whatever that account last reported.
+     */
+    private static readonly ACCOUNT_REFRESH_DEADLINE_MS = 12_000;
+
     /** Refresh quota for ALL tracked accounts in parallel */
     async refreshAllQuotas(): Promise<AccountQuota[]> {
         const results = await Promise.allSettled(
-            this.accounts.map(account => this.refreshSingleQuota(account))
+            this.accounts.map(account => this.refreshWithDeadline(account))
         );
 
         const quotas: AccountQuota[] = [];
@@ -99,9 +110,48 @@ export class AccountManager {
 
     // --- Private ---
 
+    /**
+     * Run one account's refresh, but never wait longer than the deadline.
+     *
+     * On timeout we fall back to that account's last known quota rather than
+     * reporting an error: stale numbers with an old timestamp are far more
+     * useful than an error card, and the in-flight request is left alone — if
+     * it eventually lands it populates the cache for the next cycle.
+     */
+    private async refreshWithDeadline(account: TrackedAccount): Promise<AccountQuota> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<null>(resolve => {
+            timer = setTimeout(() => resolve(null), AccountManager.ACCOUNT_REFRESH_DEADLINE_MS);
+        });
+
+        try {
+            const quota = await Promise.race([this.refreshSingleQuota(account), deadline]);
+            if (quota) return quota;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+
+        const cached = this.quotaCache.get(account.id);
+        if (cached) {
+            log.warn(`${account.email}: quota refresh exceeded ${AccountManager.ACCOUNT_REFRESH_DEADLINE_MS}ms — showing last known data`);
+            return cached;
+        }
+        log.warn(`${account.email}: quota refresh exceeded ${AccountManager.ACCOUNT_REFRESH_DEADLINE_MS}ms and nothing cached`);
+        return {
+            account,
+            models: [],
+            tier: null,
+            tierName: null,
+            isForbidden: false,
+            isError: true,
+            errorMessage: 'Timed out — will retry',
+            lastUpdated: Date.now(),
+        };
+    }
+
     private async refreshSingleQuota(account: TrackedAccount): Promise<AccountQuota> {
         const tokens = await this.getValidTokens(account.email);
-        const result = await this.quotaApi.fetchRemoteQuota(tokens.access_token);
+        const result = await this.quotaApi.fetchRemoteQuota(tokens.access_token, account.email);
 
         const quota: AccountQuota = {
             account,

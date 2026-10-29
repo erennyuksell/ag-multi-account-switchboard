@@ -37,6 +37,38 @@ export const MODEL_DISPLAY_NAMES: Record<string, string> = {
     'gpt-oss-120b-medium': 'GPT-OSS 120B (Medium)',
 };
 
+/**
+ * Quota buckets that are not user-selectable chat models.
+ *
+ * retrieveUserQuota returns the account's full backend allocation, which mixes
+ * real models with feature-scoped and routing-internal entries. Verified
+ * against a live response (all 28 buckets shared tokenType `WTUS`, so the type
+ * field cannot separate them — the model id is the only signal):
+ *
+ *   chat_20706, chat_23310                    internal chat ids
+ *   tab_flash_lite_preview, tab_jump_...      tab-completion models
+ *   gemini-3-flash-agent, gemini-pro-agent    backend agent variants
+ *   gemini-3.6-flash-tiered, 3.7-flash-tiered backend routing variants
+ *
+ * Image models (gemini-3.1-flash-image) are intentionally NOT filtered — they
+ * consume real quota the user cares about, even though the chat picker omits them.
+ *
+ * Deliberately a blocklist, NOT an allowlist: the same response carried nine
+ * Gemini 3.5/3.6/3.7 Flash models that no hardcoded list knew about yet, and
+ * filtering against MODEL_DISPLAY_NAMES would have hidden every one of them.
+ */
+export const INTERNAL_MODEL_PATTERNS: RegExp[] = [
+    /^chat_\d+$/i,
+    /^tab_/i,
+    /-agent$/i,
+    /-tiered$/i,
+];
+
+/** True when a quota bucket's model id is a backend-internal entry. */
+export function isInternalModelId(modelId: string): boolean {
+    return INTERNAL_MODEL_PATTERNS.some(re => re.test(modelId));
+}
+
 // Secrets storage key prefix
 export const SECRETS_PREFIX = 'ag.account.';
 export const ACCOUNTS_LIST_KEY = 'ag.trackedAccounts';
@@ -83,12 +115,31 @@ export {
 /** gRPC service path for all Language Server endpoints — SSOT */
 export const LS_SERVICE_PATH = '/exa.language_server_pb.LanguageServerService';
 
+/**
+ * Antigravity's own "Restart Language Server" command.
+ *
+ * The LS receives its identity as spawn-time metadata on stdin — the IDE reads
+ * `OAuthPreferences.getOAuthTokenInfo()` and `UserStatus.getUserStatus()` from
+ * USS immediately after spawning the process and hands them over. There is no
+ * runtime re-keying path: `RegisterGdmUser` answers 200 with an empty body and
+ * leaves a live LS on its original account. Restarting is therefore the only
+ * way to make an already-running LS adopt a different identity.
+ */
+export const AG_CMD_RESTART_LS = 'antigravity.restartLanguageServer';
+
+/**
+ * Pre-2.5 fallback. In 2.5.x this command only emits a telemetry event, so it
+ * cannot move the identity — it is kept because older builds wired real session
+ * re-establishment behind it and we still support them.
+ */
+export const AG_CMD_AUTH_REFRESH = 'antigravity.handleAuthRefresh';
+
 
 
 import * as vscode from 'vscode';
 
 // Platform-aware paths — re-exported from shared SSOT (vscode-free)
-export { isMac, isLinux, isWindows, STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP } from './shared/agPaths';
+export { isMac, isLinux, isWindows, STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs } from './shared/agPaths';
 
 /** Unified CSRF token extraction regex — SSOT for process discovery */
 export const CSRF_TOKEN_RE = /--csrf_token[\s=]+([\w-]+)/;

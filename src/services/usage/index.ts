@@ -15,7 +15,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { BRAIN_DIR } from '../../shared/agPaths';
 import { ServerInfo, DeepUsageStats } from '../../types';
 import { RpcDirectClient } from '../rpcDirectClient';
 import { callLsJson } from '../../utils/lsClient';
@@ -28,7 +28,7 @@ import {
 import { aggregateFromPerConvo, extractTokens } from './aggregator';
 import { StatsCache } from './cache';
 import { ProcessLock } from './processLock';
-import { getGlobalIndexData } from '../../shared/titleResolver';
+import { getGlobalIndexData, getConversationSummariesData } from '../../shared/titleResolver';
 import { concurrentPool } from './pool';
 
 const log = createLogger('UsageStats');
@@ -121,8 +121,6 @@ export class UsageStatsService {
     ): Promise<DeepUsageStats | null> {
         try {
             this.rawFetchCounts = {};
-            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-
 
             const allIds = this.discoverConversationIds();
 
@@ -160,7 +158,7 @@ export class UsageStatsService {
             if (cold.length === 0) {
                 log.diag('twoPhaseFullFetch: no cold conversations — writing cache and returning Phase 1 result');
                 const entryCounts = this.buildEntryCounts();
-                this.cache.write(hotData, allIds, hotStats, summaries.titleMap, summaries.stepCounts, entryCounts);
+                this.cache.write(hotData, allIds, hotStats, summaries.titleMap, summaries.stepCounts, entryCounts, this.collectMtimes(allIds));
                 return hotStats;
             }
 
@@ -180,7 +178,7 @@ export class UsageStatsService {
 
             // Build entryCounts for offset-based delta on next incremental
             const entryCounts = this.buildEntryCounts();
-            this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts, entryCounts);
+            this.cache.write(merged, allIds, fullStats, summaries.titleMap, summaries.stepCounts, entryCounts, this.collectMtimes(allIds));
             log.info(`twoPhaseFullFetch: done — ${fullStats.totalCalls} calls, ${Object.keys(merged).length} convos`);
 
             if (onBackfillComplete) onBackfillComplete(fullStats);
@@ -199,12 +197,11 @@ export class UsageStatsService {
      * Partition conversation IDs into hot (mtime > cutoff) and cold.
      */
     private partitionByMtime(ids: string[], cutoffMs: number): { hot: string[]; cold: string[] } {
-        const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
         const hot: string[] = [];
         const cold: string[] = [];
         for (const cid of ids) {
             try {
-                const stat = fs.statSync(path.join(brainDir, cid));
+                const stat = fs.statSync(path.join(BRAIN_DIR, cid));
                 if (stat.mtimeMs > cutoffMs) {
                     hot.push(cid);
                 } else {
@@ -241,13 +238,29 @@ export class UsageStatsService {
             this.currentStepCounts = summaries.stepCounts;
 
             const cachedStepCounts = diskCache.stepCounts || {};
+            const currentMtimes = this.collectMtimes(allIds);
+            const cachedMtimes = diskCache.mtimes || {};
+            let seeded = 0;
             const changedIds = allIds.filter(id => {
                 if (!cachedSet.has(id)) return false; // already in newIds
+                // stepCount when the LS still reports this conversation...
                 const currentCount = summaries.stepCounts.get(id) ?? 0;
                 const cachedCount = cachedStepCounts[id] ?? 0;
-                return currentCount > cachedCount;
+                if (currentCount > cachedCount) return true;
+                // ...otherwise fall back to the brain directory's mtime, which
+                // is the only signal that survives 2.5.x's near-empty index.
+                const cachedM = cachedMtimes[id];
+                // No recorded mtime yet — seed it rather than calling it changed.
+                // Treating "unknown" as "changed" made the first run after an
+                // upgrade re-fetch every conversation at once, saturating the
+                // language server (and stalling any switch running alongside it).
+                if (cachedM === undefined) { seeded++; return false; }
+                return (currentMtimes[id] ?? 0) > cachedM;
             });
-            log.diag(`incrementalRefresh: ${changedIds.length} conversations changed (stepCount delta)`);
+            if (seeded > 0) {
+                log.info(`incrementalRefresh: seeded mtime for ${seeded} conversations (not re-fetched)`);
+            }
+            log.diag(`incrementalRefresh: ${changedIds.length} conversations changed (stepCount or mtime delta)`);
 
             const dirtyIds = [...new Set([...newIds, ...changedIds])];
 
@@ -306,7 +319,7 @@ export class UsageStatsService {
 
             this.deepStatsCache = stats;
             this.currentPerConvo = merged;
-            this.cache.write(merged, mergedIds, stats, summaries.titleMap, summaries.stepCounts, entryCounts);
+            this.cache.write(merged, mergedIds, stats, summaries.titleMap, summaries.stepCounts, entryCounts, currentMtimes);
 
             log.info(`incrementalRefresh: complete — totalCalls=${stats.totalCalls} (${newIds.length} new + ${changedIds.length} changed convos updated)`);
             return true;
@@ -601,6 +614,19 @@ export class UsageStatsService {
             log.warn('Failed to fetch global index data:', e.message);
         }
 
+        // Phase 1b: Antigravity 2.6 index (conversation_summaries.db). Newer
+        // than the vscdb blob, which 2.6 no longer updates, so it wins.
+        try {
+            const v26 = await getConversationSummariesData();
+            for (const [id, title] of v26.titleMap.entries()) titleMap.set(id, title);
+            for (const [id, count] of v26.stepCounts.entries()) stepCounts.set(id, count);
+            if (v26.allIds.size > 0) {
+                log.info(`fetchTrajectorySummaries: ${v26.titleMap.size} titles, ${v26.stepCounts.size} stepCounts from conversation_summaries.db`);
+            }
+        } catch (e: any) {
+            log.warn('conversation_summaries.db read failed:', e?.message);
+        }
+
         // Phase 2: Fetch current workspace stats via LS
 
         try {
@@ -618,8 +644,9 @@ export class UsageStatsService {
                 const [firstId, firstVal] = entries[0];
                 log.diag(`fetchTrajectorySummaries: sample fields for ${firstId.substring(0, 12)}: [${Object.keys(firstVal as any).join(', ')}]`);
             } else {
-                log.warn('fetchTrajectorySummaries: trajectorySummaries is empty — no conversations visible to this LS instance');
-                log.warn(`fetchTrajectorySummaries: raw response keys: [${Object.keys(trajResp).join(', ')}]`);
+                // Expected on 2.6: hubs answer with an empty map and the
+                // index comes from conversation_summaries.db above.
+                log.diag('fetchTrajectorySummaries: LS returned no trajectory summaries');
             }
 
             for (const [id, v] of entries) {
@@ -656,9 +683,30 @@ export class UsageStatsService {
         return result.stats;
     }
 
+    /**
+     * Snapshot each conversation's brain directory mtime.
+     *
+     * This is the only reliable "conversation changed" signal on Antigravity
+     * 2.5.x. `GetAllCascadeTrajectories` no longer returns the full index —
+     * each language server reports only the handful of conversations it
+     * currently holds (measured: 2 from the global LS, 1 from the workspace LS,
+     * against 107 on disk) — and state.vscdb keeps just a single entry. That
+     * left stepCount deltas permanently empty, so an existing conversation
+     * could grow forever without ever being re-fetched. The `.pb` files are no
+     * help either: they stopped being rewritten on save.
+     */
+    private collectMtimes(ids: string[]): Record<string, number> {
+        const out: Record<string, number> = {};
+        for (const cid of ids) {
+            try { out[cid] = fs.statSync(path.join(BRAIN_DIR, cid)).mtimeMs; }
+            catch { /* removed between readdir and stat */ }
+        }
+        return out;
+    }
+
     /** Scan ~/.gemini/antigravity/brain/ for conversation UUIDs */
     private discoverConversationIds(): string[] {
-        const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
+        const brainDir = BRAIN_DIR;
         if (!fs.existsSync(brainDir)) {
             log.warn(`discoverConversationIds: brain dir does not exist: ${brainDir}`);
             return [];

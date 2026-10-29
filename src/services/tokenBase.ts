@@ -199,6 +199,39 @@ function readRuleTrigger(filePath: string): 'always_on' | 'model_decision' | 'ma
 }
 
 /** Categorize raw scope items into rules/skills/workflows (trigger=always_on default) */
+/**
+ * Workspace rules, skills and workflows straight from disk, in the shape
+ * parseContextScope produces: .agents/ (current) and .agent/ (older).
+ * Skills are directories; their size is SKILL.md's.
+ */
+function scanAgentDirs(workspaceFsPath: string): Array<{ uri: string; relPath: string; sizeBytes: number }> {
+    const out: Array<{ uri: string; relPath: string; sizeBytes: number }> = [];
+    for (const root of ['.agents', '.agent']) {
+        for (const kind of ['rules', 'workflows', 'skills']) {
+            const dir = path.join(workspaceFsPath, root, kind);
+            let names: string[];
+            try { names = fs.readdirSync(dir); } catch { continue; }
+            for (const name of names) {
+                if (name.startsWith('.')) continue;
+                const full = path.join(dir, name);
+                let size = 0;
+                try {
+                    const st = fs.statSync(full);
+                    if (kind === 'skills') {
+                        if (!st.isDirectory()) continue;
+                        size = fs.statSync(path.join(full, 'SKILL.md')).size;
+                    } else {
+                        if (!st.isFile() || !name.endsWith('.md')) continue;
+                        size = st.size;
+                    }
+                } catch { continue; }
+                out.push({ uri: 'file://' + full, relPath: `${root}/${kind}/${name}`, sizeBytes: size });
+            }
+        }
+    }
+    return out;
+}
+
 function categorizeAgentItems(
     items: Array<{ relPath: string; sizeBytes: number }>,
     workspaceName: string
@@ -296,6 +329,14 @@ export class TokenBaseService {
         try {
             const buf = await this.callHttp(serverInfo, `${LS_SERVICE_PATH}/GetMatchingContextScopeItems`);
             let raw = parseContextScope(buf);
+
+            // Antigravity 2.6 hubs answer this RPC with nothing at all, for
+            // any request shape (measured 2026-10-29 on workspaces that do
+            // have rules, skills and workflows). Read the same folders off disk.
+            if (raw.length === 0 && workspaceFsPath) {
+                raw = scanAgentDirs(workspaceFsPath);
+                if (raw.length > 0) log.diag(`Workspace context: LS returned nothing, ${raw.length} item(s) from disk`);
+            }
 
             // Guard: if LS returned items from a DIFFERENT workspace (race on first boot),
             // filter to only items whose URI matches this workspace's path.
