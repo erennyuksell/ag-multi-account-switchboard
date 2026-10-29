@@ -491,8 +491,13 @@ body {
     transition: max-height .25s ease;
 }
 
+/* Capped so the slide animation still has a target, but scrollable: a tracked
+   account lists every model the quota API returns (13+ rows after tier
+   grouping), which overflowed the old fixed 900px cap and was cut off with no
+   way to reach the last models (issue #11). */
 .acct.open .m-details {
-    max-height: 900px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* ─── Quota Pool Headers (Expanded) ─── */
@@ -1337,8 +1342,11 @@ body {
     transition: max-height .25s ease;
 }
 
+/* Same cap-and-scroll as account cards: a long skill or MCP tool list would
+   otherwise be cut off at the old fixed 600px. */
 .cat-card.open .cat-items {
-    max-height: 600px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 .cat-item {
@@ -1458,7 +1466,8 @@ body {
 }
 
 .mcp-server.open .mcp-tools {
-    max-height: 800px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* ─── Workspace Context Section ─── */
@@ -1624,7 +1633,8 @@ body {
 }
 
 .wc-group.open .wc-items {
-    max-height: 1200px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* Individual workspace item rows */
