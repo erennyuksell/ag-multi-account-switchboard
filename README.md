@@ -18,10 +18,12 @@
 <p align="center">
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?logo=apple"/>
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/>
-  <img alt="Version" src="https://img.shields.io/badge/version-3.2.1-green"/>
+  <img alt="Version" src="https://img.shields.io/badge/version-3.3.0-green"/>
 </p>
 
 > **🖥️ Platform Support** — macOS is fully tested. Linux and Windows paths are included based on standard Antigravity installation locations and have not been validated yet.
+>
+> **Antigravity 2.6:** account switching currently works on **macOS only**. 2.6 keeps the signed-in account in the OS credential store, and only the macOS Keychain is supported so far. Quotas, Token Budget and Usage Stats work on every platform.
 
 ---
 
@@ -137,16 +139,16 @@ Track token usage and estimated costs across **every** Antigravity conversation 
 
 ## 🏗️ Architecture
 
-The extension communicates with **two local Language Server instances** that the Antigravity IDE runs:
+The extension reads from the servers the Antigravity IDE runs locally. Which ones depends on the IDE version, detected at runtime:
 
-| Component | Source | Data |
-|-----------|--------|------|
-| **Workspace LS** | `--workspace_id` process | Quota, token budget, workspace context |
-| **Global LS** | No workspace_id | Cascade trajectory, context window, stream updates |
+| IDE | Servers | Where the active account lives |
+|-----|---------|--------------------------------|
+| **2.0 – 2.5** | A language server per window (`--workspace_id`) plus a global one | The IDE's shared state (USS); a window's language server restarts when the account email there changes |
+| **2.6+** | One agent hub per window (`~/.gemini/bin/agy --hub`) | macOS Keychain item `gemini` / `antigravity`, fallback `~/.gemini/jetski-standalone-oauth-token`; hubs read it only when they start |
 
-Server discovery uses PID-based process scanning with `lsof` port resolution (macOS/Linux) or `PowerShell`/`netstat` (Windows). Workspace isolation via `--workspace_id` filtering prevents wrong-LS contamination.
+Both serve the same RPCs, so quota, token budget and context window code is shared. Server discovery uses PID-based process scanning with `lsof` port resolution (macOS/Linux) or `PowerShell`/`netstat` (Windows), filtered to the current workspace.
 
-For account switching, the extension uses a **Readiness Gate** (Kubernetes-style probe) to ensure the LS has reconnected its USS IPC channel before sending `registerGdmUser`, preventing silent stale-credential issues.
+**Switching accounts** writes the new account where that IDE version reads it, then makes every window's server pick it up: on 2.5 by changing the email in USS (the IDE restarts the server) and re-broadcasting the credentials once it is back; on 2.6 by restarting each window's hub, within the IDE's crash-recovery budget. A switch is confirmed only when every window's server reports the new account.
 
 ---
 
@@ -168,7 +170,7 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 
 | Button | Action |
 |--------|--------|
-| **`+`** | Add account via Google OAuth |
+| **`+`** | Add account via Google OAuth — open the default browser, or copy the sign-in link to open it in a specific browser profile |
 | **`🔑`** | Add account by pasting a refresh token |
 
 ---
@@ -213,6 +215,7 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 - **OAuth tokens** stored in VS Code's encrypted `SecretStorage` (macOS Keychain / Windows Credential Store / Linux libsecret)
 - Quota data fetched directly from Google's Antigravity API using your own credentials
 - Token budget, context window, and workspace context read from the **local** Language Server — no network requests leave your machine
+- **Switching accounts writes Antigravity's own account storage**: the IDE's shared state on 2.0–2.5; on 2.6 also the macOS Keychain item `gemini` / `antigravity` and `~/.gemini/jetski-standalone-oauth-token`. Before writing, the token's owner is verified with Google
 - Usage stats aggregated from local conversation data on disk
 - **No telemetry. No external servers. All data stays local.**
 
@@ -224,10 +227,10 @@ For account switching, the extension uses a **Readiness Gate** (Kubernetes-style
 |-------|-----|
 | **"Request timed out"** on a tracked account | Remove and re-add the account to refresh OAuth tokens |
 | **"Server Not Found"** | Ensure the Antigravity Language Server is running. Tracked account quotas work independently |
-| **Account switch not reflected** | The panel watches for changes automatically. If delayed, click ↺ |
+| **Account switch not reflected** | A switch normally lands in 4–6 s in every window. On Antigravity 2.6 under Linux or Windows switching is not supported yet. Otherwise click ↺, and check the `AG Panel` output channel |
 | **Context window empty** | The Dual-LS discovery may need a moment. Click Refresh or wait for auto-sync |
 | **Windows: token budget not showing** | Ensure LS is running. The extension uses PowerShell for process discovery |
-| **Missing conversations** | The Conversation Guard auto-detects this. Click "Fix Now" in the warning banner, or run `AG Switchboard: Fix Missing Conversations` from the command palette |
+| **Missing conversations** | (2.0–2.5 only; 2.6 maintains its own index) The Conversation Guard auto-detects this. Click "Fix Now" in the warning banner, or run `AG Switchboard: Fix Missing Conversations` from the command palette |
 
 ---
 
