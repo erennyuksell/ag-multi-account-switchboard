@@ -5,7 +5,6 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { DeepUsageStats } from '../../types';
 import {
     CACHE_SCHEMA_VERSION,
@@ -16,13 +15,14 @@ import {
 } from './types';
 import { aggregateFromPerConvo } from './aggregator';
 import { createLogger } from '../../utils/logger';
+import { BRAIN_DIR } from '../../shared/agPaths';
 
 const log = createLogger('StatsCache');
 
 export class StatsCache {
     /** Path to the disk cache file */
     get filePath(): string {
-        return path.join(os.homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.json');
+        return path.join(BRAIN_DIR, '.deep_stats_cache.json');
     }
 
     /** Read cached data from disk. Returns null if missing or corrupted. */

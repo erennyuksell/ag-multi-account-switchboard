@@ -12,14 +12,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cp from 'child_process';
 import * as os from 'os';
-import { STATE_DB_PATH, CONVERSATIONS_DIR, BRAIN_DIR, isMac, isWindows } from '../shared/agPaths';
+import { pathToFileURL } from 'url';
+import { STATE_DB_PATH, CONVERSATIONS_DIR, CONVERSATION_SUMMARIES_DB_PATH, AG_DATA_DIR, getConversationFilePath, getConversationMtimeMs, listConversationIds, isMac, isWindows } from '../shared/agPaths';
 import {
     decodeVarint, skipProtobufField,
     stripFieldFromProtobuf, encodeLengthDelimited, encodeStringField,
     buildTimestampFields, hasTimestampFields,
 } from '../shared/protobuf';
 import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
-import { dbGet, dbExecRaw } from '../shared/db';
+import { dbGet, dbExecRaw, dbAll, dbExecAt } from '../shared/db';
 import { createWorkerLogger } from '../shared/workerLogger';
 
 // ─── Worker-local state ──────────────────────────────────────────────
@@ -147,10 +148,10 @@ function resolveTitle(cid: string, existingTitles: Record<string, string>): { ti
     if (brain && !isGenericTitle(brain)) return { title: brain, source: 'brain' };
     const transcript = getTitleFromTranscript(cid);
     if (transcript && !isGenericTitle(transcript)) return { title: transcript, source: 'transcript' };
-    const pbPath = path.join(CONVERSATIONS_DIR, `${cid}.pb`);
+    const convFile = getConversationFilePath(cid);
     let dateStr = '';
-    if (fs.existsSync(pbPath)) {
-        dateStr = ` (${fs.statSync(pbPath).mtime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`;
+    if (convFile) {
+        dateStr = ` (${fs.statSync(convFile).mtime.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })})`;
     }
     return { title: `Chat${dateStr} ${cid.substring(0, 6)}`, source: 'fallback' };
 }
@@ -179,11 +180,20 @@ function buildTrajectoryEntry(cid: string, title: string, existingInnerData: Buf
 
 // ─── AG App Path ─────────────────────────────────────────────────────
 function getAGAppPath(): string {
-    if (isMac) return 'open -a Antigravity';
+    if (isMac) {
+        const apps = [
+            '/Applications/Antigravity IDE.app',
+            '/Applications/Antigravity.app',
+        ];
+        const installed = apps.find(a => fs.existsSync(a));
+        return installed ? `open -a "${path.basename(installed, '.app')}"` : 'open -a Antigravity';
+    }
     if (isWindows) {
         const localApp = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
         const candidates = [
+            path.join(localApp, 'Programs', 'Antigravity IDE', 'Antigravity IDE.exe'),
             path.join(localApp, 'Programs', 'Antigravity', 'Antigravity.exe'),
+            path.join(localApp, 'Antigravity IDE', 'Antigravity IDE.exe'),
             path.join(localApp, 'Antigravity', 'Antigravity.exe'),
             path.join(os.homedir(), '.antigravity', 'Antigravity.exe'),
         ];
@@ -191,17 +201,159 @@ function getAGAppPath(): string {
             if (fs.existsSync(c)) return `"${c}"`;
         }
         // Fallback: try `where` to find in PATH
-        try {
-            const found = cp.execSync('where Antigravity', { encoding: 'utf8' }).trim().split('\n')[0];
-            if (found && fs.existsSync(found.trim())) return `"${found.trim()}"`;
-        } catch { /* not in PATH */ }
+        for (const exe of ['Antigravity IDE', 'Antigravity']) {
+            try {
+                const found = cp.execSync(`where "${exe}"`, { encoding: 'utf8' }).trim().split('\n')[0];
+                if (found && fs.existsSync(found.trim())) return `"${found.trim()}"`;
+            } catch { /* not in PATH */ }
+        }
         // Last resort: assume default path
         return `"${candidates[0]}"`;
     }
-    // Linux: try known path first, fall back to PATH
-    const linuxPath = path.join(os.homedir(), '.antigravity', 'antigravity', 'bin', 'antigravity');
-    if (fs.existsSync(linuxPath)) return `"${linuxPath}"`;
-    return 'antigravity';
+    // Linux: try known paths first, fall back to PATH
+    const candidates = [
+        '/opt/antigravity-ide/antigravity-ide',
+        '/opt/antigravity/antigravity',
+        path.join(os.homedir(), '.antigravity', 'antigravity', 'bin', 'antigravity'),
+        path.join(os.homedir(), '.local', 'share', 'antigravity', 'antigravity'),
+    ];
+    for (const c of candidates) {
+        if (fs.existsSync(c)) return `"${c}"`;
+    }
+    return 'antigravity-ide';
+}
+
+// ─── New-Architecture Summary Index Repair ──────────────────────────
+
+interface ResolvedConversation {
+    cid: string;
+    title: string;
+    source: string;
+    innerData: Buffer | null;
+}
+
+function sqlQuote(value: string): string {
+    return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Format a JS timestamp the way Antigravity's SQLite rows do (UTC). */
+function toSqliteTimestamp(ms: number): string {
+    return new Date(ms).toISOString().replace('T', ' ').replace('Z', '+00:00');
+}
+
+/** Extract exact `file://` strings from top-level protobuf length-delimited fields. */
+function extractFileUris(buf: Buffer): string[] {
+    const uris: string[] = [];
+    let pos = 0;
+    while (pos < buf.length) {
+        try {
+            const { value: tag, pos: afterTag } = decodeVarint(buf, pos);
+            const wireType = tag & 7;
+            if (wireType === 2) {
+                const { value: len, pos: dataStart } = decodeVarint(buf, afterTag);
+                if (len <= 0 || dataStart + len > buf.length) break;
+                const text = buf.subarray(dataStart, dataStart + len).toString('utf8');
+                if (text.startsWith('file://')) uris.push(text);
+            }
+            pos = skipProtobufField(buf, afterTag, wireType);
+        } catch { break; }
+    }
+    return uris;
+}
+
+/** Extract workspace URIs from a conversation DB's trajectory metadata. */
+async function readWorkspaceUris(cid: string, fallbackFolders: string[]): Promise<string[]> {
+    const uris = new Set<string>();
+    const convPath = getConversationFilePath(cid);
+
+    if (convPath?.endsWith('.db')) {
+        try {
+            const rows = await dbAll(convPath, "SELECT data FROM trajectory_metadata_blob WHERE id='main'");
+            for (const row of rows ?? []) {
+                const raw = row.data;
+                const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw ?? ''));
+                for (const uri of extractFileUris(buf)) uris.add(uri);
+            }
+        } catch { /* metadata unavailable */ }
+    }
+
+    if (uris.size === 0) {
+        for (const folder of fallbackFolders) {
+            try { uris.add(pathToFileURL(folder).href); } catch { /* ignore */ }
+        }
+    }
+
+    return [...uris];
+}
+
+/** Count trajectory steps for a .db conversation (legacy .pb files return 0). */
+async function countConversationSteps(cid: string): Promise<number> {
+    const convPath = getConversationFilePath(cid);
+    if (!convPath || !convPath.endsWith('.db')) return 0;
+    try {
+        const rows = await dbAll(convPath, 'SELECT COUNT(*) AS n FROM steps');
+        const count = Number(rows?.[0]?.n ?? 0);
+        return Number.isFinite(count) ? count : 0;
+    } catch { return 0; }
+}
+
+/**
+ * Insert conversations that exist on disk but are absent from the 2.6+ sidebar
+ * index. This is the new-architecture counterpart to rebuilding the legacy
+ * trajectorySummaries protobuf; without it the Guard's fix would not make
+ * missing conversations visible in the sidebar.
+ */
+export async function repairSummaryIndex(
+    resolved: ResolvedConversation[],
+    workspaceFolders: string[],
+): Promise<void> {
+    if (!fs.existsSync(CONVERSATION_SUMMARIES_DB_PATH)) {
+        log.info('No conversation_summaries.db — skipping new index repair.');
+        return;
+    }
+
+    const rows = await dbAll(CONVERSATION_SUMMARIES_DB_PATH, 'SELECT conversation_id FROM conversation_summaries');
+    if (rows === null) {
+        log.warn('conversation_summaries.db exists but could not be read — skipping repair.');
+        return;
+    }
+
+    const indexed = new Set(rows.map(row => String(row.conversation_id ?? '').trim()).filter(Boolean));
+    const missing = resolved.filter(item => !indexed.has(item.cid));
+    if (missing.length === 0) {
+        log.info(`conversation_summaries.db already has all ${resolved.length} conversations.`);
+        return;
+    }
+
+    log.info(`conversation_summaries.db: ${missing.length} missing conversation(s) — inserting.`);
+    const appDataDir = path.basename(AG_DATA_DIR);
+    let inserted = 0;
+
+    for (const item of missing) {
+        const convPath = getConversationFilePath(item.cid);
+        const mtimeMs = convPath ? fs.statSync(convPath).mtimeMs : Date.now();
+        const timestamp = toSqliteTimestamp(mtimeMs);
+        const workspaceUris = await readWorkspaceUris(item.cid, workspaceFolders);
+        const stepCount = await countConversationSteps(item.cid);
+        const title = item.title || `Chat ${item.cid.substring(0, 8)}`;
+
+        const sql = `INSERT OR IGNORE INTO conversation_summaries (` +
+            `conversation_id,title,preview,step_count,last_modified_time,workspace_uris,` +
+            `status,last_user_input_time,app_data_dir` +
+            `) VALUES (` +
+            `${sqlQuote(item.cid)},${sqlQuote(title)},${sqlQuote(title)},${stepCount},` +
+            `${sqlQuote(timestamp)},${sqlQuote(JSON.stringify(workspaceUris))},` +
+            `'CASCADE_RUN_STATUS_IDLE',${sqlQuote(timestamp)},${sqlQuote(appDataDir)}` +
+            `);`;
+
+        if (await dbExecAt(CONVERSATION_SUMMARIES_DB_PATH, sql)) {
+            inserted++;
+        } else {
+            log.warn(`conversation_summaries.db: insert failed for ${item.cid}`);
+        }
+    }
+
+    log.info(`conversation_summaries.db: inserted ${inserted}/${missing.length} conversation(s).`);
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -235,41 +387,44 @@ async function main(): Promise<void> {
         log.info('Main AG process exited.');
     }
 
-    // 2. Wait for WAL checkpoint
-    const walPath = STATE_DB_PATH + '-wal';
-    let retries = 20;
-    while (fs.existsSync(walPath) && retries-- > 0) {
-        log.info(`WAL file exists, waiting... (${retries} retries left)`);
-        await new Promise(r => setTimeout(r, 1000));
-    }
-    if (fs.existsSync(walPath)) {
-        log.warn('WAL still exists, attempting anyway...');
+    // 2. Wait for WAL checkpoints (both indexes)
+    const walPaths = [STATE_DB_PATH, CONVERSATION_SUMMARIES_DB_PATH]
+        .filter(Boolean)
+        .map(dbPath => dbPath + '-wal');
+    for (const walPath of walPaths) {
+        let retries = 20;
+        while (fs.existsSync(walPath) && retries-- > 0) {
+            log.info(`WAL file exists (${path.basename(walPath)}), waiting... (${retries} retries left)`);
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        if (fs.existsSync(walPath)) {
+            log.warn(`WAL still exists (${path.basename(walPath)}), attempting anyway...`);
+        }
     }
 
     // 3. Validate paths
-    if (!fs.existsSync(STATE_DB_PATH)) { log.error('DB not found'); relaunchAG(relaunchInfo); return; }
+    const hasStateDb = fs.existsSync(STATE_DB_PATH);
+    const hasSummariesDb = fs.existsSync(CONVERSATION_SUMMARIES_DB_PATH);
+    if (!hasStateDb && !hasSummariesDb) { log.error('No index DB found'); relaunchAG(relaunchInfo); return; }
     if (!fs.existsSync(CONVERSATIONS_DIR)) { log.error('Conv dir not found'); relaunchAG(relaunchInfo); return; }
 
-    // 4. Read existing index via shared/db.ts
-    log.info('Reading existing index...');
+    // 4. Read existing legacy index via shared/db.ts
+    log.info(`Reading existing index... (stateDb=${hasStateDb}, summariesDb=${hasSummariesDb})`);
     let rawB64 = '';
-    try {
-        rawB64 = await dbGet('antigravityUnifiedStateSync.trajectorySummaries') || '';
-    } catch { /* will rebuild from scratch */ }
-    if (!rawB64) {
-        log.warn('No existing index found, building from scratch.');
+    if (hasStateDb) {
+        try {
+            rawB64 = await dbGet('antigravityUnifiedStateSync.trajectorySummaries') || '';
+        } catch { /* will rebuild from scratch */ }
+        if (!rawB64) {
+            log.warn('No existing legacy index found, building from scratch.');
+        }
     }
 
-    // 5. Discover conversations
-    const pbFiles = fs.readdirSync(CONVERSATIONS_DIR).filter(f => f.endsWith('.pb'));
-    if (!pbFiles.length) { log.warn('No .pb files found.'); relaunchAG(relaunchInfo); return; }
-    pbFiles.sort((a, b) => {
-        const ma = fs.statSync(path.join(CONVERSATIONS_DIR, a)).mtimeMs;
-        const mb = fs.statSync(path.join(CONVERSATIONS_DIR, b)).mtimeMs;
-        return mb - ma;
-    });
-    const conversationIds = pbFiles.map(f => f.replace('.pb', ''));
-    log.info(`Found ${conversationIds.length} conversations on disk.`);
+    // 5. Discover conversations (.db in Antigravity 2.6+, .pb in legacy builds)
+    const conversationIds = listConversationIds()
+        .sort((a, b) => getConversationMtimeMs(b) - getConversationMtimeMs(a));
+    if (!conversationIds.length) { log.warn('No .pb/.db files found.'); relaunchAG(relaunchInfo); return; }
+    log.info(`Found ${conversationIds.length} conversations on disk (.db + .pb).`);
 
     // 6. Extract existing metadata
     const { titles: existingTitles, innerBlobs } = extractExistingMetadata(rawB64);
@@ -287,38 +442,45 @@ async function main(): Promise<void> {
     }
     log.info(`Titles — Preserved: ${stats.preserved}, Brain: ${stats.brain}, Transcript: ${stats.transcript}, Fallback: ${stats.fallback}`);
 
-    // 8. Build new index
-    let resultBytes = Buffer.alloc(0);
-    for (const { cid, title, innerData } of resolved) {
-        const pbPath = path.join(CONVERSATIONS_DIR, `${cid}.pb`);
-        const pbMtime = fs.existsSync(pbPath) ? fs.statSync(pbPath).mtimeMs / 1000 : null;
-        const entry = buildTrajectoryEntry(cid, title, innerData, pbMtime);
-        resultBytes = Buffer.concat([resultBytes, encodeLengthDelimited(1, entry)]);
-    }
+    // 8. Build new legacy index (only when state.vscdb exists)
+    if (hasStateDb) {
+        let resultBytes = Buffer.alloc(0);
+        for (const { cid, title, innerData } of resolved) {
+            const convPath = getConversationFilePath(cid);
+            const convMtime = convPath ? fs.statSync(convPath).mtimeMs / 1000 : null;
+            const entry = buildTrajectoryEntry(cid, title, innerData, convMtime);
+            resultBytes = Buffer.concat([resultBytes, encodeLengthDelimited(1, entry)]);
+        }
 
-    // 9. Backup old value
-    if (rawB64) {
+        // 9. Backup old value
+        if (rawB64) {
+            try {
+                const backupPath = path.join(path.dirname(STATE_DB_PATH), 'trajectorySummaries_backup.txt');
+                fs.writeFileSync(backupPath, rawB64, 'utf8');
+                log.info('Backup saved.');
+            } catch (e: unknown) { log.warn(`Backup warning: ${(e as Error).message}`); }
+        }
+
+        // 10. Write new legacy index via shared/db.ts
+        const encoded = resultBytes.toString('base64');
+        const escapedVal = encoded.replace(/'/g, "''");
         try {
-            const backupPath = path.join(path.dirname(STATE_DB_PATH), 'trajectorySummaries_backup.txt');
-            fs.writeFileSync(backupPath, rawB64, 'utf8');
-            log.info('Backup saved.');
-        } catch (e: unknown) { log.warn(`Backup warning: ${(e as Error).message}`); }
+            const ok = await dbExecRaw(`UPDATE ItemTable SET value='${escapedVal}' WHERE key='antigravityUnifiedStateSync.trajectorySummaries';`);
+            if (!ok) throw new Error('dbExecRaw returned false');
+            log.info(`SUCCESS: Rebuilt legacy index with ${resolved.length} conversations.`);
+        } catch (e: unknown) {
+            log.error(`Writing legacy index failed: ${(e as Error).message}`);
+        }
     }
 
-    // 10. Write new index via shared/db.ts
-    const encoded = resultBytes.toString('base64');
-    const escapedVal = encoded.replace(/'/g, "''");
+    // 11. Repair the 2.6+ sidebar index (conversation_summaries.db)
     try {
-        const ok = await dbExecRaw(`UPDATE ItemTable SET value='${escapedVal}' WHERE key='antigravityUnifiedStateSync.trajectorySummaries';`);
-        if (!ok) throw new Error('dbExecRaw returned false');
-        log.info(`SUCCESS: Rebuilt index with ${resolved.length} conversations.`);
+        await repairSummaryIndex(resolved, relaunchInfo.workspaceFolders || []);
     } catch (e: unknown) {
-        log.error(`Writing index failed: ${(e as Error).message}`);
-        relaunchAG(relaunchInfo);
-        return;
+        log.error(`Repairing conversation_summaries.db failed: ${(e as Error).message}`);
     }
 
-    // 11. Relaunch AG
+    // 12. Relaunch AG
     relaunchAG(relaunchInfo);
 }
 
@@ -367,7 +529,9 @@ function relaunchAG(info: RelaunchInfo): void {
     setTimeout(() => process.exit(0), 3000);
 }
 
-main().catch(e => {
-    log.error(`FATAL: ${e.message}\n${e.stack}`);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch(e => {
+        log.error(`FATAL: ${e.message}\n${e.stack}`);
+        process.exit(1);
+    });
+}

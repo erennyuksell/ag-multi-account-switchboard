@@ -8,6 +8,8 @@ import {
 } from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
 import { dbExec } from '../shared/db';
+import { readHubInfos } from '../shared/hub';
+import { writeHubKeyringToken } from '../shared/keyring';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, LsEndpoint } from '../utils/lsClient';
 import { LS_SERVICE_PATH, RENEWAL_RETRY_DELAY_MS } from '../constants';
 
@@ -37,11 +39,12 @@ const log = createLogger('AccountSwitch');
  * Flow:
  *   1. pushSerializedUpdateIPC → instant name/email in USS
  *   2. setOAuthTokenInfo       → uss-oauth topic update (minimal internal handling)
- *   3. handleAuthRefresh       → createSession → _sessionChangeEmitter (profile UI)
- *   4. HTTP registerGdmUser    → LS fetches models + profile from backend
- *   5. HTTP GetUserStatus      → read rich UserStatus from LS memory
- *   6. pushSerializedUpdateIPC → push rich UserStatus to USS → instant model selector + avatar
- *   7. scheduleTokenRenewal    → proactive renewal before expiry (keeps LS alive)
+ *   3. write hub keyring + GetAuthStatus → 2.6+ hub re-reads the new token
+ *   4. handleAuthRefresh       → createSession → _sessionChangeEmitter (profile UI)
+ *   5. HTTP registerGdmUser    → LS fetches models + profile from backend
+ *   6. HTTP GetUserStatus      → read rich UserStatus from LS memory
+ *   7. pushSerializedUpdateIPC → push rich UserStatus to USS → instant model selector + avatar
+ *   8. scheduleTokenRenewal    → proactive renewal before expiry (keeps LS alive)
  */
 export class AccountSwitchService {
 
@@ -55,6 +58,10 @@ export class AccountSwitchService {
     // Race condition guard: monotonically increasing counter per switch call.
     // Polling loops check this to abort if a newer switch has started.
     private switchGeneration = 0;
+
+    // New IDE builds (2.6+) no longer register `antigravity.handleAuthRefresh`.
+    // Cache the result so we only probe/log once per extension lifetime.
+    private authRefreshAvailable: boolean | null = null;
 
     /** Buffer before expiry to trigger refresh (10 minutes in seconds) */
     private static readonly RENEWAL_BUFFER_SECS = 10 * 60;
@@ -121,36 +128,49 @@ export class AccountSwitchService {
                 isGcpTos: false,
             });
 
-            // 4. handleAuthRefresh FIRST — fires IDE's createSession + sessionChangeEmitter.
-            //    This propagates the new token context to LS via USS IPC notification,
-            //    ensuring LS is aware of the new session BEFORE we call registerGdmUser.
-            try {
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-                log.info('handleAuthRefresh completed — session context propagated to LS');
-            } catch (e: any) {
-                log.warn('handleAuthRefresh failed (non-fatal):', e?.message);
+            // 4. Antigravity 2.6+ hub reads auth from the OS keyring, not USS.
+            //    Write the target token, then ask the hub to re-read it via
+            //    GetAuthStatus. This switches the live hub without restarting
+            //    it (and without consuming the extension's recovery budget).
+            if (readHubInfos().length > 0) {
+                const wrote = await writeHubKeyringToken({
+                    email, accessToken, refreshToken, expiryTimestamp,
+                });
+                if (wrote) {
+                    await this.reloadHubAuth();
+                } else {
+                    log.warn('Could not write hub keyring token — hub may keep the previous account');
+                }
             }
 
-            // 5. Readiness Gate — wait for LS to confirm its USS IPC reconnect.
+            // 5. handleAuthRefresh FIRST (legacy IDE) — fires createSession + sessionChangeEmitter.
+            //    This propagates the new token context to LS via USS IPC notification,
+            //    ensuring LS is aware of the new session BEFORE we call registerGdmUser.
+            //    Antigravity 2.6+ removed this command; USS + registerGdmUser is enough there.
+            if (await this.notifyAuthRefresh()) {
+                log.info('handleAuthRefresh completed — session context propagated to LS');
+            }
+
+            // 7. Readiness Gate — wait for LS to confirm its USS IPC reconnect.
             //    Returns discovered endpoints so downstream functions don't need
             //    to re-discover (Gate-Once-Pass-Down pattern).
             //    handleAuthRefresh can temporarily kill LS — the gate retries
             //    endpoint discovery inside its loop until LS comes back.
             const { ready, endpoints } = await this.awaitLSReadiness();
 
-            // 6. registerGdmUser — uses gate-provided endpoints (no independent discovery)
+            // 8. registerGdmUser — uses gate-provided endpoints (no independent discovery)
             await this.callRegisterGdmUser(endpoints);
 
-            // 7. Await email confirmation from LS
+            // 9. Await email confirmation from LS
             const result = await this.pollRichUserStatus(uss, generation, email, endpoints);
             if (!result.confirmed) {
                 log.warn('Email confirmation timed out — LS may not have adopted the new email yet');
             }
 
-            // 8. Schedule proactive token renewal before expiry
+            // 10. Schedule proactive token renewal before expiry
             this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
 
-            // 9. Toast reflects actual state — don't mislead the user
+            // 11. Toast reflects actual state — don't mislead the user
             if (result.confirmed) {
                 vscode.window.showInformationMessage(`✅ Switched to ${email}`);
             } else {
@@ -268,29 +288,76 @@ export class AccountSwitchService {
                 await delay(intervalMs);
                 continue;
             }
-            const ls = endpoints[0];
 
-            try {
-                const body = await callLSEndpoint(
-                    ls,
-                    `${LS_SERVICE_PATH}/GetUserStatus`,
-                    ca,
-                );
-                const userStatus = body ? extractField(body, 1) : null;
-                if (!userStatus || userStatus.length <= 5) { await delay(intervalMs); continue; }
+            // Try all endpoints (hub first) so one stale discovery file cannot
+            // block a healthy legacy hub/LS from being used.
+            for (const ls of endpoints) {
+                try {
+                    const body = await callLSEndpoint(
+                        ls,
+                        `${LS_SERVICE_PATH}/GetUserStatus`,
+                        ca,
+                    );
+                    const userStatus = body ? extractField(body, 1) : null;
+                    if (!userStatus || userStatus.length <= 5) continue;
 
-                const email = extractStringField(userStatus, 7);
-                if (!email) { await delay(intervalMs); continue; }
+                    const email = extractStringField(userStatus, 7);
+                    if (!email) continue;
 
-                log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
-                return { ready: true, endpoints };
-            } catch (e: any) {
-                log.info(`LS readiness gate: probe failed (${e?.message}), waiting...`);
+                    log.info(`LS readiness gate: READY (email=${email}, ${Date.now() - start}ms, ${endpoints.length} LS)`);
+                    const ordered = [ls, ...endpoints.filter(e => e !== ls)];
+                    return { ready: true, endpoints: ordered };
+                } catch (e: any) {
+                    log.info(`LS readiness gate: probe failed on port ${ls.port} (${e?.message}), trying next...`);
+                }
             }
             await delay(intervalMs);
         }
         log.warn(`LS readiness gate: TIMEOUT after ${maxWaitMs}ms — proceeding best-effort`);
         return { ready: false, endpoints: [] };
+    }
+
+    // ==================== IDE Session Notification ====================
+
+    /**
+     * Make every live 2.6+ hub re-read its token from the OS keyring.
+     * `GetAuthStatus` is the hub's keyring refresh trigger — no restart needed.
+     */
+    private async reloadHubAuth(): Promise<void> {
+        const hubs = readHubInfos().filter(h => h.httpsPort > 0);
+        if (hubs.length === 0) return;
+
+        const ca = loadLSCert();
+        const results = await Promise.allSettled(
+            hubs.map(hub => callLSEndpoint(
+                { port: hub.httpsPort, csrf: hub.csrfToken },
+                `${LS_SERVICE_PATH}/GetAuthStatus`,
+                ca,
+            )),
+        );
+        results.forEach((result, i) => {
+            log.info(`Hub auth reload on port=${hubs[i].httpsPort}: ${result.status === 'fulfilled' ? 'OK' : (result as PromiseRejectedResult).reason}`);
+        });
+    }
+
+    /**
+     * Ask the IDE to refresh its auth session (legacy command).
+     *
+     * Antigravity 2.6+ no longer registers `antigravity.handleAuthRefresh`;
+     * the hub consumes USS OAuth changes directly. Probe once, then skip
+     * silently to avoid repeated command-not-found errors.
+     */
+    private async notifyAuthRefresh(): Promise<boolean> {
+        if (this.authRefreshAvailable === false) return false;
+        try {
+            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+            this.authRefreshAvailable = true;
+            return true;
+        } catch {
+            this.authRefreshAvailable = false;
+            log.info('handleAuthRefresh command unavailable — skipping (Antigravity 2.6+)');
+            return false;
+        }
     }
 
     // ==================== LS HTTP Communication ====================
@@ -375,7 +442,7 @@ export class AccountSwitchService {
                 log.info(`FORENSIC EMAIL_MATCH @${elapsed}ms: statusLen=${userStatus.length}B — THIS is pushed to USS`);
 
                 await this.pushUserStatusToUSS(uss, userStatus);
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                await this.notifyAuthRefresh();
 
                 // Continue USS stabilization in background (profile pic, data growth)
                 this.stabilizeUSS(uss, ls, ca, generation, userStatus.length, intervalMs, maxWaitMs - (Date.now() - start))
@@ -437,7 +504,7 @@ export class AccountSwitchService {
                 }
 
                 await this.pushUserStatusToUSS(uss, userStatus);
-                await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+                await this.notifyAuthRefresh();
                 log.info(`USS stabilize: grew ${lastSize} → ${userStatus.length}B`);
                 lastSize = userStatus.length;
                 stableCount = 0;

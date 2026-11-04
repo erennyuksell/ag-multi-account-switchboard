@@ -3,7 +3,7 @@
  * Language Server's cascade trajectory endpoints.
  *
  * Data flow:
- * 1. Scan ~/.gemini/antigravity/brain/ for conversation UUIDs
+ * 1. Scan the active profile's brain/ and conversations/ dirs for UUIDs
  * 2. Fetch metadata for each via parallel batched API calls
  * 3. Aggregate into daily/hourly/model/cascade breakdowns
  *
@@ -14,8 +14,6 @@
  */
 
 import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import { ServerInfo, DeepUsageStats } from '../../types';
 import { RpcDirectClient } from '../rpcDirectClient';
 import { callLsJson } from '../../utils/lsClient';
@@ -30,6 +28,7 @@ import { StatsCache } from './cache';
 import { ProcessLock } from './processLock';
 import { getGlobalIndexData } from '../../shared/titleResolver';
 import { concurrentPool } from './pool';
+import { BRAIN_DIR, getConversationMtimeMs, listConversationIds } from '../../shared/agPaths';
 
 const log = createLogger('UsageStats');
 
@@ -121,9 +120,6 @@ export class UsageStatsService {
     ): Promise<DeepUsageStats | null> {
         try {
             this.rawFetchCounts = {};
-            const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-
-
             const allIds = this.discoverConversationIds();
 
             if (allIds.length === 0) {
@@ -199,19 +195,16 @@ export class UsageStatsService {
      * Partition conversation IDs into hot (mtime > cutoff) and cold.
      */
     private partitionByMtime(ids: string[], cutoffMs: number): { hot: string[]; cold: string[] } {
-        const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
         const hot: string[] = [];
         const cold: string[] = [];
         for (const cid of ids) {
-            try {
-                const stat = fs.statSync(path.join(brainDir, cid));
-                if (stat.mtimeMs > cutoffMs) {
-                    hot.push(cid);
-                } else {
-                    cold.push(cid);
-                }
-            } catch { // EXPECTED: directory deleted between readdir and stat — treat as hot
-                // Can't stat → treat as hot (fetch it)
+            // Conversations may exist only as .db files (new IDE), only as .pb
+            // files (legacy), or only in the brain directory. Use the newest trace.
+            const mtime = getConversationMtimeMs(cid);
+            if (mtime > 0 && mtime <= cutoffMs) {
+                cold.push(cid);
+            } else {
+                // Recent or untraceable → treat as hot (fetch it)
                 hot.push(cid);
             }
         }
@@ -596,7 +589,7 @@ export class UsageStatsService {
             for (const [id, count] of globalData.stepCounts.entries()) {
                 stepCounts.set(id, count);
             }
-            log.info(`fetchTrajectorySummaries: loaded ${globalData.titleMap.size} titles, ${globalData.stepCounts.size} stepCounts from vscdb`);
+            log.info(`fetchTrajectorySummaries: loaded ${globalData.titleMap.size} titles, ${globalData.stepCounts.size} stepCounts from local indexes`);
         } catch (e: any) {
             log.warn('Failed to fetch global index data:', e.message);
         }
@@ -656,24 +649,33 @@ export class UsageStatsService {
         return result.stats;
     }
 
-    /** Scan ~/.gemini/antigravity/brain/ for conversation UUIDs */
+    /**
+     * Discover conversation UUIDs from both the brain directory and
+     * conversation files (.pb legacy / .db new architecture).
+     */
     private discoverConversationIds(): string[] {
-        const brainDir = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
-        if (!fs.existsSync(brainDir)) {
-            log.warn(`discoverConversationIds: brain dir does not exist: ${brainDir}`);
-            return [];
+        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const ids = new Set<string>();
+
+        if (fs.existsSync(BRAIN_DIR)) {
+            try {
+                const allEntries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true });
+                const uuidDirs = allEntries.filter(d => d.isDirectory() && UUID_RE.test(d.name));
+                for (const dir of uuidDirs) ids.add(dir.name);
+                log.diag(`discoverConversationIds: brain dir has ${allEntries.length} entries, ${uuidDirs.length} UUID dirs`);
+            } catch (e: any) {
+                log.warn(`discoverConversationIds: failed to read brain dir: ${e?.message}`);
+            }
+        } else {
+            log.warn(`discoverConversationIds: brain dir does not exist: ${BRAIN_DIR}`);
         }
 
-        const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        try {
-            const allEntries = fs.readdirSync(brainDir, { withFileTypes: true });
-            const uuidDirs = allEntries.filter(d => d.isDirectory() && UUID_RE.test(d.name));
-            log.diag(`discoverConversationIds: brain dir has ${allEntries.length} total entries, ${uuidDirs.length} are UUID conversation dirs`);
-            return uuidDirs.map(d => d.name);
-        } catch (e: any) {
-            log.warn(`discoverConversationIds: failed to read brain dir: ${e?.message}`);
-            return [];
-        }
+        const fileIds = listConversationIds();
+        for (const id of fileIds) ids.add(id);
+        log.diag(`discoverConversationIds: conversation dir has ${fileIds.length} .pb/.db conversations`);
+
+        log.diag(`discoverConversationIds: ${ids.size} unique conversations across brain + conversation files`);
+        return [...ids];
     }
 
     // ─── Response Extractors ───

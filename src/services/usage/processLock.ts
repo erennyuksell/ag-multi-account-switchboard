@@ -4,18 +4,18 @@
  * actively fetches from the API and writes to disk cache.
  * Other instances operate in read-only mode using the disk cache.
  *
- * Lock file: ~/.gemini/antigravity/brain/.deep_stats_cache.lock
+ * Lock file: <active profile>/brain/.deep_stats_cache.lock
  * Format: { pid: number, ts: number }
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { createLogger } from '../../utils/logger';
+import { BRAIN_DIR } from '../../shared/agPaths';
 
 const log = createLogger('ProcessLock');
 
-const LOCK_FILE = path.join(os.homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.lock');
+const LOCK_FILE = path.join(BRAIN_DIR, '.deep_stats_cache.lock');
 const STALE_THRESHOLD_MS = 60_000; // 60 seconds — lock expires if holder crashes
 
 interface LockData {
@@ -98,6 +98,7 @@ export class ProcessLock {
     }
 
     private writeLock(): void {
+        fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
         const data: LockData = { pid: process.pid, ts: Date.now() };
         fs.writeFileSync(LOCK_FILE, JSON.stringify(data), 'utf-8');
     }

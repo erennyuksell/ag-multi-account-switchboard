@@ -3,63 +3,74 @@ import { promisify } from 'util';
 import { ServerInfo } from '../types';
 import { LS_PROCESS_GREP, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
+import { readHubInfos } from '../shared/hub';
 import { createLogger } from '../utils/logger';
 
 const log = createLogger('ServerDiscovery');
 
 const execAsync = promisify(exec);
 
+interface DiscoveryCandidate {
+    pid: string;
+    csrfToken: string;
+    wsId?: string;
+    /** HTTP/JSON port when known directly (hub discovery). */
+    httpPort?: number;
+    httpsPort?: number;
+    source: 'hub' | 'process';
+}
+
 export class ServerDiscoveryService {
 
     /**
      * Discover the local Antigravity language server.
-     * 
+     *
      * Strategy:
-     * 1. Process scan → find language_server PIDs + LSP CSRF tokens
-     * 2. Port scan → find actual TCP listening ports for each PID
-     * 3. Probe each port+CSRF combination until GetUserStatus responds
-     * 
+     * 1. Hub discovery → read `daemon/hub_*.json` (Antigravity 2.6+)
+     * 2. Process scan → find legacy language_server PIDs + LSP CSRF tokens
+     * 3. Port scan → find actual TCP listening ports for each PID
+     * 4. Probe each port+CSRF combination until GetUserStatus responds
+     *
      * macOS/Linux: uses `ps` + `lsof`
      * Windows:     uses `wmic` + `netstat`
      */
     async discover(workspaceId?: string): Promise<ServerInfo | null> {
         try {
-            let candidates = isWindows
-                ? await this.findCandidatesWindows()
-                : await this.findCandidatesUnix();
+            let candidates = await this.findCandidates();
 
             log.diag(`discover: ${candidates.length} candidates on ${isWindows ? 'Windows' : 'Unix'} (wsFilter=${workspaceId ?? 'none'})`);
             if (candidates.length > 0) {
-                log.diag(`discover: ${candidates.map(c => `pid=${c.pid} wsId=${c.wsId ?? 'global'}`).join(' | ')}`);
+                log.diag(`discover: ${candidates.map(c => `${c.source}:pid=${c.pid} wsId=${c.wsId ?? 'global'}`).join(' | ')}`);
             }
 
-            // STRICT workspace isolation: if workspaceId is provided,
-            // ONLY try candidates from the same workspace.
-            // Falling through to other workspaces causes wrong-LS contamination.
+            // STRICT workspace isolation applies to legacy per-workspace LS processes.
+            // Hub candidates are global and always relevant.
             if (workspaceId) {
-                const matching = candidates.filter(c => c.wsId === workspaceId);
+                const matching = candidates.filter(c => c.source === 'hub' || c.wsId === workspaceId);
                 log.diag(`discover: workspace filter '${workspaceId}' → ${matching.length}/${candidates.length} match`);
-                if (matching.length > 0) {
-                    candidates = matching; // Only probe our workspace's LS
+                if (matching.some(c => c.source === 'process')) {
+                    candidates = matching; // Only probe our workspace's LS (+ global hub)
                 }
-                // If no match found, fall through to all candidates (cold start)
+                // If no matching process exists, fall through to all candidates (cold start)
             }
 
             for (const cand of candidates) {
-                const ports = await this.getListeningPorts(cand.pid);
-                log.diag(`discover: pid=${cand.pid} → ports: [${ports.join(', ')}]`);
+                const ports = cand.httpPort
+                    ? [cand.httpPort]
+                    : await this.getListeningPorts(cand.pid);
+                log.diag(`discover: ${cand.source} pid=${cand.pid} → ports: [${ports.join(', ')}]`);
                 if (ports.length === 0) {
-                    log.warn(`discover: pid=${cand.pid} has no listening TCP ports — skipping`);
+                    log.warn(`discover: ${cand.source} pid=${cand.pid} has no listening TCP ports — skipping`);
                     continue;
                 }
 
                 for (const port of ports) {
                     try {
                         await this.probe({ port, csrfToken: cand.csrfToken, protocol: 'http' });
-                        log.diag(`discover: ✓ port ${port} pid=${cand.pid}`);
+                        log.diag(`discover: ✓ ${cand.source} port ${port} pid=${cand.pid}`);
                         return { port, csrfToken: cand.csrfToken, protocol: 'http' as const, httpsPort: cand.httpsPort };
                     } catch (e: any) {
-                        log.diag(`discover: port ${port} failed`);
+                        log.diag(`discover: ${cand.source} port ${port} failed`);
                     }
                 }
             }
@@ -74,36 +85,31 @@ export class ServerDiscoveryService {
     /**
      * Discover the LS instance that handles cascade/chat operations.
      *
-     * The IDE runs TWO LS processes:
+     * Legacy IDE runs TWO LS processes:
      *   1. Workspace LS (--workspace_id, --enable_lsp) → code completions, quota
      *   2. Global LS (no workspace_id) → cascade/chat inference, generator metadata
      *
-     * Context window data (GetCascadeTrajectory, generator metadata) lives on the
-     * GLOBAL LS. Standard discover() finds the workspace LS, which returns empty
-     * trajectory data for cascades it doesn't manage.
+     * The Antigravity 2.6+ hub is always global, so it is the preferred target.
      *
-     * Strategy: try ALL LS instances, probe each with GetCascadeTrajectory for the
-     * given cascadeId, and return the one that has actual data (numTotalGeneratorMetadata > 0).
-     * Falls back to the workspace LS if no cascade-specific LS is found.
+     * Strategy: try global candidates (hub + legacy no-workspace LS), probe each with
+     * GetCascadeTrajectory for the given cascadeId, and return the one that has actual
+     * data (numTotalGeneratorMetadata > 0). Falls back to the workspace LS.
      */
     async discoverCascadeServer(cascadeId: string, workspaceServer?: ServerInfo | null): Promise<ServerInfo | null> {
         try {
-            const candidates = isWindows
-                ? await this.findCandidatesWindows()
-                : await this.findCandidatesUnix();
+            const candidates = await this.findCandidates();
 
-            // Prioritize Global LS (no wsId) over Workspace LS (has wsId).
-            // The Global LS holds live cascade/chat inference data;
-            // Workspace LS only has a stale snapshot.
-            const globalCandidates = candidates.filter(c => !c.wsId);
+            // Prioritize global candidates (hub or legacy Global LS).
+            const globalCandidates = candidates.filter(c => c.source === 'hub' || !c.wsId);
 
             // Track the first reachable Global LS — even if it has no data for this
-            // cascade yet (brand new conversation), it's still the correct target
-            // because inference runs on the Global LS.
+            // cascade yet (brand new conversation), it's still the correct target.
             let firstReachableGlobal: ServerInfo | null = null;
 
             for (const cand of globalCandidates) {
-                const ports = await this.getListeningPorts(cand.pid);
+                const ports = cand.httpPort
+                    ? [cand.httpPort]
+                    : await this.getListeningPorts(cand.pid);
                 if (ports.length === 0) continue;
 
                 for (const port of ports) {
@@ -128,16 +134,60 @@ export class ServerDiscoveryService {
         return workspaceServer ?? null;
     }
 
-    /** macOS / Linux: use ps to find candidates */
-    private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
-        const { stdout } = await execAsync(
-            `ps -A -ww -o pid,args | grep "${LS_PROCESS_GREP}" | grep -v grep`
-        );
-        return this.parsePsOutput(stdout);
+    /** Hub (2.6+) + legacy process candidates, hubs first. */
+    private async findCandidates(): Promise<DiscoveryCandidate[]> {
+        const hubs = this.findHubCandidates();
+        const processes = isWindows
+            ? await this.findCandidatesWindows()
+            : await this.findCandidatesUnix();
+        return [...hubs, ...processes];
+    }
+
+    /** Antigravity 2.6+ hub discovery via daemon/hub_*.json. */
+    private findHubCandidates(): DiscoveryCandidate[] {
+        try {
+            const hubs = readHubInfos();
+
+            // Each IDE window has its own hub. Prefer the hub spawned by THIS
+            // extension host so per-workspace cascade/context data resolves to
+            // the right window when several windows are open.
+            const ownPid = process.pid;
+            hubs.sort((a, b) =>
+                Number(b.parentPid === ownPid) - Number(a.parentPid === ownPid));
+
+            for (const hub of hubs) {
+                const own = hub.parentPid === ownPid ? ' own' : '';
+                log.info(`findHubCandidates: pid=${hub.pid}${own} ppid=${hub.parentPid ?? '?'} http=${hub.httpPort} https=${hub.httpsPort || 'none'} ls=${hub.lsVersion ?? '?'} file=${hub.filePath}`);
+            }
+            return hubs.map(hub => ({
+                pid: String(hub.pid),
+                csrfToken: hub.csrfToken,
+                httpPort: hub.httpPort,
+                httpsPort: hub.httpsPort || undefined,
+                source: 'hub' as const,
+            }));
+        } catch (e: any) {
+            log.warn('findHubCandidates: failed:', e?.message);
+            return [];
+        }
+    }
+
+    /** macOS / Linux: use ps to find legacy candidates */
+    private async findCandidatesUnix(): Promise<DiscoveryCandidate[]> {
+        try {
+            const { stdout } = await execAsync(
+                `ps -A -ww -o pid,args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
+                { timeout: PROCESS_EXEC_TIMEOUT_MS },
+            );
+            return this.parsePsOutput(stdout);
+        } catch {
+            // grep exits 1 when no language_server process is running — normal on 2.6+.
+            return [];
+        }
     }
 
     /** Windows: use PowerShell + wmic fallback to find candidates (with PID) */
-    private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
+    private async findCandidatesWindows(): Promise<DiscoveryCandidate[]> {
         // Emit "PID|||CommandLine" per process so we can capture the real PID.
         // Triple-pipe separator is safe — never appears in process command lines.
         const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' } | ForEach-Object { ($_.ProcessId.ToString() + '|||' + $_.CommandLine) }"`;
@@ -188,13 +238,19 @@ export class ServerDiscoveryService {
             if (csrf) {
                 log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} httpsPort=${httpsPortMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
             }
-            return csrf ? [{ pid, csrfToken: csrf, wsId, httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined }] : [];
+            return csrf ? [{
+                pid,
+                csrfToken: csrf,
+                wsId,
+                httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined,
+                source: 'process' as const,
+            }] : [];
         });
     }
 
     /** Parse `ps` stdout into candidates */
-    private parsePsOutput(stdout: string): { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] {
-        const candidates: { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] = [];
+    private parsePsOutput(stdout: string): DiscoveryCandidate[] {
+        const candidates: DiscoveryCandidate[] = [];
         for (const line of stdout.split('\n')) {
             if (!line.trim()) continue;
             const pidMatch = line.trim().match(/^(\d+)\s/);
@@ -208,6 +264,7 @@ export class ServerDiscoveryService {
                 csrfToken: tokenMatch[1],
                 wsId: wsMatch?.[1],
                 httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined,
+                source: 'process',
             });
         }
         return candidates;

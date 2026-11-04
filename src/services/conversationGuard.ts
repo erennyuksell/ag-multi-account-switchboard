@@ -1,8 +1,9 @@
 /**
  * Conversation Guard — Detection & Fix Orchestrator
- * Detects missing conversations by comparing .pb files on disk
- * with the sidebar index in state.vscdb, and spawns a detached
- * worker to rebuild the index when requested.
+ * Detects conversations that exist on disk (.pb / .db) but are missing
+ * from the sidebar index (legacy state.vscdb and/or the 2.6+
+ * conversation_summaries.db), and spawns a detached worker to rebuild
+ * the index when requested.
  */
 
 import * as vscode from 'vscode';
@@ -10,7 +11,7 @@ import * as fs from 'fs';
 import * as cp from 'child_process';
 import * as path from 'path';
 import { STATE_DB_PATH } from '../constants';
-import { CONVERSATIONS_DIR, BRAIN_DIR } from '../shared/agPaths';
+import { CONVERSATIONS_DIR, CONVERSATION_SUMMARIES_DB_PATH, getConversationMtimeMs, listConversationIds } from '../shared/agPaths';
 import { getGlobalIndexData, isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
 import { isDbAvailable } from '../shared/db';
 import { createLogger } from '../utils/logger';
@@ -60,11 +61,11 @@ export class ConversationGuard implements vscode.Disposable {
         try {
             if (!fs.existsSync(CONVERSATIONS_DIR)) return null;
 
-            const pbFiles = fs.readdirSync(CONVERSATIONS_DIR).filter(f => f.endsWith('.pb'));
-            const onDisk = pbFiles.length;
+            const diskIds = new Set(listConversationIds());
+            const onDisk = diskIds.size;
             if (onDisk === 0) return null;
 
-            if (!fs.existsSync(STATE_DB_PATH)) return null;
+            if (!fs.existsSync(STATE_DB_PATH) && !fs.existsSync(CONVERSATION_SUMMARIES_DB_PATH)) return null;
 
             // Verify DB backend is available (cache result)
             if (this._dbAvailable === undefined) {
@@ -73,7 +74,6 @@ export class ConversationGuard implements vscode.Disposable {
             }
             if (!this._dbAvailable) return null;
 
-            const diskIds = new Set(pbFiles.map(f => f.replace('.pb', '')));
             const indexIds = await this._readIndexIds();
 
             // Missing = on disk but NOT in index (user can't see these)
@@ -98,8 +98,8 @@ export class ConversationGuard implements vscode.Disposable {
         }
     }
 
-    /** Extract conversation IDs from the trajectory summaries protobuf index.
-     *  Delegates to titleResolver.getGlobalIndexData() — SSOT for protobuf parsing.
+    /** Extract conversation IDs from every merged index (legacy protobuf +
+     *  new conversation_summaries.db). Delegates to titleResolver.getGlobalIndexData().
      *  Uses allIds (not titleMap) to include title-less indexed conversations. */
     private async _readIndexIds(): Promise<Set<string>> {
         try {
@@ -125,13 +125,12 @@ export class ConversationGuard implements vscode.Disposable {
      *  lsTitles: optional map from GetAllCascadeTrajectories LS endpoint (highest fidelity) */
     resolveMissingDetails(ids: string[], lsTitles?: Map<string, string>): MissingConversationDetail[] {
         return ids.map(id => {
-            // Date from .pb file mtime
-            const pbPath = path.join(CONVERSATIONS_DIR, `${id}.pb`);
+            // Date from the newest conversation file/brain trace (.pb or .db)
             let date = '?';
             try {
-                if (fs.existsSync(pbPath)) {
-                    const mtime = fs.statSync(pbPath).mtime;
-                    date = mtime.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
+                const mtimeMs = getConversationMtimeMs(id);
+                if (mtimeMs > 0) {
+                    date = new Date(mtimeMs).toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
                 }
             } catch { /* ignore */ }
 

@@ -4,13 +4,12 @@
  * Previously duplicated in accountSwitch.ts and tokenBase.ts.
  * Centralised here so each fix only needs to happen once.
  *
- * Process-discovery strategy:
- *   - macOS/Linux: `ps -A -ww -o args` + grep
- *   - Windows:     `wmic process … get CommandLine`
+ * Discovery strategy:
+ *   1. Antigravity 2.6+ hub — read daemon/hub_*.json (HTTPS port + CSRF)
+ *   2. Legacy LS process argv — --https_server_port + --csrf_token
  *
- * Both approaches read --https_server_port and --csrf_token directly from
- * the process argv, which is faster than going via lsof/netstat (that is
- * serverDiscovery.ts's concern, which resolves the separate API port).
+ * The hub file is the preferred source; process scanning remains as a
+ * fallback for older IDE builds.
  */
 
 import * as https from 'https';
@@ -25,6 +24,7 @@ import {
     LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
 } from '../constants';
 import { collectBuffer } from './http';
+import { readHubInfos } from '../shared/hub';
 
 const execAsync = promisify(exec);
 
@@ -63,13 +63,32 @@ export interface LsEndpoint {
 // ==================== Process Discovery ====================
 
 /**
- * Find active Language Server processes and extract their HTTPS port + CSRF token
- * directly from process arguments (--https_server_port, --csrf_token).
+ * Find active Language Server HTTPS endpoints.
  *
- * Cross-platform: ps on macOS/Linux, wmic on Windows.
+ * Primary: Antigravity 2.6+ hub discovery file (`daemon/hub_*.json`).
+ * Fallback: legacy process argv (`--https_server_port`, `--csrf_token`).
+ *
  * Returns an empty array (never throws) so callers can safely ignore LS absence.
  */
 export async function findLSEndpoints(): Promise<LsEndpoint[]> {
+    const endpoints: LsEndpoint[] = [];
+
+    // 1. Hub discovery (new architecture) — hubs have no workspace_id.
+    try {
+        const hubs = readHubInfos();
+        // Prefer this window's own hub; other windows remain fallbacks.
+        const ownPid = process.pid;
+        hubs.sort((a, b) =>
+            Number(b.parentPid === ownPid) - Number(a.parentPid === ownPid));
+
+        for (const hub of hubs) {
+            if (hub.httpsPort > 0) {
+                endpoints.push({ port: hub.httpsPort, csrf: hub.csrfToken });
+            }
+        }
+    } catch { /* hub files are optional */ }
+
+    // 2. Legacy process discovery.
     try {
         let lines: string[];
         if (isWindows) {
@@ -82,15 +101,15 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
             lines = stdout.trim().split('\n').filter(Boolean);
         }
 
-        return lines.flatMap(line => {
+        for (const line of lines) {
             const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
             const csrf = line.match(CSRF_TOKEN_RE)?.[1];
             const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
-            return port && csrf ? [{ port: +port, csrf, wsId }] : [];
-        });
-    } catch { /* expected: JSON parse failure — raw text response */
-        return [];
-    }
+            if (port && csrf) endpoints.push({ port: +port, csrf, wsId });
+        }
+    } catch { /* no legacy LS process — normal on 2.6+ */ }
+
+    return endpoints;
 }
 
 // ==================== Certificate ====================

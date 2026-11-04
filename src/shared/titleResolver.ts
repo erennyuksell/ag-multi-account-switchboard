@@ -11,9 +11,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { BRAIN_DIR } from './agPaths';
+import { BRAIN_DIR, CONVERSATION_SUMMARIES_DB_PATH } from './agPaths';
 import { decodeVarint, skipProtobufField } from './protobuf';
-import { dbGet } from './db';
+import { dbAll, dbGet } from './db';
 
 // ─── Generic Title Detection ────────────────────────────────────────
 
@@ -114,7 +114,6 @@ export function getTitleFromTranscript(cid: string, maxLen = 55): string | null 
 // ─── Global Index Title Extraction ──────────────────────────────────
 
 type GlobalIndexResult = { titleMap: Map<string, string>, stepCounts: Map<string, number>, allIds: Set<string> };
-const EMPTY_RESULT: GlobalIndexResult = { titleMap: new Map(), stepCounts: new Map(), allIds: new Set() };
 
 /**
  * Parse the raw protobuf bytes from trajectorySummaries into title + stepCount maps.
@@ -179,18 +178,73 @@ function parseTrajectorySummaries(decoded: Buffer): GlobalIndexResult {
     return { titleMap, stepCounts, allIds };
 }
 
+function mergeInto(target: GlobalIndexResult, source: GlobalIndexResult): void {
+    for (const [id, title] of source.titleMap) target.titleMap.set(id, title);
+    for (const [id, count] of source.stepCounts) target.stepCounts.set(id, count);
+    for (const id of source.allIds) target.allIds.add(id);
+}
+
 /**
- * Extract conversation IDs, Titles, and Step Counts from the global trajectory summaries.
+ * Read the new-architecture sidebar index (`conversation_summaries.db`).
+ * Titles live in `title`, with `preview` as a fallback (2.6+ leaves title empty
+ * for most rows).
+ */
+async function getConversationSummaryIndex(): Promise<GlobalIndexResult | null> {
+    const rows = await dbAll(
+        CONVERSATION_SUMMARIES_DB_PATH,
+        'SELECT conversation_id, title, preview, step_count FROM conversation_summaries',
+    );
+    if (!rows) return null;
+
+    const result: GlobalIndexResult = {
+        titleMap: new Map(),
+        stepCounts: new Map(),
+        allIds: new Set(),
+    };
+
+    for (const row of rows) {
+        const id = String(row.conversation_id ?? '').trim();
+        if (!id) continue;
+
+        result.allIds.add(id);
+        const title = String(row.title ?? '').trim() || String(row.preview ?? '').trim();
+        if (title) result.titleMap.set(id, title);
+
+        const stepCount = parseInt(String(row.step_count ?? '0'), 10);
+        if (stepCount > 0) result.stepCounts.set(id, stepCount);
+    }
+
+    return result;
+}
+
+/**
+ * Extract conversation IDs, Titles, and Step Counts from every available index:
+ *   1. Legacy state.vscdb trajectorySummaries (base64 protobuf)
+ *   2. New conversation_summaries.db (SQLite, Antigravity 2.6+)
+ *
  * Uses shared db.ts for cross-platform SQLite access (native module + CLI fallback).
  */
 export async function getGlobalIndexData(): Promise<GlobalIndexResult> {
-    const raw: string | null = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
-    if (!raw) return EMPTY_RESULT;
+    const result: GlobalIndexResult = {
+        titleMap: new Map(),
+        stepCounts: new Map(),
+        allIds: new Set(),
+    };
 
     try {
-        const decoded = Buffer.from(raw, 'base64');
-        return parseTrajectorySummaries(decoded);
-    } catch { return EMPTY_RESULT; }
+        const raw: string | null = await dbGet('antigravityUnifiedStateSync.trajectorySummaries');
+        if (raw) {
+            const decoded = Buffer.from(raw, 'base64');
+            mergeInto(result, parseTrajectorySummaries(decoded));
+        }
+    } catch { /* legacy index unavailable */ }
+
+    try {
+        const summaries = await getConversationSummaryIndex();
+        if (summaries) mergeInto(result, summaries);
+    } catch { /* new index unavailable */ }
+
+    return result;
 }
 
 

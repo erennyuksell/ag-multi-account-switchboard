@@ -2,6 +2,22 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
+## [3.2.2] — 2026-11-04
+
+> Antigravity IDE 2.6+ compatibility.
+
+### Added
+- **Hub discovery** — Reads `daemon/hub_*.json` written by `agy --hub`, validating the live PID before use. Supports both the HTTP/JSON and HTTPS/protobuf endpoints with the hub CSRF token. Legacy `language_server_*` process discovery remains as a fallback.
+- **New conversation index** — Reads `conversation_summaries.db` for titles and sidebar index data, using `preview` when `title` is empty. Legacy `state.vscdb` trajectory summaries are still merged in.
+- **Dual data profiles** — Automatically selects `~/.gemini/antigravity` (IDE 2.6+) or `~/.gemini/antigravity-ide` (legacy) based on the active state DB.
+
+### Changed
+- **Multi-window hub selection** — Discovery now prefers the hub spawned by the current window's extension host (hub parent PID), so context/cascade data resolves to the right window when several IDE windows are open. Other windows' hubs remain fallbacks.
+- **Conversation detection** — Conversation Guard counts both legacy `.pb` and new `.db` conversation files.
+- **Conversation fixer** — Discovers `.db` conversations, prefers them when rebuilding the index, inserts missing rows into `conversation_summaries.db`, and relaunches the 2.6+ IDE paths.
+- **Account switching** — Probes every endpoint, and treats the removed `antigravity.handleAuthRefresh` command as optional instead of logging repeated errors.
+- **Hub account switching** — Writes the target token to the OS keyring and calls `GetAuthStatus` so a running 2.6+ hub adopts the new account immediately, without a restart. Linux uses `secret-tool`; macOS and Windows keep the legacy USS-only behavior.
+
 ## [3.2.1] — 2026-05-04
 
 > First 3.2.x marketplace release. Includes the 3.2.0 Conversation Guard release plus the Usage Stats accuracy fixes below.

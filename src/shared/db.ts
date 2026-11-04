@@ -71,6 +71,20 @@ export async function dbQuery(sql: string): Promise<string | null> {
     return cliQuery(dbPath, sql);
 }
 
+/**
+ * Read multiple rows from an arbitrary SQLite database.
+ * Used for the new-architecture `conversation_summaries.db` index.
+ * Returns null if the DB/module is unavailable.
+ */
+export async function dbAll(dbPath: string, sql: string): Promise<Record<string, any>[] | null> {
+    if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+    const result = await nativeAll(dbPath, sql);
+    if (result !== undefined) return result;
+
+    return cliAll(dbPath, sql);
+}
+
 // ─── Write ───────────────────────────────────────────────────────────
 
 /**
@@ -99,7 +113,15 @@ export async function dbExec(sql: string): Promise<boolean> {
  */
 export async function dbExecRaw(sql: string): Promise<boolean> {
     const dbPath = getStateDbPath();
-    if (!dbPath) return false;
+    return dbPath ? dbExecAt(dbPath, sql) : false;
+}
+
+/**
+ * Execute a write SQL against an arbitrary SQLite database.
+ * Used to repair the new-architecture `conversation_summaries.db` index.
+ */
+export async function dbExecAt(dbPath: string, sql: string): Promise<boolean> {
+    if (!dbPath || !fs.existsSync(dbPath)) return false;
     createBackup(dbPath);
 
     const nativeOk = await nativeExec(dbPath, sql);
@@ -201,6 +223,22 @@ function nativeQuery(dbPath: string, sql: string): Promise<string | null | undef
     });
 }
 
+function nativeAll(dbPath: string, sql: string): Promise<Record<string, any>[] | undefined> {
+    return new Promise((resolve) => {
+        const sqlite3 = getNativeModule();
+        if (!sqlite3) { resolve(undefined); return; }
+
+        const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (err: any) => {
+            if (err) { resolve(undefined); return; }
+            db.all(sql, (err: any, rows: Record<string, any>[]) => {
+                db.close();
+                if (err) { resolve(undefined); return; }
+                resolve(rows ?? []);
+            });
+        });
+    });
+}
+
 function nativeExec(dbPath: string, sql: string): Promise<boolean | undefined> {
     return new Promise((resolve) => {
         const sqlite3 = getNativeModule();
@@ -238,6 +276,28 @@ function cliQuery(dbPath: string, sql: string): Promise<string | null> {
                 (err: any, stdout: string) => {
                     if (err || !stdout.trim()) { resolve(null); return; }
                     resolve(stdout.trim());
+                }
+            );
+        } catch { resolve(null); }
+    });
+}
+
+function cliAll(dbPath: string, sql: string): Promise<Record<string, any>[] | null> {
+    return new Promise((resolve) => {
+        try {
+            const cp = require('child_process');
+            const escaped = sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            cp.exec(
+                `sqlite3 -json "${dbPath}" "${escaped}"`,
+                { timeout: TIMEOUT, maxBuffer: MAX_BUFFER },
+                (err: any, stdout: string) => {
+                    if (err) { resolve(null); return; }
+                    const trimmed = stdout.trim();
+                    if (!trimmed) { resolve([]); return; }
+                    try {
+                        const parsed = JSON.parse(trimmed);
+                        resolve(Array.isArray(parsed) ? parsed : [parsed]);
+                    } catch { resolve(null); }
                 }
             );
         } catch { resolve(null); }
