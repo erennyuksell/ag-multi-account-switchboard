@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
+import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, withoutOrphanHubs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
 
@@ -141,9 +141,9 @@ export class ServerDiscoveryService {
     /** macOS / Linux: use ps to find candidates */
     private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         const { stdout } = await execAsync(
-            `ps -A -ww -o pid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`
+            `ps -A -ww -o pid,ppid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`
         );
-        return this.parsePsOutput(stdout);
+        return this.parsePsOutput(withoutOrphanHubs(stdout.split('\n')).join('\n'));
     }
 
     /** Windows: use PowerShell + wmic fallback to find candidates (with PID) */

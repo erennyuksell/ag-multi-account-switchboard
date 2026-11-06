@@ -12,6 +12,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 interface ProductInfo { ideVersion?: string; dataFolderName?: string; applicationName?: string }
@@ -52,4 +53,23 @@ export function isLegacyAntigravity(): boolean {
         return major < 2 || (major === 2 && Number(m[2]) < 5);
     }
     return p.dataFolderName === '.antigravity' || p.applicationName === 'antigravity';
+}
+
+/**
+ * Version of the agy CLI that 2.6 runs as each window's hub, from the file its
+ * self-updater writes. It updates on its own, independently of the IDE
+ * (1.4.10 → 1.4.12 → 1.5.2 between 2026-10-29 and 2026-11-06). '' if absent.
+ */
+export function agyVersion(): string {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.gemini', 'bin', 'agy.version.json'), 'utf8')).version || '';
+    } catch { return ''; }
+}
+
+/** One line for logs and bug reports: which Antigravity this is. */
+export function buildSummary(): string {
+    let vsc = '';
+    try { vsc = require('vscode').version as string; } catch { /* outside the extension host */ }
+    const agy = agyVersion();
+    return `Antigravity ${ideVersion() || 'unknown'} (VS Code ${vsc || '?'}, ${process.platform})${agy ? `, agy ${agy}` : ''}`;
 }

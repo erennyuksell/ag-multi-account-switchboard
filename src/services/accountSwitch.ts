@@ -10,7 +10,7 @@ import { createLogger } from '../utils/logger';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
 import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity } from './agyAuth';
 import { agyState, findOwnHub } from './agyHub';
-import { isLegacyAntigravity } from './ideBuild';
+import { isLegacyAntigravity, buildSummary } from './ideBuild';
 import { dbExec, dbGet } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache, LsEndpoint } from '../utils/lsClient';
 import {
@@ -436,9 +436,21 @@ export class AccountSwitchService {
         } finally {
             agyState.switching = false;
         }
-        log.warn(`agy: hubs not all on ${email} after ${AccountSwitchService.AGY_MAX_WAIT_MS}ms`);
+        log.warn(`agy: hubs not all on ${email} after ${AccountSwitchService.AGY_MAX_WAIT_MS}ms on ${buildSummary()}`);
         this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
-        vscode.window.showInformationMessage(`Switching to ${email} — some windows are still restarting their agent`);
+        // A minute without every hub moving is not a slow switch: on tested
+        // builds it lands in 2-3s. The likeliest cause is an Antigravity or
+        // agy update that changed how hubs take the account, so say so and
+        // make the report carry the versions.
+        void vscode.window.showWarningMessage(
+            `Switching to ${email} has not reached every window after a minute. ${buildSummary()} may not be supported yet.`,
+            'Report issue',
+        ).then(choice => {
+            if (choice !== 'Report issue') return;
+            const body = `**Build:** ${buildSummary()}\n**Extension:** ${vscode.extensions.getExtension('erennyuksell.ag-multi-account-switchboard')?.packageJSON.version ?? '?'}\n\nA switch did not reach every window within 60 s.`;
+            void vscode.env.openExternal(vscode.Uri.parse(
+                `https://github.com/erennyuksell/ag-multi-account-switchboard/issues/new?title=${encodeURIComponent('Switch not confirmed on ' + buildSummary())}&body=${encodeURIComponent(body)}`));
+        });
         return { confirmed: false };
     }
 

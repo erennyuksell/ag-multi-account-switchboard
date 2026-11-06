@@ -234,6 +234,20 @@ export const HUB_PROCESS_MARK = 'agy --hub';
 export const SERVER_PROCESS_GREP_E = `${LS_PROCESS_GREP}|${HUB_PROCESS_MARK}`;
 
 /**
+ * Drop hubs whose window is gone from `ps -o pid,ppid,args` lines.
+ *
+ * A hub can outlive its window: launchd adopts it and it keeps answering
+ * (measured 2026-11-01: 7 hubs for 3 windows). Only a window's extension
+ * restarts a hub, so an adopted one stays on its old account forever. Counted
+ * as a server, it held every switch until the timeout, and it can also pass
+ * for the live hub of the same folder.
+ */
+export function withoutOrphanHubs(lines: string[]): string[] {
+    return lines.filter(line =>
+        !line.includes(HUB_PROCESS_MARK) || line.trim().match(/^\d+\s+(\d+)\s/)?.[1] !== '1');
+}
+
+/**
  * Workspace id of a server process, in the IDE's `file_Users_x_repo` form.
  * Language servers carry it as --workspace_id; hubs only name the folder
  * (--add-dir=/Users/x/repo), so derive the same form from the path.

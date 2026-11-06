@@ -1,8 +1,14 @@
 /**
  * Conversation Guard — Detection & Fix Orchestrator
- * Detects missing conversations by comparing .pb files on disk
- * with the sidebar index in state.vscdb, and spawns a detached
- * worker to rebuild the index when requested.
+ * Detects missing conversations by comparing conversation files on disk
+ * with the sidebar index, and repairs the index when asked.
+ *
+ *   up to 2.5  .pb files vs the trajectorySummaries blob in state.vscdb;
+ *              a detached worker rebuilds the blob while the IDE is closed.
+ *   2.6        .db files vs conversation_summaries.db; the repair restarts
+ *              this window's hub, which restores missing rows itself on
+ *              start (see AgyHubKeeper.restartForReindex). The extension
+ *              writes nothing to the index.
  */
 
 import * as vscode from 'vscode';
@@ -12,7 +18,8 @@ import * as path from 'path';
 import { STATE_DB_PATH } from '../constants';
 import { CONVERSATIONS_DIR, BRAIN_DIR } from '../shared/agPaths';
 import { isAgyMode } from './agyAuth';
-import { getGlobalIndexData, isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
+import type { AgyHubKeeper } from './agyHub';
+import { getGlobalIndexData, getConversationSummariesData, isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../shared/titleResolver';
 import { isDbAvailable } from '../shared/db';
 import { createLogger } from '../utils/logger';
 
@@ -35,11 +42,17 @@ export class ConversationGuard implements vscode.Disposable {
     private _dismissedCount = -1;
     private _lastStatus: ConversationStatus | null = null;
     private _dbAvailable: boolean | undefined;
+    private _keeper: AgyHubKeeper | undefined;
     private _onStatusChange = new vscode.EventEmitter<ConversationStatus>();
     public readonly onStatusChange = this._onStatusChange.event;
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this._dismissedCount = context.globalState.get('ag_dismissedMissingCount', -1);
+    }
+
+    /** 2.6: the window's hub keeper, which performs the repair. */
+    setHubKeeper(keeper: AgyHubKeeper): void {
+        this._keeper = keeper;
     }
 
     /** Run detection after a delay (non-blocking) */
@@ -59,12 +72,7 @@ export class ConversationGuard implements vscode.Disposable {
      */
     async detect(): Promise<ConversationStatus | null> {
         try {
-            // 2.6 indexes conversations in conversation_summaries.db and
-            // reconciles it against disk on every hub start; the state.vscdb
-            // index this compares against is no longer maintained, so every
-            // newer conversation would be reported "missing" and the fix
-            // would rewrite a table 2.6 does not read.
-            if (isAgyMode()) return null;
+            if (isAgyMode()) return await this._detectAgy();
             if (!fs.existsSync(CONVERSATIONS_DIR)) return null;
 
             const pbFiles = fs.readdirSync(CONVERSATIONS_DIR).filter(f => f.endsWith('.pb'));
@@ -105,6 +113,36 @@ export class ConversationGuard implements vscode.Disposable {
         }
     }
 
+    /**
+     * 2.6: conversation files (.db, and .pb carried over from older builds)
+     * absent from conversation_summaries.db. Both were measured to come back
+     * when a hub starts on a copy with the row deleted. Files touched in the
+     * last two minutes are skipped, since the hub writes the row just after
+     * creating the file.
+     */
+    private async _detectAgy(): Promise<ConversationStatus | null> {
+        if (!fs.existsSync(CONVERSATIONS_DIR)) return null;
+        const settledBefore = Date.now() - 2 * 60_000;
+        const diskIds = fs.readdirSync(CONVERSATIONS_DIR)
+            .filter(f => f.endsWith('.db') || f.endsWith('.pb'))
+            .filter(f => { try { return fs.statSync(path.join(CONVERSATIONS_DIR, f)).mtimeMs < settledBefore; } catch { return false; } })
+            .map(f => f.slice(0, -3))
+            .filter((id, i, all) => all.indexOf(id) === i);
+        if (diskIds.length === 0) return null;
+
+        const { allIds } = await getConversationSummariesData().catch(() => ({ allIds: new Set<string>() }));
+        // An unreadable index is not an empty one; claiming everything is
+        // missing would only send the user to a repair that cannot help.
+        if (allIds.size === 0) return null;
+
+        const missingIds = diskIds.filter(id => !allIds.has(id));
+        const status: ConversationStatus = { onDisk: diskIds.length, inIndex: allIds.size, missing: missingIds.length, missingIds };
+        this._lastStatus = status;
+        log.info(`Detection (2.6): ${diskIds.length} conversations on disk, ${allIds.size} indexed, ${missingIds.length} missing`);
+        if (missingIds.length > 0) this._onStatusChange.fire(status);
+        return status;
+    }
+
     /** Extract conversation IDs from the trajectory summaries protobuf index.
      *  Delegates to titleResolver.getGlobalIndexData() — SSOT for protobuf parsing.
      *  Uses allIds (not titleMap) to include title-less indexed conversations. */
@@ -132,11 +170,11 @@ export class ConversationGuard implements vscode.Disposable {
      *  lsTitles: optional map from GetAllCascadeTrajectories LS endpoint (highest fidelity) */
     resolveMissingDetails(ids: string[], lsTitles?: Map<string, string>): MissingConversationDetail[] {
         return ids.map(id => {
-            // Date from .pb file mtime
-            const pbPath = path.join(CONVERSATIONS_DIR, `${id}.pb`);
+            // Date from the conversation file's mtime (.pb up to 2.5, .db on 2.6)
+            const pbPath = [`${id}.pb`, `${id}.db`].map(f => path.join(CONVERSATIONS_DIR, f)).find(p => fs.existsSync(p));
             let date = '?';
             try {
-                if (fs.existsSync(pbPath)) {
+                if (pbPath) {
                     const mtime = fs.statSync(pbPath).mtime;
                     date = mtime.toLocaleDateString('tr-TR', { day: '2-digit', month: 'short', year: 'numeric' });
                 }
@@ -166,6 +204,24 @@ export class ConversationGuard implements vscode.Disposable {
 
             return { id, title, date };
         }).sort((a, b) => b.date.localeCompare(a.date));
+    }
+
+    /**
+     * 2.6 repair: restart this window's hub, let it reconcile, check again.
+     * Returns the status after the restart, or null if there is no hub.
+     */
+    async runFixAgy(): Promise<ConversationStatus | null> {
+        if (!this._keeper || !(await this._keeper.restartForReindex())) return null;
+        this.context.globalState.update('ag_dismissedMissingCount', -1);
+        // Measured: the IDE respawns the hub in ~4.5s and the reconcile takes
+        // milliseconds. Poll a little past that.
+        let status: ConversationStatus | null = null;
+        for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 3_000));
+            status = await this.detect();
+            if (status && status.missing === 0) break;
+        }
+        return status;
     }
 
     /** Spawn detached worker to fix conversations — AG will quit */

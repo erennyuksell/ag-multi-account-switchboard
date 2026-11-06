@@ -11,6 +11,7 @@ import { initPricingCatalog, resolveLiteLlmPricing } from './services/litellmPri
 import { ConversationTracker } from './services/conversationTracker';
 import { ConversationGuard } from './services/conversationGuard';
 import { DevControl } from './dev/devControl';
+import { buildSummary, isLegacyAntigravity } from './services/ideBuild';
 import { AgyHubKeeper } from './services/agyHub';
 import { isAgyMode } from './services/agyAuth';
 import { callLsJson } from './utils/lsClient';
@@ -44,11 +45,12 @@ export async function activate(context: vscode.ExtensionContext) {
     tracker.start();
     context.subscriptions.push(tracker);
 
-    log.info('Extension activated');
+    log.info(`Extension activated on ${buildSummary()}${isAgyMode() ? ', hub mode' : isLegacyAntigravity() ? ', pre-2.5 switch flow' : ''}`);
 
     // --- Antigravity 2.6: keep this window's agent hub on the stored account ---
+    let keeper: AgyHubKeeper | undefined;
     if (isAgyMode()) {
-        const keeper = new AgyHubKeeper(email => quotaManager.onIdentityChanged(email));
+        keeper = new AgyHubKeeper(email => quotaManager.onIdentityChanged(email));
         keeper.start();
         context.subscriptions.push(keeper);
         log.info('Antigravity 2.6 hub mode');
@@ -79,8 +81,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // --- LiteLLM dynamic pricing (non-blocking, fire-and-forget) ---
     initPricingCatalog().then(() => {
-        setExternalPricingResolver((displayName) => {
-            const resolved = resolveLiteLlmPricing(displayName);
+        setExternalPricingResolver((modelName) => {
+            const resolved = resolveLiteLlmPricing(modelName);
             if (!resolved) return null;
             // Convert per-token to per-1M-token for compatibility with hardcoded pricing table
             return {
@@ -95,6 +97,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // --- Conversation Guard (Fix Missing Conversations) ---
     const convGuard = new ConversationGuard(context);
+    if (keeper) convGuard.setHubKeeper(keeper);
     context.subscriptions.push(convGuard);
 
     // --- Register webview provider ---
@@ -168,6 +171,22 @@ export async function activate(context: vscode.ExtensionContext) {
             const msg = count > 0
                 ? `${count} missing conversation${count > 1 ? 's' : ''} found.`
                 : 'No missing conversations detected.';
+            if (isAgyMode()) {
+                // Nothing to repair means nothing to offer: the restart below
+                // would interrupt this window's agent for no reason.
+                if (count === 0) { vscode.window.showInformationMessage(msg); return; }
+                const confirm = await vscode.window.showWarningMessage(msg, {
+                    modal: true,
+                    detail: "This restarts this window's agent. Antigravity rebuilds the sidebar index from the conversation files when it starts; the extension writes nothing.",
+                }, 'Fix Now');
+                if (confirm !== 'Fix Now') return;
+                const after = await convGuard.runFixAgy();
+                if (!after) vscode.window.showErrorMessage("Could not restart this window's agent.");
+                else if (after.missing === 0) vscode.window.showInformationMessage(`Restored ${count} conversation${count > 1 ? 's' : ''} to the sidebar.`);
+                else vscode.window.showWarningMessage(`${after.missing} conversation${after.missing > 1 ? 's are' : ' is'} still missing after the agent restarted.`);
+                return;
+            }
+
             const detail = 'This will close Antigravity, rebuild the sidebar index from disk, and relaunch automatically.';
 
             const confirm = await vscode.window.showWarningMessage(

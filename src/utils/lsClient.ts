@@ -5,7 +5,7 @@
  * Centralised here so each fix only needs to happen once.
  *
  * Process-discovery strategy:
- *   - macOS/Linux: `ps -A -ww -o args` + grep
+ *   - macOS/Linux: `ps -A -ww -o pid,ppid,args` + grep
  *   - Windows:     `wmic process … get CommandLine`
  *
  * Both approaches read --https_server_port and --csrf_token directly from
@@ -20,7 +20,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
-    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
+    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
     PROCESS_EXEC_TIMEOUT_MS, WMIC_EXEC_TIMEOUT_MS, LSOF_EXEC_TIMEOUT_MS,
     LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
 } from '../constants';
@@ -179,10 +179,10 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
             }
         } else {
             const { stdout } = await execAsync(
-                `ps -A -ww -o pid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`,
+                `ps -A -ww -o pid,ppid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`,
                 { timeout: LSOF_EXEC_TIMEOUT_MS },
             );
-            lines = stdout.trim().split('\n').filter(Boolean);
+            lines = withoutOrphanHubs(stdout.trim().split('\n').filter(Boolean));
         }
 
         const procs = parseLsProcessLines(lines);

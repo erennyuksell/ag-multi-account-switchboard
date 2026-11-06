@@ -54,7 +54,7 @@ const KEYCHAIN_SERVICE = 'gemini';
 const KEYCHAIN_ACCOUNT = 'antigravity';
 const KEYRING_PREFIX = 'go-keyring-base64:';
 
-function readKeychainJson(): Promise<Record<string, unknown> | null> {
+export function readKeychainJson(): Promise<Record<string, unknown> | null> {
     if (process.platform !== 'darwin') return Promise.resolve(null);
     return new Promise(resolve => {
         execFile('/usr/bin/security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'],
@@ -72,7 +72,7 @@ function readKeychainJson(): Promise<Record<string, unknown> | null> {
  * any process listing could see it. The value is base64 plus a fixed prefix,
  * so it needs no quoting.
  */
-function writeKeychainJson(value: Record<string, unknown>): Promise<void> {
+export function writeKeychainJson(value: Record<string, unknown>): Promise<void> {
     if (process.platform !== 'darwin') return Promise.resolve();
     const encoded = KEYRING_PREFIX + Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
     return new Promise((resolve, reject) => {
