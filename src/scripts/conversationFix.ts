@@ -12,7 +12,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as cp from 'child_process';
 import * as os from 'os';
-import { STATE_DB_PATH, CONVERSATIONS_DIR, BRAIN_DIR, isMac, isWindows } from '../shared/agPaths';
+import {
+    STATE_DB_PATH, CONVERSATIONS_DIR, BRAIN_DIR, isMac, isWindows,
+    AG_APP_NAME, AG_APP_LAUNCH_CANDIDATES, AG_PROFILE,
+} from '../shared/agPaths';
 import {
     decodeVarint, skipProtobufField,
     stripFieldFromProtobuf, encodeLengthDelimited, encodeStringField,
@@ -179,29 +182,28 @@ function buildTrajectoryEntry(cid: string, title: string, existingInnerData: Buf
 
 // ─── AG App Path ─────────────────────────────────────────────────────
 function getAGAppPath(): string {
-    if (isMac) return 'open -a Antigravity';
+    // Candidates are ordered active-layout-first and cover both the 2.5.x
+    // ("Antigravity IDE") and legacy ("Antigravity") install names, so a fix
+    // never relaunches the wrong app after an upgrade.
+    const installed = AG_APP_LAUNCH_CANDIDATES.find(c => fs.existsSync(c));
+
+    if (isMac) {
+        // `open -a` takes a bundle path or an app name; prefer the exact bundle.
+        return installed ? `open -a "${installed}"` : `open -a "${AG_APP_NAME}"`;
+    }
+    if (installed) return `"${installed}"`;
+
     if (isWindows) {
-        const localApp = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
-        const candidates = [
-            path.join(localApp, 'Programs', 'Antigravity', 'Antigravity.exe'),
-            path.join(localApp, 'Antigravity', 'Antigravity.exe'),
-            path.join(os.homedir(), '.antigravity', 'Antigravity.exe'),
-        ];
-        for (const c of candidates) {
-            if (fs.existsSync(c)) return `"${c}"`;
-        }
         // Fallback: try `where` to find in PATH
         try {
-            const found = cp.execSync('where Antigravity', { encoding: 'utf8' }).trim().split('\n')[0];
+            const found = cp.execSync(`where "${AG_APP_NAME}"`, { encoding: 'utf8' }).trim().split('\n')[0];
             if (found && fs.existsSync(found.trim())) return `"${found.trim()}"`;
         } catch { /* not in PATH */ }
-        // Last resort: assume default path
-        return `"${candidates[0]}"`;
+        // Last resort: assume the default path of the active layout
+        return `"${AG_APP_LAUNCH_CANDIDATES[0]}"`;
     }
-    // Linux: try known path first, fall back to PATH
-    const linuxPath = path.join(os.homedir(), '.antigravity', 'antigravity', 'bin', 'antigravity');
-    if (fs.existsSync(linuxPath)) return `"${linuxPath}"`;
-    return 'antigravity';
+    // Linux: fall back to the binary name on PATH
+    return AG_PROFILE.dataDirName;
 }
 
 // ─── Main ────────────────────────────────────────────────────────────

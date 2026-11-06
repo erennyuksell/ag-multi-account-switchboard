@@ -5,15 +5,15 @@
  * This file is the esbuild entry point → bundled to out/webview/panel.js
  */
 
-import { vscode, wlog, intervalMs, initTimer } from './context';
+import { vscode, wlog } from './context';
 import { setupMessageHandler } from './message-handler';
 import {
-    refresh, addAccount, addAccountByToken, removeAccount, switchAccount,
+    addAccount, addAccountByToken, removeAccount, switchAccount,
     copyToken, toggleModel, pinModel, doRefresh, doRefreshTokenOnly,
     doRefreshUsage, switchTab, pickInterval, toggleOpen,
 } from './actions';
 
-interface SavedState { intervalMs?: number; activeTab?: string }
+interface SavedState { activeTab?: string }
 
 wlog('SCRIPT_EVALUATED_TOP');
 
@@ -37,10 +37,6 @@ window.addEventListener('unhandledrejection', function(e) {
 
 // ─── Init ───
 const saved = (vscode.getState() || {}) as SavedState;
-initTimer(refresh, saved.intervalMs || 60000);
-document.querySelectorAll('.iv-btn').forEach(b => {
-    b.classList.toggle('active', parseInt((b as HTMLElement).dataset.ms || '0') === intervalMs);
-});
 setupMessageHandler();
 
 wlog('BEFORE_READY_POST');

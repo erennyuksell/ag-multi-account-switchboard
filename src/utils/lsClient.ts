@@ -5,7 +5,7 @@
  * Centralised here so each fix only needs to happen once.
  *
  * Process-discovery strategy:
- *   - macOS/Linux: `ps -A -ww -o args` + grep
+ *   - macOS/Linux: `ps -A -ww -o pid,ppid,args` + grep
  *   - Windows:     `wmic process … get CommandLine`
  *
  * Both approaches read --https_server_port and --csrf_token directly from
@@ -20,7 +20,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
-    LS_CERT_PATHS, LS_PROCESS_GREP, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
+    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
     PROCESS_EXEC_TIMEOUT_MS, WMIC_EXEC_TIMEOUT_MS, LSOF_EXEC_TIMEOUT_MS,
     LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
 } from '../constants';
@@ -58,37 +58,175 @@ export interface LsEndpoint {
     csrf: string;
     /** workspace_id from LS process args — used to match the active workspace */
     wsId?: string;
+    /** Transport that actually answered on this port. Defaults to https. */
+    protocol?: 'http' | 'https';
+    /** True for the instance started without --workspace_id (the global LS). */
+    isGlobal?: boolean;
+    /**
+     * Owning process id. Carried because the workspace instance restarts often
+     * and the replacement inherits the same port: a match recorded against a
+     * port alone can be credited to a process that has since been replaced by
+     * one running a different account.
+     */
+    pid?: string;
 }
 
 // ==================== Process Discovery ====================
 
+/** TCP ports a PID is listening on. Returns [] on any failure. */
+async function getListeningPorts(pid: string): Promise<number[]> {
+    try {
+        const ports: number[] = [];
+        if (isWindows) {
+            const { stdout } = await execAsync('netstat -ano -p TCP 2>nul', { timeout: LSOF_EXEC_TIMEOUT_MS });
+            for (const line of stdout.split('\n')) {
+                if (!line.includes('LISTENING')) continue;
+                const parts = line.trim().split(/\s+/);
+                if (parts[parts.length - 1] !== pid) continue;
+                const m = parts[1]?.match(/:(\d+)$/);
+                if (m) ports.push(parseInt(m[1], 10));
+            }
+        } else {
+            const { stdout } = await execAsync(
+                `lsof -Pan -p ${pid} -i TCP -sTCP:LISTEN 2>/dev/null`,
+                { timeout: LSOF_EXEC_TIMEOUT_MS },
+            );
+            for (const line of stdout.split('\n')) {
+                const m = line.match(/:(\d+)\s+\(LISTEN\)/);
+                if (m) ports.push(parseInt(m[1], 10));
+            }
+        }
+        return [...new Set(ports)];
+    } catch { return []; }
+}
+
+/** One LS process as seen in `ps` / `Get-WmiObject` output. */
+interface LsProcess { pid: string; csrf: string; wsId?: string; httpsPort?: number }
+
+/** Parse "pid args" lines into LS process records. */
+function parseLsProcessLines(lines: string[]): LsProcess[] {
+    return lines.flatMap(line => {
+        const csrf = line.match(CSRF_TOKEN_RE)?.[1];
+        if (!csrf) return [];
+        const pid = line.trim().match(/^(\d+)\s/)?.[1] ?? '0';
+        const wsId = workspaceIdFromArgs(line);
+        const httpsPort = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
+        return [{ pid, csrf, wsId, httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined }];
+    });
+}
+
 /**
- * Find active Language Server processes and extract their HTTPS port + CSRF token
- * directly from process arguments (--https_server_port, --csrf_token).
+ * Probe timeout. Deliberately short: most candidate sockets are NOT RPC ports
+ * (the LSP port, for one) and simply never reply. At the default 10s request
+ * timeout a single dead port cost 20s (https then http), which stalled the
+ * switch confirmation poll for over 21 seconds.
+ */
+const PROBE_TIMEOUT_MS = 1_500;
+
+/** Does this port answer GetUserStatus over the given transport? */
+async function endpointAnswers(ep: LsEndpoint): Promise<boolean> {
+    try {
+        const body = await callLSEndpoint(ep, `${LS_SERVICE_PATH}/GetUserStatus`, undefined, PROBE_TIMEOUT_MS);
+        return body.length > 0;
+    } catch { return false; }
+}
+
+// Endpoint probing costs an lsof + a handful of HTTP calls per process, and the
+// readiness gate calls this every 400ms. Cache briefly, keyed by the process
+// snapshot so an LS restart (new pid/port) invalidates immediately.
+let _endpointCache: { signature: string; ts: number; endpoints: LsEndpoint[] } | null = null;
+const ENDPOINT_CACHE_TTL_MS = 10_000;
+
+/**
+ * Drop the cached endpoints so the next lookup re-probes.
+ * Call this on 401/CSRF failures: the LS can rotate its CSRF token without
+ * restarting, which leaves the pid/port signature unchanged and would
+ * otherwise keep serving credentials that no longer work.
+ */
+export function invalidateLsEndpointCache(): void {
+    _endpointCache = null;
+}
+
+/**
+ * Find active Language Server processes and resolve a working RPC endpoint for each.
  *
- * Cross-platform: ps on macOS/Linux, wmic on Windows.
+ * Antigravity runs a GLOBAL LS (no --workspace_id) alongside one LS per
+ * workspace. They hold independent accounts and adopt changes at different
+ * times, so identity-sensitive callers need to see all of them — and the
+ * global instance never advertises an --https_server_port, so reading the port
+ * out of argv (the previous behaviour) made it structurally invisible.
+ *
+ * So: take the argv port when present, otherwise fall back to scanning the
+ * PID's listening sockets, and probe candidates to find one that actually
+ * answers. Global instances are returned FIRST so identity-sensitive callers
+ * hit the right LS even if they only use endpoints[0].
+ *
+ * Cross-platform: ps + lsof on macOS/Linux, Get-WmiObject + netstat on Windows.
  * Returns an empty array (never throws) so callers can safely ignore LS absence.
  */
 export async function findLSEndpoints(): Promise<LsEndpoint[]> {
     try {
         let lines: string[];
         if (isWindows) {
-            lines = await getWindowsProcessLines(LS_PROCESS_GREP);
+            // Emit "PID <args>" so the same parser works on both platforms.
+            const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' } | ForEach-Object { ($_.ProcessId.ToString() + ' ' + $_.CommandLine) }"`;
+            try {
+                const { stdout } = await execAsync(ps, { timeout: PROCESS_EXEC_TIMEOUT_MS });
+                lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
+            } catch {
+                // No PID available from this fallback — argv ports only.
+                lines = (await getWindowsProcessLines(LS_PROCESS_GREP)).map(l => `0 ${l}`);
+            }
         } else {
             const { stdout } = await execAsync(
-                `ps -A -ww -o args | grep "${LS_PROCESS_GREP}" | grep -v grep`,
+                `ps -A -ww -o pid,ppid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`,
                 { timeout: LSOF_EXEC_TIMEOUT_MS },
             );
-            lines = stdout.trim().split('\n').filter(Boolean);
+            lines = withoutOrphanHubs(stdout.trim().split('\n').filter(Boolean));
         }
 
-        return lines.flatMap(line => {
-            const port = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
-            const csrf = line.match(CSRF_TOKEN_RE)?.[1];
-            const wsId = line.match(/--workspace_id[=\s]+(\S+)/)?.[1];
-            return port && csrf ? [{ port: +port, csrf, wsId }] : [];
-        });
-    } catch { /* expected: JSON parse failure — raw text response */
+        const procs = parseLsProcessLines(lines);
+        if (procs.length === 0) return [];
+
+        // Global first — see doc comment.
+        procs.sort((a, b) => Number(!!a.wsId) - Number(!!b.wsId));
+
+        const signature = procs.map(p => `${p.pid}:${p.httpsPort ?? ''}`).join('|');
+        if (_endpointCache && _endpointCache.signature === signature
+            && Date.now() - _endpointCache.ts < ENDPOINT_CACHE_TTL_MS) {
+            return _endpointCache.endpoints;
+        }
+
+        // Probe every process concurrently, and every candidate socket within a
+        // process concurrently. Sequential probing made discovery scale with the
+        // number of dead ports instead of staying flat.
+        const perProcess = await Promise.all(procs.map(async (proc): Promise<LsEndpoint | null> => {
+            const base = { csrf: proc.csrf, wsId: proc.wsId, isGlobal: !proc.wsId, pid: proc.pid };
+
+            // Candidates in priority order: the advertised HTTPS port first,
+            // then every other listening socket over https and http. The socket
+            // scan is what finds the global LS, which advertises no port at all.
+            const candidates: LsEndpoint[] = [];
+            if (proc.httpsPort) candidates.push({ ...base, port: proc.httpsPort, protocol: 'https' });
+            if (proc.pid !== '0') {
+                for (const port of await getListeningPorts(proc.pid)) {
+                    if (port === proc.httpsPort) continue; // already queued
+                    candidates.push({ ...base, port, protocol: 'https' });
+                    candidates.push({ ...base, port, protocol: 'http' });
+                }
+            }
+            if (candidates.length === 0) return null;
+
+            const answers = await Promise.all(candidates.map(endpointAnswers));
+            const idx = answers.indexOf(true);
+            return idx >= 0 ? candidates[idx] : null;
+        }));
+
+        const resolved = perProcess.filter((e): e is LsEndpoint => e !== null);
+
+        _endpointCache = { signature, ts: Date.now(), endpoints: resolved };
+        return resolved;
+    } catch { /* expected: process listing can fail while the LS restarts */
         return [];
     }
 }
@@ -130,9 +268,14 @@ export function callLSEndpoint(
     ls: LsEndpoint,
     endpoint: string,
     ca?: Buffer,
+    timeoutMs = LS_REQUEST_TIMEOUT_MS,
 ): Promise<Buffer> {
+    // The global LS answers plain HTTP on some of its sockets; endpoints
+    // resolved by port scanning carry the transport that actually replied.
+    const useHttps = ls.protocol !== 'http';
+    const transport = useHttps ? https : http;
     return new Promise((resolve, reject) => {
-        const req = https.request(
+        const req = transport.request(
             {
                 hostname: 'localhost',
                 port: ls.port,
@@ -144,7 +287,9 @@ export function callLSEndpoint(
                     'x-codeium-csrf-token': ls.csrf,
                     'Content-Length': '0',
                 },
-                ...(ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false }),
+                ...(useHttps
+                    ? (ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false })
+                    : {}),
             },
             async (res) => {
                 try {
@@ -158,7 +303,7 @@ export function callLSEndpoint(
             },
         );
         req.on('error', reject);
-        req.setTimeout(LS_REQUEST_TIMEOUT_MS, () => req.destroy(new Error('LS request timed out')));
+        req.setTimeout(timeoutMs, () => req.destroy(new Error('LS request timed out')));
         req.end();
     });
 }

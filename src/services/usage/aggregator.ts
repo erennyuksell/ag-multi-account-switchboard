@@ -14,6 +14,7 @@ import {
 } from '../../types';
 import { matchPricing, usageTotal } from '../../shared/usage-components';
 import { HOURS_IN_DAY } from '../../shared/uiConstants';
+import { localDateKey } from '../../shared/helpers';
 import { isGenericTitle, getTitleFromBrain, getTitleFromTranscript } from '../../shared/titleResolver';
 
 // ─── Model Display Name Resolution ───
@@ -25,43 +26,31 @@ function extractVersion(raw: string): string {
 }
 
 /**
- * Resolve raw model string to display name.
- * @param ts — ISO timestamp for date-aware placeholder resolution (optional)
+ * Effort tiers Antigravity appends to a model id (`gemini-3.7-flash-high`).
+ * These are distinct models with their own quota, so they must not collapse
+ * into one another — without this the three 3.7 Flash tiers all reported as a
+ * single "Gemini 3.7 Flash" row and their tokens and costs were summed together.
+ * `-lite` is deliberately absent: that is part of a family name, not a tier.
  */
-export function getModelDisplayName(raw: string, apiProvider?: string, ts?: string): string {
-    if (!raw || raw === 'Unknown') {
-        return apiProvider ? (PROVIDER_DISPLAY[apiProvider] || apiProvider.replace(/^API_PROVIDER_/i, '')) : 'Unknown';
-    }
+const EFFORT_SUFFIX_RE = /-(extra-low|low|medium|high)$/i;
 
-    // Resolve placeholders — M26 is date-aware (4.5 before cutoff, 4.6 after)
-    let resolved = PLACEHOLDER_MAP[raw] || raw;
-    if (raw === 'MODEL_PLACEHOLDER_M26' && ts && ts.slice(0, 10) < OPUS_46_CUTOFF) {
-        resolved = 'claude-opus-4-5-thinking';
-    }
+function formatEffort(raw: string): string {
+    return raw.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
 
-    // Unmapped placeholders: show as readable label (e.g. "Placeholder M50")
-    if (resolved === raw && /^MODEL_PLACEHOLDER_/i.test(raw)) {
-        const id = raw.replace(/^MODEL_PLACEHOLDER_/i, '');
-        return `Placeholder ${id}`;
-    }
-
-    const name = resolved.replace(/^models[/\-_]/, '');
-    const ver = extractVersion(name);
-    const v = ver ? ` ${ver}` : '';
-
+/** Family name without the effort tier — the tier is re-attached by the caller. */
+function familyName(name: string, v: string): string {
     if (/claude.*opus.*thinking/i.test(name)) return `Claude Opus${v} (Thinking)`;
     if (/claude.*opus/i.test(name)) return `Claude Opus${v}`;
     if (/claude.*sonnet.*thinking/i.test(name)) return `Claude Sonnet${v} (Thinking)`;
     // Sonnet 4.6+ is always the thinking variant — merge with above
     if (/claude.*sonnet/i.test(name)) {
-        const version = parseFloat(ver);
+        const version = parseFloat(v.trim());
         return version >= 4.6 ? `Claude Sonnet${v} (Thinking)` : `Claude Sonnet${v}`;
     }
     if (/claude.*haiku/i.test(name)) return `Claude Haiku${v}`;
     if (/claude/i.test(name)) return `Claude${v}`;
 
-    if (/gemini.*pro.*high/i.test(name)) return `Gemini${v} Pro`;
-    if (/gemini.*pro.*low/i.test(name)) return `Gemini${v} Pro (Low)`;
     if (/gemini.*pro.*image/i.test(name)) return `Gemini${v} Pro (Image)`;
     if (/gemini.*pro/i.test(name)) return `Gemini${v} Pro`;
     if (/gemini.*flash.*lite/i.test(name)) return `Gemini${v} Flash Lite`;
@@ -70,6 +59,56 @@ export function getModelDisplayName(raw: string, apiProvider?: string, ts?: stri
     if (/gpt.*oss/i.test(name)) return `GPT-OSS 120B`;
 
     return name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
+ * Resolve raw model string to display name.
+ * @param ts — ISO timestamp for date-aware placeholder resolution (optional)
+ */
+/**
+ * Labels for MODEL_PLACEHOLDER_M<n> ids the static map does not cover, learned
+ * from the server's own model list (GetUserStatus clientModelConfigs pairs
+ * each id with its label, e.g. M319 → "Gemini 3.8 Flash (Medium)"). Set by
+ * QuotaManager; never overrides PLACEHOLDER_MAP.
+ */
+let learnedLabels: Record<string, string> = {};
+export function setLearnedModelLabels(labels: Record<string, string>): void {
+    learnedLabels = { ...labels };
+}
+
+/** Model id behind a raw model string (placeholders resolved), e.g. "claude-opus-4-6-thinking". */
+export function resolveModelId(raw: string, ts?: string): string {
+    // M26 is date-aware (4.5 before cutoff, 4.6 after)
+    if (raw === 'MODEL_PLACEHOLDER_M26' && ts && ts.slice(0, 10) < OPUS_46_CUTOFF) return 'claude-opus-4-5-thinking';
+    return PLACEHOLDER_MAP[raw] || raw;
+}
+
+export function getModelDisplayName(raw: string, apiProvider?: string, ts?: string): string {
+    if (!raw || raw === 'Unknown') {
+        return apiProvider ? (PROVIDER_DISPLAY[apiProvider] || apiProvider.replace(/^API_PROVIDER_/i, '')) : 'Unknown';
+    }
+
+    const resolved = resolveModelId(raw, ts);
+
+    // Unmapped placeholders: the server's label if one was seen, else a
+    // readable id (e.g. "Placeholder M50")
+    if (resolved === raw && /^MODEL_PLACEHOLDER_/i.test(raw)) {
+        if (learnedLabels[raw]) return learnedLabels[raw];
+        const id = raw.replace(/^MODEL_PLACEHOLDER_/i, '');
+        return `Placeholder ${id}`;
+    }
+
+    const full = resolved.replace(/^models[/\-_]/, '');
+    const effortMatch = full.match(EFFORT_SUFFIX_RE);
+    const effort = effortMatch ? formatEffort(effortMatch[1].toLowerCase()) : '';
+    const name = effort ? full.replace(EFFORT_SUFFIX_RE, '') : full;
+
+    const ver = extractVersion(name);
+    const v = ver ? ` ${ver}` : '';
+
+    const base = familyName(name, v);
+    // Families that already carry a qualifier (Thinking, Image) keep it as-is.
+    return effort && !base.includes('(') ? `${base} (${effort})` : base;
 }
 
 // ─── Token Extraction ───
@@ -92,7 +131,8 @@ function buildDailyBuckets(entries: Array<TokenEntry & { _caW: number; _reas: nu
     const map: Record<string, DailyBucket> = {};
     for (const e of entries) {
         if (e.ts.length < 10) continue;
-        const day = e.ts.slice(0, 10);
+        // Local date, like the weekday and hourly buckets and the grid that draws these.
+        const day = localDateKey(new Date(e.ts));
         if (!map[day]) map[day] = { date: day, input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0 };
         map[day].input += e.inp;
         map[day].output += e.out;
@@ -104,17 +144,17 @@ function buildDailyBuckets(entries: Array<TokenEntry & { _caW: number; _reas: nu
     return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-/** Build 24-hour token buckets from filtered entries (UTC → local). */
+/** Build 24-hour token buckets from filtered entries (local hour). */
 function buildHourlyBuckets(entries: Array<TokenEntry & { _caW: number; _reas: number }>): HourlyBucket[] {
     const map: Record<number, HourlyBucket> = {};
     for (let h = 0; h < HOURS_IN_DAY; h++) {
         map[h] = { hour: h, input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0 };
     }
-    const localOffset = -(new Date().getTimezoneOffset() / 60);
     for (const e of entries) {
         if (e.ts.length < 13) continue;
-        const utcHour = parseInt(e.ts.slice(11, 13), 10);
-        const hour = Math.floor((utcHour + localOffset + HOURS_IN_DAY) % HOURS_IN_DAY);
+        // getHours() rather than today's offset: half-hour zones and DST
+        // changes inside the range were bucketed into the wrong hour.
+        const hour = new Date(e.ts).getHours();
         if (hour >= 0 && hour < HOURS_IN_DAY) {
             map[hour].input += e.inp;
             map[hour].output += e.out;
@@ -132,7 +172,10 @@ function buildModelBuckets(entries: Array<TokenEntry & { _caW: number; _reas: nu
     const map: Record<string, ModelBucket> = {};
     for (const e of entries) {
         const dn = e._displayName;
-        if (!map[dn]) map[dn] = { displayName: dn, input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0 };
+        if (!map[dn]) {
+            map[dn] = { displayName: dn, input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0,
+                rates: matchPricing(dn, resolveModelId(e.model, e.ts)) };
+        }
         map[dn].input += e.inp;
         map[dn].output += e.out;
         map[dn].cache += e.cache;
@@ -193,7 +236,7 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
 
     for (const e of allEntries) {
         if (!e.ts || e.ts.length < 7) continue;
-        const mk = e.ts.slice(0, 7);
+        const mk = localDateKey(new Date(e.ts)).slice(0, 7);
         if (!monthlyMap[mk]) {
             monthlyMap[mk] = { input: 0, output: 0, cache: 0, cacheWrite: 0, reasoning: 0, calls: 0, models: {} };
         }
@@ -205,7 +248,7 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
         mm.reasoning += e.reasoning || 0;
         mm.calls++;
         const dn = getModelDisplayName(e.model, e.provider, e.ts);
-        if (!mm.models[dn]) mm.models[dn] = { tokens: 0, inp: 0, out: 0, cache: 0, cacheWrite: 0, reas: 0 };
+        if (!mm.models[dn]) mm.models[dn] = { tokens: 0, inp: 0, out: 0, cache: 0, cacheWrite: 0, reas: 0, modelId: resolveModelId(e.model, e.ts) };
         mm.models[dn].tokens += e.inp + e.out + e.cache + (e.cacheWrite || 0) + (e.reasoning || 0);
         mm.models[dn].inp += e.inp;
         mm.models[dn].out += e.out;
@@ -227,12 +270,12 @@ function buildMonthlyBuckets(allEntries: TokenEntry[]): MonthlyBucket[] {
         // Cost from ALL models (not just top 5)
         let monthCost = 0;
         for (const [name, d] of allModels) {
-            const p = matchPricing(name);
+            const p = matchPricing(name, d.modelId);
             monthCost += (d.inp * p.input + d.cache * p.cache + d.cacheWrite * (p.input * 1.25) + d.out * p.output + d.reas * p.reasoning) / 1_000_000;
         }
         const topModels: MonthlyModelEntry[] = allModels
             .slice(0, 5)
-            .map(([name, d]) => ({ displayName: name, tokens: d.tokens, cost: 0, inp: d.inp, out: d.out, cache: d.cache, cacheWrite: d.cacheWrite, reas: d.reas }));
+            .map(([name, d]) => ({ displayName: name, rates: matchPricing(name, d.modelId), tokens: d.tokens, cost: 0, inp: d.inp, out: d.out, cache: d.cache, cacheWrite: d.cacheWrite, reas: d.reas }));
         monthly.push({
             key, label: MNAMES[monthIdx],
             input: md.input, output: md.output,

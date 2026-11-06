@@ -4,6 +4,9 @@ import { PollLock } from '../utils/pollLock';
 import { AccountQuota, AccountCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
 import { AccountManager } from './accountManager';
 import { buildAccountCards } from './accountCardBuilder';
+import { setLearnedModelLabels } from '../services/usage/aggregator';
+import { PLACEHOLDER_MAP } from '../services/usage/types';
+import { isAgyMode, readAgyIdentity } from '../services/agyAuth';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
 import { TokenBaseService, TokenBaseData, WorkspaceContextData } from '../services/tokenBase';
@@ -24,6 +27,8 @@ export class QuotaManager {
     private readonly statusBar: StatusBarService;
     private readonly emailResolver = new EmailResolver();
     private lastLocalData: LocalQuotaData | null = null;
+    /** When lastLocalData was read from the LS — drives the freshness badge. */
+    private lastLocalDataAt = 0;
     private lastTrackedQuotas: AccountQuota[] = [];
     private viewProvider: QuotaViewProvider | null = null;
     private refreshInFlight = false;
@@ -41,19 +46,57 @@ export class QuotaManager {
     private lastUsageStats: DeepUsageStats | null = null;
     private lastContextWindow: ContextWindowData | null = null;
     private lastContextConversationId: string | null = null;
-    /** Last known active email — used by pushCachedData to maintain consistent UI */
+    /** Last known active email — resolved from USS, the IDE's own source of truth */
     private lastActiveEmail = '';
+    /**
+     * Account a running switch is heading for. Separate from lastActiveEmail so
+     * a request is never rendered as the account actually in use; cleared when
+     * the switch settles.
+     */
+    private pendingSwitchEmail = '';
+    /**
+     * What the panel was last told to show, newest last. Read by the dev
+     * control channel to measure how long a window's panel lags behind a
+     * switch; costs nothing when nobody asks.
+     */
+    private readonly renderHistory: Array<{ t: number; active: string; pending: string; local: string; reason: string }> = [];
+    private static readonly RENDER_HISTORY_MAX = 40;
+    /** Set once this window has run a refresh of its own. */
+    private hasRefreshed = false;
+    /** Generation for the identity-change follow-up so only the newest runs. */
+    private identityRun = 0;
 
     private static readonly CTX_CACHE_KEY = 'ag.lastContextWindow';
     private static readonly CASCADE_ID_LOG_LEN = 12;
     private static readonly POST_SWITCH_REFRESH_DELAY = 2000;
+    /** Retry budget for re-acquiring local LS data while the LS restarts post-switch */
+    private static readonly POST_SWITCH_LOCAL_ATTEMPTS = 6;
+    private static readonly POST_SWITCH_LOCAL_DELAY_MS = 1500;
     private static readonly DEBOUNCE_MS = 1500;
+    /** Identity-change follow-up: how often and how long to re-read the local LS. */
+    private static readonly IDENTITY_FOLLOW_INTERVAL_MS = 1_500;
+    private static readonly IDENTITY_FOLLOW_MAX_MS = 30_000;
     /** Host-side polling interval — runs regardless of panel visibility */
-    private static readonly HOST_POLL_INTERVAL_MS = 60_000;
+    /**
+     * Refresh rates the panel offers. The picker used to set a timer inside
+     * the webview while this host timer, fixed at 60s, did the polling: 2m
+     * and 5m changed nothing, 30s only added a second timer, and the choice
+     * lapsed whenever the panel was collapsed. The host timer is now the only
+     * one and follows the picker.
+     */
+    static readonly POLL_INTERVALS_MS = [30_000, 60_000, 120_000, 300_000];
+    private static readonly DEFAULT_POLL_INTERVAL_MS = 60_000;
+    private static readonly POLL_INTERVAL_KEY = 'ag_pollIntervalMs';
+    private static readonly MODEL_LABELS_KEY = 'ag_learnedModelLabels';
     private currentUsageRange = '24h';
 
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
     private static readonly SERVER_CACHE_TTL = 60_000;
+    /** TTL for a failed discovery — short, so a starting LS is picked up quickly. */
+    private static readonly SERVER_CACHE_TTL_MISS = 3_000;
+    /** Bounded fast retries while the LS is still coming up. */
+    private static readonly SERVER_RETRY_MAX = 6;
+    private static readonly SERVER_RETRY_DELAY_MS = 3_000;
 
     // Global LS port is stable across IDE reloads; separate from workspace LS cache.
     private cachedCascadeServer: { info: ServerInfo | null; ts: number } | null = null;
@@ -61,6 +104,10 @@ export class QuotaManager {
     /** Lifecycle-scoped switch guard. AbortController so double-click aborts previous switch. */
     private switchController: AbortController | null = null;
     private hostPollTimer: ReturnType<typeof setInterval> | null = null;
+    private serverRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    private serverRetryCount = 0;
+    /** Generation counter so only the newest post-switch refresh loop survives. */
+    private postSwitchRun = 0;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -87,15 +134,36 @@ export class QuotaManager {
         this.refresh();
 
         // Host-side periodic poll — keeps status bar and cache fresh even
-        // when the sidebar panel is collapsed (webview timer dies without
-        // retainContextWhenHidden). This is the authoritative poll;
-        // the webview timer provides supplementary UI-driven refreshes.
-        this.hostPollTimer = setInterval(() => this.refresh(), QuotaManager.HOST_POLL_INTERVAL_MS);
+        // when the sidebar panel is collapsed. The only refresh timer.
+        this.startPollTimer();
+        setLearnedModelLabels(context.globalState.get<Record<string, string>>(QuotaManager.MODEL_LABELS_KEY) || {});
         context.subscriptions.push({ dispose: () => { if (this.hostPollTimer) clearInterval(this.hostPollTimer); } });
+        context.subscriptions.push({ dispose: () => { if (this.serverRetryTimer) clearTimeout(this.serverRetryTimer); } });
     }
 
     getSwitchService(): AccountSwitchService {
         return this.switchService;
+    }
+
+    getPollInterval(): number {
+        const ms = this.context.globalState.get<number>(QuotaManager.POLL_INTERVAL_KEY);
+        return ms && QuotaManager.POLL_INTERVALS_MS.includes(ms) ? ms : QuotaManager.DEFAULT_POLL_INTERVAL_MS;
+    }
+
+    /** Set from the panel's picker. Unknown values are refused, not clamped. */
+    setPollInterval(ms: number): void {
+        if (QuotaManager.POLL_INTERVALS_MS.includes(ms)) {
+            this.context.globalState.update(QuotaManager.POLL_INTERVAL_KEY, ms);
+            this.startPollTimer();
+            log.info(`Poll interval → ${ms / 1000}s`);
+        }
+        // Echo what is in effect, so the picker never shows a rate that is not.
+        this.viewProvider?.postMessage({ type: 'pollInterval', ms: this.getPollInterval() });
+    }
+
+    private startPollTimer(): void {
+        if (this.hostPollTimer) clearInterval(this.hostPollTimer);
+        this.hostPollTimer = setInterval(() => this.refresh(), this.getPollInterval());
     }
 
     setViewProvider(provider: QuotaViewProvider) {
@@ -123,6 +191,8 @@ export class QuotaManager {
             this.lastActiveEmail,
             !!this.switchController,
             this.getSelectedModels(),
+            this.lastLocalDataAt,
+            this.pendingSwitchEmail,
         );
         return cards;
     }
@@ -190,20 +260,51 @@ export class QuotaManager {
         log.info(`pushCachedData: hasLocal=${hasLocal}, trackedCount=${this.lastTrackedQuotas.length}, ctxFor=${ctxId}, active=${this.lastContextConversationId?.substring(0, 12) || 'none'}`);
 
         if (hasLocal || hasTracked) {
-            this.viewProvider.updateData(this.buildViewState());
+            const state = this.buildViewState();
+            this.viewProvider.updateData(state);
+            this.recordRender(state.accountCards, 'push');
             // Push cached context window if available — NO re-fetch here
             if (this.lastContextWindow) {
                 this.viewProvider.postContextWindow(this.lastContextWindow);
             }
             // Also update status bar from cached local data to prevent stale "Server Not Found"
             if (this.lastLocalData) this.updateStatusBar(this.lastLocalData);
+            return;
         }
+
+        // Nothing fetched yet — the cold-start case. Render the accounts we
+        // already know about so the panel drops its splash right away instead
+        // of sitting on it for the whole first refresh, which waits on the
+        // cloud API and on an LS that needs ~60s to answer after an IDE start.
+        // Quotas fill in as they land; a card with no models still shows who
+        // is signed in and lets the user switch.
+        const known = this.accountManager.getAccounts();
+        if (known.length === 0) return;
+
+        this.lastTrackedQuotas = known.map(account => ({
+            account,
+            models: [],
+            tier: null,
+            tierName: null,
+            isForbidden: false,
+            isError: false,
+            lastUpdated: 0,
+        }));
+        log.info(`pushCachedData: rendering ${known.length} account(s) from storage while the first refresh runs`);
+        this.viewProvider.updateData(this.buildViewState());
     }
 
     // ── Shared server resolution (DRY: used by refresh, refreshTokenOnly, fetchCtxIndependent) ──
 
     private async resolveServer(forceRefresh = false): Promise<ServerInfo | null> {
-        if (!forceRefresh && this.cachedServer && Date.now() - this.cachedServer.ts < QuotaManager.SERVER_CACHE_TTL) {
+        // A miss gets a much shorter TTL than a hit. The language server opens
+        // its sockets before it starts serving, so a probe during IDE startup
+        // legitimately fails — and caching that null for a full minute pinned
+        // the status bar to "Server Not Found" long after the LS was ready.
+        const ttl = this.cachedServer?.info
+            ? QuotaManager.SERVER_CACHE_TTL
+            : QuotaManager.SERVER_CACHE_TTL_MISS;
+        if (!forceRefresh && this.cachedServer && Date.now() - this.cachedServer.ts < ttl) {
             return this.cachedServer.info;
         }
         const info = await this.serverDiscovery.discover(this.getWorkspaceId()).catch(() => null);
@@ -362,13 +463,19 @@ export class QuotaManager {
             return;
         }
 
+        // The lock keeps windows from repeating the same periodic cloud calls.
+        // It must not stop a window's first load: every window has its own
+        // panel and they all start together, so after an IDE start or an
+        // extension host restart only one panel got data and the others stayed
+        // empty until a later poll happened to win (measured: 2 of 3 empty).
         const lock = new PollLock();
-        if (!await lock.tryAcquire()) {
+        if (this.hasRefreshed && !await lock.tryAcquire()) {
             log.diag('refresh: SKIPPED (lock held by another instance)');
             return;
         }
 
         this.refreshInFlight = true;
+        this.hasRefreshed = true;
         const startTime = Date.now();
         try {
             const hasData = !!(this.lastLocalData || this.lastTrackedQuotas.length > 0);
@@ -379,11 +486,26 @@ export class QuotaManager {
 
             const workspaceName = vscode.workspace.workspaceFolders?.[0]?.name ?? '';
             const workspaceFsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-            const [localResult, trackedResult, tokenBase, workspaceContext] = await Promise.all([
+            // Token Budget feeds a secondary tab, and with no serverInfo its
+            // fallback path walks every LS endpoint at the full request timeout
+            // — dead weight on a cold start. Let it settle on its own schedule
+            // and repaint when it does, instead of holding the account list
+            // behind the slowest thing on the panel.
+            const sideloads = Promise.all([
+                this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
+                serverInfo
+                    ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null)
+                    : Promise.resolve(null),
+            ]).then(([tokenBase, workspaceContext]) => {
+                this.lastTokenBase = tokenBase;
+                this.lastWorkspaceContext = workspaceContext;
+                this.pushCachedData();
+            }).catch(err => log.warn('token base / workspace context failed:', err?.message));
+            void sideloads;
+
+            const [localResult, trackedResult] = await Promise.all([
                 serverInfo ? this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null) : Promise.resolve(null),
                 this.accountManager.refreshAllQuotas().catch(() => []),
-                this.tokenBaseService.fetchTokenBase(serverInfo, this.getWorkspaceId()).catch(() => null),
-                serverInfo ? this.tokenBaseService.fetchWorkspaceContext(serverInfo, workspaceName, workspaceFsPath).catch(() => null) : Promise.resolve(null),
             ]);
 
             // Pre-load disk cache synchronously so first render includes usage stats
@@ -399,16 +521,27 @@ export class QuotaManager {
 
             if (localResult) {
                 this.lastLocalData = localResult;
+                this.lastLocalDataAt = Date.now();
                 this.updateStatusBar(localResult);
                 this.logQuotaFractions(localResult);
+                this.serverRetryCount = 0;
             } else {
                 this.lastLocalData = null;
-                this.statusBar.setError('$(error) Antigravity: Server Not Found', 'Could not connect to local Antigravity server');
+                this.lastLocalDataAt = 0;
+                // Startup races are the common case here, not a real absence —
+                // keep retrying briefly before settling on the error.
+                const retrying = this.scheduleServerRetry();
+                this.statusBar.setError(
+                    retrying ? '$(sync~spin) Antigravity: Connecting...' : '$(error) Antigravity: Server Not Found',
+                    retrying ? 'Waiting for the local Antigravity server' : 'Could not connect to local Antigravity server',
+                );
             }
 
-            this.lastTrackedQuotas = trackedResult;
-            this.lastTokenBase = tokenBase;
-            this.lastWorkspaceContext = workspaceContext;
+            // An empty result while accounts still exist means refreshAllQuotas
+            // threw, not that the user has no accounts — don't wipe the cards.
+            if (trackedResult.length > 0 || this.accountManager.getAccounts().length === 0) {
+                this.lastTrackedQuotas = trackedResult;
+            }
 
             if (this.viewProvider) {
                 if (this.lastLocalData || this.lastTrackedQuotas.length > 0) {
@@ -527,27 +660,39 @@ export class QuotaManager {
     }
 
     /** Switch the active IDE account to a tracked account */
-    async switchAccount(accountId: string): Promise<void> {
+    async switchAccount(accountId: string, opts: { skipConfirm?: boolean } = {}): Promise<{ confirmed: boolean; alreadyActive?: boolean; superseded?: boolean } | null> {
         const account = this.accountManager.getAccounts().find(a => a.id === accountId);
         if (!account) {
             vscode.window.showErrorMessage('Account not found');
-            return;
+            return null;
         }
-        // Force-refresh for max TTL token
-        const tokens = await this.accountManager.getValidTokensForAccount(account.email, true);
+        // The 2.5 language server could not refresh a token on its own, so it
+        // was handed a fresh one with the longest life. 2.6 hubs refresh
+        // themselves; the stored token is enough (it is still refreshed when
+        // close to expiry) and skipping the round trip saves ~1s per switch.
+        const tokens = await this.accountManager.getValidTokensForAccount(account.email, !isAgyMode());
         if (!tokens) {
             vscode.window.showErrorMessage(`No valid tokens for ${account.email}. Please re-add the account.`);
-            return;
+            return null;
         }
 
-        const confirm = await vscode.window.showWarningMessage(
-            `Switch IDE account to ${account.email}?`, { modal: true }, 'Switch',
-        );
-        if (confirm !== 'Switch') return;
+        if (!opts.skipConfirm) {
+            const confirm = await vscode.window.showWarningMessage(
+                `Switch IDE account to ${account.email}?`, { modal: true }, 'Switch',
+            );
+            if (confirm !== 'Switch') return null;
+        }
 
         // Abort previous switch (double-click protection)
         this.switchController?.abort();
         this.switchController = new AbortController();
+
+        // Say what was requested immediately — the badge announcing a switch
+        // has to appear when the switch starts, not when it ends. This is the
+        // request, deliberately not lastActiveEmail: that one tracks what the
+        // IDE is really on.
+        this.pendingSwitchEmail = account.email;
+        this.pushCachedData();
 
         try {
             const result = await this.switchService.switchAccount({
@@ -556,32 +701,212 @@ export class QuotaManager {
             });
             if (result.confirmed) {
                 this.lastActiveEmail = account.email;
-                log.info(`switchAccount: confirmed ${account.email}`);
+                log.info(result.alreadyActive
+                    ? `switchAccount: ${account.email} was already active — no change`
+                    : `switchAccount: confirmed ${account.email}`);
 
-                try {
-                    this.cachedServer = null;
-                    const serverInfo = await this.resolveServer();
-                    if (!serverInfo) throw new Error('no server');
-                    const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
-                    if (localData) {
-                        this.lastLocalData = localData;
-                        this.updateStatusBar(localData);
-                    }
-                } catch (e: any) {
-                    log.warn('Post-switch local fetch failed:', e?.message);
-                }
-
+                // Draw the new active account NOW. Which account is active is
+                // already known at this point, so making the panel wait for LS
+                // re-discovery left it showing the old one for ~6s after a
+                // switch that itself completed in ~1s.
                 this.pushCachedData();
+
+                // Then re-acquire local LS data in the background.
+                this.refreshLocalAfterSwitch()
+                    .catch(e => log.warn('post-switch local refresh failed:', (e as Error)?.message));
+
                 setTimeout(() => this.refresh(), QuotaManager.POST_SWITCH_REFRESH_DELAY);
             } else {
                 // USS state was set but LS unavailable — will recover on next LS restart
-                log.warn(`switchAccount: unconfirmed for ${account.email}`);
-                this.lastActiveEmail = account.email;
+                log.warn(`switchAccount: unconfirmed for ${account.email}${result.superseded ? ' (superseded)' : ''}`);
+                // Superseded: a newer switch owns the outcome. Otherwise the
+                // stored account is the best statement of where the IDE is.
+                this.lastActiveEmail = isAgyMode()
+                    ? (readAgyIdentity() || this.lastActiveEmail)
+                    : (result.superseded ? this.lastActiveEmail : account.email);
                 this.cachedServer = null;
             }
+            return result;
         } finally {
             this.switchController = null;
+            this.pendingSwitchEmail = '';
+            // Clear the SWITCHING badge now rather than at the next poll.
+            this.pushCachedData();
         }
+    }
+
+    /**
+     * USS reports a different account — every window hears this, including the
+     * ones that did not start the switch.
+     *
+     * Those windows used to run a full refresh() here, and lost: all windows
+     * hear the change in the same millisecond, the cross-window refresh lock
+     * lets exactly one through, and the panel of every other window kept the
+     * previous account for a minute or more (measured 39s and 60s+). The one
+     * that did get through read its LS mid-restart, so it drew the old
+     * account's quota anyway.
+     *
+     * What changed is known up front, so draw it immediately, then re-read the
+     * local LS (lock-free, local only — tracked quotas did not change) until it
+     * reports the new account.
+     */
+    onIdentityChanged(email: string): void {
+        if (this.switchController) return; // this window's own switch drives its panel
+        // On 2.6 USS no longer decides the account — the IDE rewrites it with
+        // a stale one on every extension host start — so take the stored hub
+        // account and ignore USS when they disagree.
+        if (isAgyMode()) email = readAgyIdentity() || email;
+        if (email === this.lastActiveEmail && this.lastLocalData?.userStatus?.email === email) return;
+        this.lastActiveEmail = email;
+        this.pushCachedData();
+        const run = ++this.identityRun;
+        void this.followLocalIdentity(email, run);
+    }
+
+    private async followLocalIdentity(email: string, run: number): Promise<void> {
+        const target = email.toLowerCase();
+        const start = Date.now();
+        while (Date.now() - start < QuotaManager.IDENTITY_FOLLOW_MAX_MS) {
+            await new Promise(r => setTimeout(r, QuotaManager.IDENTITY_FOLLOW_INTERVAL_MS));
+            if (run !== this.identityRun || this.switchController) return;
+            this.cachedServer = null;
+            const serverInfo = await this.resolveServer(true).catch(() => null);
+            const localData = serverInfo
+                ? await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null)
+                : null;
+            if (!localData || run !== this.identityRun) continue;
+            this.lastLocalData = localData;
+            this.lastLocalDataAt = Date.now();
+            this.updateStatusBar(localData);
+            this.pushCachedData();
+            if ((localData.userStatus?.email || '').toLowerCase() === target) {
+                log.info(`identity follow: local LS on ${email} after ${Date.now() - start}ms`);
+                return;
+            }
+        }
+        log.warn(`identity follow: local LS not on ${email} after ${QuotaManager.IDENTITY_FOLLOW_MAX_MS}ms`);
+    }
+
+    private recordRender(cards: AccountCard[], reason: string): void {
+        const active = cards.find(c => c.isActive)?.email || '';
+        const pending = cards.find(c => c.isPendingTarget)?.email || '';
+        const local = cards.find(c => c.isLocal)?.email || '';
+        const last = this.renderHistory[this.renderHistory.length - 1];
+        if (last && last.active === active && last.pending === pending && last.local === local) return;
+        this.renderHistory.push({ t: Date.now(), active, pending, local, reason });
+        if (this.renderHistory.length > QuotaManager.RENDER_HISTORY_MAX) this.renderHistory.shift();
+    }
+
+    /** Read-only view of the panel state, for the dev control channel. */
+    getDebugSnapshot() {
+        return {
+            lastActiveEmail: this.lastActiveEmail,
+            pendingSwitchEmail: this.pendingSwitchEmail,
+            switching: !!this.switchController,
+            localEmail: this.lastLocalData?.userStatus?.email || '',
+            localDataAt: this.lastLocalDataAt,
+            cards: this.getAccountCards().map(c => ({
+                email: c.email, isActive: !!c.isActive, isLocal: !!c.isLocal,
+                isPendingTarget: !!c.isPendingTarget, dataTimestamp: c.dataTimestamp || 0,
+            })),
+            renderHistory: [...this.renderHistory],
+        };
+    }
+
+    /** Read-only view of the Usage Stats and Token Budget data, for the dev control channel. */
+    getTabsSnapshot() {
+        const u = this.lastUsageStats;
+        const all = u ? this.usageStatsService.getFilteredStats('all') : null;
+        const day = u ? this.usageStatsService.getFilteredStats('24h') : null;
+        const tb = this.lastTokenBase;
+        const wc = this.lastWorkspaceContext;
+        const cascades = (all?.cascades || []) as any[];
+        return {
+            usage: u ? {
+                totalCalls: u.totalCalls, totalTokens: u.totalTokens, dateRange: u.dateRange,
+                last24h: day ? { calls: day.totalCalls, tokens: day.totalTokens } : null,
+                conversations: cascades.length,
+                untitled: cascades.filter(c => !c.title || /^untitled$/i.test(c.title)).length,
+                lastDay: (u.daily || []).slice(-1)[0]?.date,
+                lastDays: (all?.daily || []).slice(-3).map(d => `${d.date}:${d.calls}`),
+                top24h: ((day?.cascades || []) as any[]).slice().sort((a, b) => b.calls - a.calls).slice(0, 4).map(c => `${c.title} (${c.calls})`),
+                top: cascades.slice().sort((a, b) => b.calls - a.calls).slice(0, 3).map(c => `${c.title} (${c.calls})`),
+            } : null,
+            tokenBase: tb ? { total: tb.totalTokens, budget: tb.customizationBudget, categories: tb.categories.map(c => `${c.name}:${c.totalTokens}`) } : null,
+            workspaceContext: wc ? {
+                workspace: wc.workspaceName, rules: wc.rules.length, modelDecision: wc.rulesModelDecision.length,
+                manual: wc.rulesManual.length, skills: wc.skills.length, workflows: wc.workflows.length,
+            } : null,
+        };
+    }
+
+    getAuthService() {
+        return this.accountManager.getAuthService();
+    }
+
+    getTokensForEmail(email: string) {
+        return this.accountManager.getValidTokensForAccount(email, true);
+    }
+
+    getAccountIdByEmail(email: string): string | undefined {
+        return this.accountManager.getAccounts().find(a => a.email.toLowerCase() === email.toLowerCase())?.id;
+    }
+
+    /**
+     * Re-acquire local LS data after an account switch, redrawing when it lands.
+     *
+     * The language server is normally mid-restart at this moment — the switch
+     * flow re-asserts the token and calls handleAuthRefresh, which can bounce
+     * it — so a single probe reliably came back "no server" and the panel sat
+     * without local quota until a later poll happened to catch it. Retrying
+     * closes that window; running detached keeps it off the render path.
+     */
+    private async refreshLocalAfterSwitch(
+        attempts = QuotaManager.POST_SWITCH_LOCAL_ATTEMPTS,
+        delayMs = QuotaManager.POST_SWITCH_LOCAL_DELAY_MS,
+    ): Promise<void> {
+        // Switching twice in quick succession would otherwise leave two of these
+        // loops running, and the older one could push its stale account over the
+        // newer one's result seconds later.
+        const run = ++this.postSwitchRun;
+        this.cachedServer = null;
+        for (let i = 1; i <= attempts; i++) {
+            if (run !== this.postSwitchRun) {
+                log.info('post-switch: superseded by a newer switch, stopping');
+                return;
+            }
+            const serverInfo = await this.resolveServer(true).catch(() => null);
+            if (serverInfo) {
+                const localData = await this.serverDiscovery.fetchLocalQuota(serverInfo).catch(() => null);
+                if (localData) {
+                    this.lastLocalData = localData;
+                    this.lastLocalDataAt = Date.now();
+                    this.updateStatusBar(localData);
+                    this.pushCachedData();
+                    log.info(`post-switch: local data acquired on attempt ${i}`);
+                    return;
+                }
+            }
+            await new Promise(r => setTimeout(r, delayMs));
+        }
+        log.warn(`post-switch: local LS data still unavailable after ${attempts} attempts`);
+    }
+
+    /**
+     * Queue another discovery attempt after a miss.
+     * Returns true while retries remain, so the caller can say "connecting"
+     * instead of declaring the server missing on the first failed probe.
+     */
+    private scheduleServerRetry(): boolean {
+        if (this.serverRetryCount >= QuotaManager.SERVER_RETRY_MAX) return false;
+        if (this.serverRetryTimer) return true;
+
+        this.serverRetryCount++;
+        this.serverRetryTimer = setTimeout(() => {
+            this.serverRetryTimer = null;
+            this.refresh();
+        }, QuotaManager.SERVER_RETRY_DELAY_MS);
+        return true;
     }
 
     /** Copy refresh_token to clipboard for sharing */
@@ -664,6 +989,30 @@ export class QuotaManager {
 
     private updateStatusBar(data: LocalQuotaData): void {
         this.statusBar.update(data, this.getSelectedModels());
+        this.learnModelLabels(data);
+    }
+
+    /**
+     * Remember the label of every placeholder model id the server lists, so
+     * Usage Stats can name it after it is withdrawn from the list. Kept in
+     * globalState, which every window shares.
+     */
+    private learnModelLabels(data: LocalQuotaData): void {
+        const configs = data.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+        const known = this.context.globalState.get<Record<string, string>>(QuotaManager.MODEL_LABELS_KEY) || {};
+        let changed = false;
+        for (const c of configs as any[]) {
+            const id = c?.modelOrAlias?.model;
+            const label = c?.label;
+            if (typeof id !== 'string' || typeof label !== 'string' || !label) continue;
+            if (!/^MODEL_PLACEHOLDER_/.test(id) || PLACEHOLDER_MAP[id] || known[id] === label) continue;
+            known[id] = label;
+            changed = true;
+        }
+        if (changed) {
+            this.context.globalState.update(QuotaManager.MODEL_LABELS_KEY, known);
+            setLearnedModelLabels(known);
+        }
     }
 
     /** Diagnostic probe: log raw LS remainingFraction per model (only in diag mode) */

@@ -13,22 +13,13 @@ export let lastRenderArgs: unknown[] = [];
 export const setPinnedModels = (m: Record<string, string>) => { pinnedModels = m; };
 export const setLastRenderArgs = (a: unknown[]) => { lastRenderArgs = a; };
 
-// ─── Refresh Timer ───
-let _timer: ReturnType<typeof setInterval> | null = null;
-let _fn: (() => void) | null = null;
-export let intervalMs = 60000;
+// ─── Refresh rate ───
+// The extension host owns the refresh timer (it keeps running while the panel
+// is collapsed); the picker only asks it to change and shows what it reports.
 
-/** Call once at init — registers the refresh callback and starts the timer. */
-export function initTimer(fn: () => void, ms: number): void {
-    _fn = fn;
-    intervalMs = ms;
-    _timer = setInterval(fn, ms);
-}
-
-/** Updates the refresh interval and persists to webview state. */
-export function updateInterval(ms: number): void {
-    intervalMs = ms;
-    if (_timer) clearInterval(_timer);
-    if (_fn) _timer = setInterval(_fn, ms);
-    vscode.setState({ ...vscode.getState(), intervalMs: ms });
+/** Highlight the rate the host says is in effect. */
+export function showInterval(ms: number): void {
+    document.querySelectorAll('.iv-btn').forEach(b => {
+        b.classList.toggle('active', parseInt((b as HTMLElement).dataset.ms || '0') === ms);
+    });
 }

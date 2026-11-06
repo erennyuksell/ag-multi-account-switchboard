@@ -2,7 +2,7 @@
  * Message handler — routes incoming messages from the extension host.
  */
 
-import { wlog, setPinnedModels, setLastRenderArgs, lastRenderArgs } from './context';
+import { wlog, setPinnedModels, setLastRenderArgs, lastRenderArgs, showInterval } from './context';
 import { renderAll } from './renderers/accounts';
 import { renderTokenBudget } from './renderers/tokens';
 import { renderWorkspaceContext } from './renderers/workspace';
@@ -100,6 +100,10 @@ export function setupMessageHandler(): void {
                 }
                 break;
             }
+
+            case 'pollInterval':
+                showInterval(msg.ms);
+                break;
 
             case 'conversationStatus': {
                 const banner = document.getElementById('convGuardBanner');

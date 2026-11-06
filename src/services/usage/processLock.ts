@@ -10,12 +10,12 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { BRAIN_DIR } from '../../shared/agPaths';
 import { createLogger } from '../../utils/logger';
 
 const log = createLogger('ProcessLock');
 
-const LOCK_FILE = path.join(os.homedir(), '.gemini', 'antigravity', 'brain', '.deep_stats_cache.lock');
+const LOCK_FILE = path.join(BRAIN_DIR, '.deep_stats_cache.lock');
 const STALE_THRESHOLD_MS = 60_000; // 60 seconds — lock expires if holder crashes
 
 interface LockData {

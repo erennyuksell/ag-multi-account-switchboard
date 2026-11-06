@@ -4,7 +4,7 @@
  * Used by: webview/renderers/usage.ts (sidebar) & providers/usageStatsPanel.ts (detail panel)
  */
 
-import { fmtNum, fmtBig, fmtShortDate, escHtml } from './helpers';
+import { fmtNum, fmtBig, fmtShortDate, escHtml, localDateKey } from './helpers';
 import { DailyBucket, HourlyBucket, ModelBucket, CascadeBucket, MonthlyBucket, MonthlyModelEntry, ProviderBucket, WeekdayBucket } from '../types';
 import {
     CASCADE_LIST_LIMIT, CASCADE_TITLE_MAX_LEN,
@@ -129,7 +129,7 @@ const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
  */
 export function renderDailyGrid(daily: DailyBucket[], large: boolean = false, year?: number, costPerToken: number = 0): string {
     const selectedYear = year ?? new Date().getFullYear();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateKey(new Date());
 
     // Build date → tokens lookup
     const dateMap = new Map<string, { total: number; calls: number }>();
@@ -164,7 +164,7 @@ export function renderDailyGrid(daily: DailyBucket[], large: boolean = false, ye
     let peakDay = { date: '', total: 0, calls: 0 };
 
     while (cursor <= gridEnd) {
-        const iso = cursor.toISOString().slice(0, 10);
+        const iso = localDateKey(cursor);
         const data = dateMap.get(iso);
         const total = data?.total || 0;
         const calls = data?.calls || 0;
@@ -326,10 +326,10 @@ export function renderCascadeList(cascades: CascadeBucket[], limit: number = CAS
 export type PricingEntry = { input: number; output: number; cache: number; reasoning: number };
 
 /** External pricing resolver — injected by extension at boot (e.g. LiteLLM catalog) */
-let externalResolver: ((displayName: string) => PricingEntry | null) | null = null;
+let externalResolver: ((modelName: string) => PricingEntry | null) | null = null;
 
 /** Register an external pricing resolver (e.g. LiteLLM dynamic catalog) */
-export function setExternalPricingResolver(resolver: (displayName: string) => PricingEntry | null): void {
+export function setExternalPricingResolver(resolver: (modelName: string) => PricingEntry | null): void {
     externalResolver = resolver;
 }
 
@@ -368,10 +368,19 @@ export function getPricing(): Record<string, PricingEntry> {
     return { ...pricing };
 }
 
-export function matchPricing(displayName: string): PricingEntry {
+/** Rates for a model nobody has a price for: counted in tokens, left out of cost. */
+const UNPRICED: PricingEntry = { input: 0, output: 0, cache: 0, reasoning: 0 };
+
+/**
+ * @param modelId — e.g. "claude-opus-4-6-thinking". The live catalog is keyed
+ *   by id: asked with display names ("Claude Opus 4.6 (Thinking)") it matched
+ *   none of the models in use (measured 2026-11-06), so every cost came from
+ *   the keyword table below.
+ */
+export function matchPricing(displayName: string, modelId?: string): PricingEntry {
     // 1. External resolver (LiteLLM dynamic catalog — highest priority after settings override)
     if (externalResolver) {
-        const external = externalResolver(displayName);
+        const external = (modelId && externalResolver(modelId)) || externalResolver(displayName);
         if (external) return external;
     }
 
@@ -390,7 +399,14 @@ export function matchPricing(displayName: string): PricingEntry {
         return pricing[is25 ? 'gemini-2-pro' : 'gemini-3-pro'];
     // GPT
     if (lower.includes('gpt'))    return pricing['gpt-oss'];
-    return pricing['sonnet']; // fallback
+    // Unknown (e.g. an unresolved "Placeholder M133"): billing it at Sonnet
+    // rates invented a cost. Leave it out instead.
+    return UNPRICED;
+}
+
+/** Rates resolved by the host when present, otherwise matched here. */
+export function ratesOf(m: { displayName: string; rates?: PricingEntry }): PricingEntry {
+    return m.rates ?? matchPricing(m.displayName);
 }
 
 /** Smart dollar format: $0.42 for small, $15 for large */
@@ -406,7 +422,7 @@ export function calculateTotalCost(models: ModelBucket[]): number {
     if (!models || models.length === 0) return 0;
     let total = 0;
     for (const m of models) {
-        const p = matchPricing(m.displayName);
+        const p = ratesOf(m);
         total += (m.input / 1e6) * p.input
             + ((m.cache || 0) / 1e6) * p.cache
             + ((m.cacheWrite || 0) / 1e6) * (p.input * 1.25)
@@ -455,7 +471,7 @@ export function renderCompactModelBreakdown(models: ModelBucket[], totalTokens: 
 /** Estimate cost for a single month bucket using per-model pricing */
 function estimateTopModelCosts(m: MonthlyBucket): MonthlyModelEntry[] {
     return m.topModels.map(tm => {
-        const p = matchPricing(tm.displayName);
+        const p = ratesOf(tm);
         const cost = (tm.inp * p.input + tm.cache * p.cache + (tm.cacheWrite || 0) * (p.input * 1.25) + tm.out * p.output + tm.reas * p.reasoning) / 1_000_000;
         return { ...tm, cost };
     });
@@ -745,7 +761,7 @@ export function renderCostEstimate(models: ModelBucket[]): string {
     let grandTotal = 0;
 
     for (const m of models) {
-        const p = matchPricing(m.displayName);
+        const p = ratesOf(m);
         const inputCost    = (m.input / 1e6) * p.input;
         const cacheCost    = ((m.cache || 0) / 1e6) * p.cache;
         const outputCost   = (m.output / 1e6) * p.output;

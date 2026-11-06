@@ -15,6 +15,7 @@ import { QuotaManager } from '../managers/quotaManager';
 import { extractField, extractStringField } from '../shared/protobuf';
 import { getUSS } from '../utils/uss';
 import { createLogger } from '../utils/logger';
+import { tokenFingerprint } from '../utils/tokenFingerprint';
 
 const log = createLogger('ConversationTracker');
 
@@ -63,6 +64,7 @@ export class ConversationTracker implements vscode.Disposable {
 
         await this.startTrajectorySummariesListener(uss);
         await this.startUserStatusListener(uss);
+        await this.startOAuthListener(uss);
     }
 
     dispose(): void {
@@ -248,7 +250,7 @@ export class ConversationTracker implements vscode.Disposable {
                 if (email && email !== lastEmail) {
                     lastEmail = email;
                     log.info(`userStatus: email changed → ${email}`);
-                    this.quotaManager.refresh();
+                    this.quotaManager.onIdentityChanged(email);
                 }
             };
 
@@ -257,6 +259,41 @@ export class ConversationTracker implements vscode.Disposable {
             this.disposables.push(topic.onDidChange(() => handleChange()));
         } catch (e: unknown) {
             log.warn(`userStatus failed: ${(e as Error)?.message}`);
+        }
+    }
+
+    // ── OAuth: which token this window's extension host sees ───────
+
+    /**
+     * Diagnostic. Antigravity spawns each window's language server with the
+     * OAuth token this extension host's USS replica holds at that moment, so
+     * a window whose replica lags restarts its server on a stale account.
+     * Logs a short fingerprint (never the token) of the refresh token every
+     * time this window's replica changes, so windows can be compared.
+     */
+    private async startOAuthListener(uss: USSSubscriber): Promise<void> {
+        try {
+            const topic = await Promise.race([
+                uss.subscribe('uss-oauth'),
+                this.timeout(SUBSCRIBE_TIMEOUT),
+            ]);
+            if (!topic) return;
+            const fingerprint = (): string => {
+                const row = (topic.getState() as Record<string, USSRow | undefined> | null)?.['oauthTokenInfoSentinelKey'];
+                if (!row?.value) return 'none';
+                try {
+                    const refresh = extractStringField(Buffer.from(row.value, 'base64'), 3);
+                    return refresh ? tokenFingerprint(refresh) : 'no-refresh';
+                } catch { return 'unparsed'; }
+            };
+            let last = fingerprint();
+            log.info(`oauth: ✅ listening (refresh=${last})`);
+            this.disposables.push(topic.onDidChange(() => {
+                const now = fingerprint();
+                if (now !== last) { log.info(`oauth: replica changed ${last} → ${now}`); last = now; }
+            }));
+        } catch (e: unknown) {
+            log.warn(`oauth listener failed: ${(e as Error)?.message}`);
         }
     }
 
@@ -302,3 +339,4 @@ export class ConversationTracker implements vscode.Disposable {
         return new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms}ms`)), ms));
     }
 }
+

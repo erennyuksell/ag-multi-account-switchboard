@@ -38,13 +38,17 @@ export class QuotaViewProvider implements vscode.WebviewViewProvider {
                     log.info('MSG: ready received');
                     // Instant: push whatever is in memory RIGHT NOW (0ms, no network)
                     this.quotaManager.pushCachedData();
+                    this.postMessage({ type: 'pollInterval', ms: this.quotaManager.getPollInterval() });
                     // Then silently fetch fresh quota in background.
                     // Without this, a re-opened panel shows stale data until the
-                    // next 60s webview timer tick (retainContextWhenHidden is off).
+                    // next host poll (retainContextWhenHidden is off).
                     this.quotaManager.refresh();
                     break;
                 case 'refresh':
                     this.quotaManager.refresh();
+                    break;
+                case 'setPollInterval':
+                    this.quotaManager.setPollInterval(Number(msg.ms));
                     break;
                 case 'refreshTokenOnly':
                     this.quotaManager.refreshTokenOnly();

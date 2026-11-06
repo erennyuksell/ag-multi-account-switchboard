@@ -248,6 +248,21 @@ body {
     line-height: 1.4;
 }
 
+/* Requested, not yet in effect. Sits where ACTIVE would, so the difference is
+   read at a glance — amber rather than green, because nothing has moved yet. */
+.pending-tag {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--badge-fg);
+    background: var(--vscode-charts-yellow, #e2c541);
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: .3px;
+    flex-shrink: 0;
+    line-height: 1.4;
+    animation: pulse-transition 1.8s ease-in-out infinite;
+}
+
 .tier-tag {
     font-size: 10px;
     font-weight: 600;
@@ -267,6 +282,27 @@ body {
     opacity: 0.85;
     animation: pulse-transition 1.8s ease-in-out infinite;
     flex-shrink: 0;
+}
+
+/* Marks numbers that are not live: either not fetched yet, or a kept-over
+   reading from before a failed refresh. Deliberately quiet — it should read as
+   a caveat on the figures, not as an error. */
+.stale-tag {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 1px 4px;
+    margin-left: 4px;
+    border-radius: 3px;
+    color: var(--vscode-descriptionForeground, #999);
+    border: 1px solid currentColor;
+    opacity: 0.6;
+    flex-shrink: 0;
+}
+
+.stale-tag.pending {
+    border-style: dashed;
+    animation: pulse-transition 1.8s ease-in-out infinite;
 }
 
 @keyframes pulse-transition {
@@ -455,8 +491,13 @@ body {
     transition: max-height .25s ease;
 }
 
+/* Capped so the slide animation still has a target, but scrollable: a tracked
+   account lists every model the quota API returns (13+ rows after tier
+   grouping), which overflowed the old fixed 900px cap and was cut off with no
+   way to reach the last models (issue #11). */
 .acct.open .m-details {
-    max-height: 900px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* ─── Quota Pool Headers (Expanded) ─── */
@@ -566,6 +607,20 @@ body {
     text-overflow: ellipsis;
     flex: 1;
     min-width: 0;
+}
+
+/* Effort tiers collapsed into this row (they share one quota pool) */
+.m-tiers {
+    font-size: 9px;
+    line-height: 1;
+    letter-spacing: 0.3px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 4px;
+    margin-left: 5px;
+    flex-shrink: 0;
+    opacity: 0.75;
 }
 
 .m-right {
@@ -1287,8 +1342,11 @@ body {
     transition: max-height .25s ease;
 }
 
+/* Same cap-and-scroll as account cards: a long skill or MCP tool list would
+   otherwise be cut off at the old fixed 600px. */
 .cat-card.open .cat-items {
-    max-height: 600px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 .cat-item {
@@ -1408,7 +1466,8 @@ body {
 }
 
 .mcp-server.open .mcp-tools {
-    max-height: 800px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* ─── Workspace Context Section ─── */
@@ -1574,7 +1633,8 @@ body {
 }
 
 .wc-group.open .wc-items {
-    max-height: 1200px;
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 /* Individual workspace item rows */

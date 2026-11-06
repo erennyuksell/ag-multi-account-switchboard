@@ -53,14 +53,68 @@ function resolveLabel(apiKey: string, labelMap: Map<string, string>): string {
     return shortModelName(apiKey);
 }
 
+const TIER_SUFFIX_RE = /\s*\((Extra Low|Low|Medium|High)\)\s*$/i;
+const TIER_ORDER = ['Extra Low', 'Low', 'Medium', 'High'];
+
+/**
+ * Collapse a model's effort tiers into a single row.
+ *
+ * Antigravity exposes every tier as its own model, but they draw from one pool:
+ * all twelve Gemini entries move together and reset at the same moment, so the
+ * list showed twelve identical bars. Collapsing happens ONLY when the numbers
+ * genuinely match — if a tier ever diverges it stays on its own row rather than
+ * being hidden behind a sibling's percentage.
+ */
+function groupEffortTiers(models: ModelCard[]): ModelCard[] {
+    const groups = new Map<string, ModelCard[]>();
+    for (const m of models) {
+        const base = m.label.replace(TIER_SUFFIX_RE, '');
+        const arr = groups.get(base) ?? [];
+        arr.push(m);
+        groups.set(base, arr);
+    }
+
+    const out: ModelCard[] = [];
+    for (const [base, group] of groups) {
+        const collapsible = group.length > 1
+            && group.every(g => g.pct === group[0].pct && g.resetTime === group[0].resetTime);
+        if (!collapsible) { out.push(...group); continue; }
+
+        const tiers = group
+            .map(g => g.label.match(TIER_SUFFIX_RE)?.[1] || '')
+            .filter(Boolean)
+            .sort((a, b) => TIER_ORDER.indexOf(a) - TIER_ORDER.indexOf(b));
+        out.push({ ...group[0], label: base, tiers });
+    }
+    return out;
+}
+
 export function buildAccountCards(
     localData: LocalQuotaData | null,
     trackedQuotas: AccountQuota[],
     activeEmailRaw: string,
     switchActive: boolean,
     selectedModels: string[],
+    /**
+     * When localData was actually read from the LS. Cards get re-rendered from
+     * memory on every push, so stamping "now" here would present a reading kept
+     * from a failed refresh as if it were live.
+     */
+    localDataAt = 0,
+    /**
+     * Account the user just asked for, while that switch is still in flight.
+     * Kept separate from activeEmailRaw so a request can never be mistaken for
+     * the account actually in use.
+     */
+    pendingEmailRaw = '',
 ): AccountCard[] {
+    // Authority on "which account is in use" is USS — the same record
+    // Antigravity's own profile menu reads. It deliberately is NOT whichever
+    // language server happens to answer: the workspace instance restarts on its
+    // own and the replacement can come up on the previous account, which had
+    // the panel badge an account the IDE had already moved off.
     const activeEmail = (activeEmailRaw || '').toLowerCase();
+    const pendingEmail = (pendingEmailRaw || '').toLowerCase();
     const cards: AccountCard[] = [];
 
     // Build label map from local LS data (Rosetta Stone for cross-source pin matching)
@@ -74,7 +128,7 @@ export function buildAccountCards(
             .filter((m: any) => m.quotaInfo)
             .sort((a: any, b: any) => (a.label || '').localeCompare(b.label || ''));
 
-        const models: ModelCard[] = rawModels.map((m: any) => ({
+        const models: ModelCard[] = groupEffortTiers(rawModels.map((m: any) => ({
             id: m.modelOrAlias?.model || m.label,
             label: m.label || shortModelName(m.modelOrAlias?.model),
             pct: m.quotaInfo.remainingFraction !== undefined
@@ -82,25 +136,28 @@ export function buildAccountCards(
                 : 0,
             resetTime: m.quotaInfo.resetTime || '',
             isLocal: true,
-        }));
+        })));
 
         const bottleneckModel = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
         const userTier = parseUserTier(status.userTier);
         const planStatus = parsePlanStatus(status.planStatus);
         const aiCredits = userTier.availableCredits.find(c => c.creditType === 'GOOGLE_ONE_AI');
 
-        // Intent email ≠ LS email → switch in progress, LS hasn't adopted new identity yet
+        // A switch is running and this card is not its destination.
         const isTransitioning = !!(
-            activeEmail && localEmail &&
-            activeEmail !== localEmail &&
-            switchActive
+            switchActive && pendingEmail && localEmail && pendingEmail !== localEmail
         );
 
         cards.push({
             email: status.email || 'active-local',
+            // Built from language server data, so it only holds the badge while
+            // that server agrees with USS. When it lags behind — or restarts
+            // onto the previous account — the quota numbers here describe an
+            // account the IDE is no longer using, and the badge belongs to the
+            // tracked card that does match.
             isActive: !activeEmail || activeEmail === localEmail,
             isTransitioning,
-            pendingEmail: isTransitioning ? activeEmailRaw : undefined,
+            pendingEmail: isTransitioning ? pendingEmailRaw : undefined,
             models,
             bottleneck: bottleneckModel,
             tierName: userTier.name,
@@ -114,6 +171,7 @@ export function buildAccountCards(
             isError: false,
             selectedModels,
             isLocal: true,
+            dataTimestamp: localDataAt,
         });
     }
 
@@ -125,20 +183,28 @@ export function buildAccountCards(
         const trackedEmail = (trackedQuota.account.email || '').toLowerCase();
         if (dedupEmail && trackedEmail === dedupEmail) continue;
 
-        const models: ModelCard[] = (trackedQuota.models || []).map(m => ({
+        const models: ModelCard[] = groupEffortTiers((trackedQuota.models || []).map(m => ({
             id: m.name,
             label: resolveLabel(m.name, labelMap),
             pct: m.percentage || 0,
             resetTime: m.resetTimeRaw || m.resetTime || '',
             isLocal: false,
-        }));
+        })));
 
         const bottleneckModel = models.length > 0 ? models.reduce((a, b) => a.pct < b.pct ? a : b) : null;
+
+        // Requested, and USS has not moved to it yet. Driven by the in-flight
+        // request rather than by language server lag, so the badge appears when
+        // the user clicks and clears the moment the IDE actually switches.
+        const isPendingTarget = !!(
+            pendingEmail && trackedEmail === pendingEmail && trackedEmail !== activeEmail
+        );
 
         cards.push({
             email: trackedQuota.account.email || 'Unknown',
             name: trackedQuota.account.name,
-            isActive: !!(activeEmail && activeEmail === trackedEmail),
+            isActive: !!activeEmail && activeEmail === trackedEmail,
+            isPendingTarget,
             trackingId: trackedQuota.account.id,
             models,
             bottleneck: bottleneckModel,
@@ -146,6 +212,7 @@ export function buildAccountCards(
             resetTime: bottleneckModel?.resetTime || '',
             isError: trackedQuota.isError || trackedQuota.isForbidden,
             errorMessage: trackedQuota.isForbidden ? 'Access forbidden' : (trackedQuota.errorMessage || ''),
+            dataTimestamp: trackedQuota.lastUpdated,
             selectedModels: [],
             isLocal: false,
             aiCredits: null,
