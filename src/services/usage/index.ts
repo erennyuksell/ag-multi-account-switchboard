@@ -15,7 +15,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { BRAIN_DIR } from '../../shared/agPaths';
+import { BRAIN_DIR, CONVERSATIONS_DIR } from '../../shared/agPaths';
 import { ServerInfo, DeepUsageStats } from '../../types';
 import { RpcDirectClient } from '../rpcDirectClient';
 import { callLsJson } from '../../utils/lsClient';
@@ -704,24 +704,38 @@ export class UsageStatsService {
         return out;
     }
 
-    /** Scan ~/.gemini/antigravity/brain/ for conversation UUIDs */
+    /**
+     * Conversation UUIDs: brain/ folders plus conversation files.
+     *
+     * brain/<id> alone missed conversations: 2.6 moved conversations into its
+     * data dir on upgrade without their brain folders, and a hub creates the
+     * folder only when it loads the conversation. Measured 2026-11-06: 8 of
+     * 15 conversations (241 calls) had no folder and were never counted; the
+     * hub served all of them when asked.
+     */
     private discoverConversationIds(): string[] {
-        const brainDir = BRAIN_DIR;
-        if (!fs.existsSync(brainDir)) {
-            log.warn(`discoverConversationIds: brain dir does not exist: ${brainDir}`);
-            return [];
-        }
-
         const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const ids = new Set<string>();
         try {
-            const allEntries = fs.readdirSync(brainDir, { withFileTypes: true });
-            const uuidDirs = allEntries.filter(d => d.isDirectory() && UUID_RE.test(d.name));
-            log.diag(`discoverConversationIds: brain dir has ${allEntries.length} total entries, ${uuidDirs.length} are UUID conversation dirs`);
-            return uuidDirs.map(d => d.name);
+            if (fs.existsSync(BRAIN_DIR)) {
+                for (const d of fs.readdirSync(BRAIN_DIR, { withFileTypes: true })) {
+                    if (d.isDirectory() && UUID_RE.test(d.name)) ids.add(d.name);
+                }
+            } else {
+                log.warn(`discoverConversationIds: brain dir does not exist: ${BRAIN_DIR}`);
+            }
+            const fromBrain = ids.size;
+            if (fs.existsSync(CONVERSATIONS_DIR)) {
+                for (const f of fs.readdirSync(CONVERSATIONS_DIR)) {
+                    const m = f.match(/^(.{36})\.(db|pb)$/);
+                    if (m && UUID_RE.test(m[1])) ids.add(m[1]);
+                }
+            }
+            log.diag(`discoverConversationIds: ${fromBrain} from brain/, ${ids.size - fromBrain} more from conversations/`);
         } catch (e: any) {
-            log.warn(`discoverConversationIds: failed to read brain dir: ${e?.message}`);
-            return [];
+            log.warn(`discoverConversationIds: failed: ${e?.message}`);
         }
+        return [...ids];
     }
 
     // ─── Response Extractors ───

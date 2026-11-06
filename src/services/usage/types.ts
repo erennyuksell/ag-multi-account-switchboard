@@ -116,7 +116,7 @@ export interface MonthlyAccumulator {
     cacheWrite: number;
     reasoning: number;
     calls: number;
-    models: Record<string, { tokens: number; inp: number; out: number; cache: number; cacheWrite: number; reas: number }>;
+    models: Record<string, { tokens: number; inp: number; out: number; cache: number; cacheWrite: number; reas: number; modelId: string }>;
 }
 
 // ─── Model Placeholder Maps ───

@@ -28,7 +28,8 @@ import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache 
 import { extractField, extractStringField } from '../shared/protobuf';
 import { LS_SERVICE_PATH } from '../constants';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
-import { isAgyMode, readAgyIdentity, readAgyKeychainIdentity, writeAgyToken } from '../services/agyAuth';
+import { isAgyMode, readAgyIdentity, readAgyKeychainIdentity, writeAgyToken, readKeychainJson, writeKeychainJson } from '../services/agyAuth';
+import { findOwnHub, hubCall, hubIdentity } from '../services/agyHub';
 import { ideVersion, isLegacyAntigravity } from '../services/ideBuild';
 import { createLogger } from '../utils/logger';
 
@@ -178,6 +179,55 @@ export class DevControl implements vscode.Disposable {
                     result = { written: email, refresh: tokenFingerprint(tokens.refresh_token) };
                     break;
                 }
+                case 'authStatusProbe': {
+                    // PR #12 claim: a running hub re-reads the keychain when
+                    // GetAuthStatus is called. Writes the keychain item only
+                    // (the token file is what AgyHubKeeper watches, so it stays
+                    // out of the way), asks this window's hub, watches its
+                    // identity and pid, then restores the item.
+                    const email = String(cmd.args?.email || '');
+                    const tokens = await this.quotaManager.getTokensForEmail(email);
+                    if (!tokens) throw new Error(`no tokens for ${email}`);
+                    const hub = await findOwnHub();
+                    if (!hub) throw new Error('no hub for this window');
+                    const original = await readKeychainJson();
+                    if (!original) throw new Error('keychain item unreadable');
+                    const shape = (body: string) => {
+                        try { const o = JSON.parse(body); return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'object' ? Object.keys(v as object) : typeof v])); }
+                        catch { return `non-json ${body.length}B`; }
+                    };
+                    const timeline: unknown[] = [];
+                    const before = await hubIdentity(hub).catch(e => `err ${e.message}`);
+                    const orig = original as any;
+                    try {
+                        await writeKeychainJson({
+                            ...orig,
+                            token: { ...orig.token, access_token: tokens.access_token, refresh_token: tokens.refresh_token,
+                                expiry: new Date(tokens.expiry_timestamp * 1000).toISOString(),
+                                expires_in: Math.max(0, tokens.expiry_timestamp - Math.floor(Date.now() / 1000)) },
+                            id_token_email: email,
+                        });
+                        const t0 = Date.now();
+                        const authBody = cmd.args?.skipAuthStatus ? '{"skipped":{}}' : await hubCall(hub, 'GetAuthStatus').catch(e => `err ${e.message}`);
+                        timeline.push({ at: Date.now() - t0, getAuthStatus: shape(authBody) });
+                        for (let i = 0; i < 10; i++) {
+                            await new Promise(r => setTimeout(r, 1_000));
+                            const live = await findOwnHub();
+                            const em = live ? await hubIdentity(live).catch(e => `err ${e.message}`) : 'no hub';
+                            timeline.push({ at: Date.now() - t0, pid: live?.pid, email: em });
+                            if (em === email) break;
+                        }
+                    } finally {
+                        await writeKeychainJson(original);
+                    }
+                    // Put the hub back the same way, if the claim held.
+                    const live = await findOwnHub();
+                    if (live) await hubCall(live, 'GetAuthStatus').catch(() => '');
+                    await new Promise(r => setTimeout(r, 1_500));
+                    const after = live ? await hubIdentity(live).catch(e => `err ${e.message}`) : 'no hub';
+                    result = { hubPid: hub.pid, before, target: email, timeline, restoredKeychain: await readAgyKeychainIdentity(), hubAfterRestore: after };
+                    break;
+                }
                 case 'oauthProbe': {
                     // Issue #8 check without a browser: start a copy-mode flow,
                     // confirm the link reached the clipboard and the callback
@@ -206,6 +256,24 @@ export class DevControl implements vscode.Disposable {
                         redirect: redirect.host, forgedCallbackStatus: forged, flowOutcome: outcome,
                         portAfterFinish: afterClose === -1 ? 'closed' : `still answering ${afterClose}`,
                     };
+                    break;
+                }
+                case 'pollInterval': {
+                    // Same path as the panel's picker; reports what is in effect.
+                    if (cmd.args?.ms) this.quotaManager.setPollInterval(Number(cmd.args.ms));
+                    result = { inEffect: this.quotaManager.getPollInterval() };
+                    break;
+                }
+                case 'countRefresh': {
+                    // Wraps refresh() for a while and records when it is called.
+                    const qm = this.quotaManager as any;
+                    const original = qm.refresh;
+                    const t0 = Date.now();
+                    const at: number[] = [];
+                    qm.refresh = (...a: unknown[]) => { at.push(Math.round((Date.now() - t0) / 1000)); return original.apply(qm, a); };
+                    try { await new Promise(r => setTimeout(r, Number(cmd.args?.seconds || 60) * 1000)); }
+                    finally { qm.refresh = original; }
+                    result = { seconds: Number(cmd.args?.seconds || 60), calls: at };
                     break;
                 }
                 case 'tabs': {

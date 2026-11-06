@@ -90,6 +90,16 @@ export function fmtBig(n: number): string {
 }
 
 /** ISO date → short display (Apr 19) */
+/**
+ * YYYY-MM-DD of a moment in the viewer's time zone. Usage timestamps are UTC
+ * ISO strings; slicing them or calling toISOString() gives the UTC date, which
+ * in UTC+3 put every evening after 21:00 on the next day and shifted every
+ * cell of the year grid by one.
+ */
+export function localDateKey(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export function fmtShortDate(iso: string): string {
     if (!iso || iso.length < 10) return iso;
     const parts = iso.split('-');

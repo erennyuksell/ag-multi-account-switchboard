@@ -237,8 +237,17 @@ export interface HourlyBucket extends TokenBucket {
 }
 
 /** Model breakdown entry */
+/** Per-1M-token rates a cost was computed with. */
+export interface ModelRates { input: number; output: number; cache: number; reasoning: number }
+
 export interface ModelBucket extends TokenBucket {
     displayName: string;
+    /**
+     * Rates resolved in the extension host from the model id. The live
+     * catalog is keyed by id and only the host has it; sending the rates lets
+     * the sidebar and the dashboard price the same model the same way.
+     */
+    rates?: ModelRates;
 }
 
 /** Cascade/conversation breakdown */
@@ -262,6 +271,7 @@ export interface WeekdayBucket extends TokenBucket {
 /** Monthly breakdown per model (for tooltip) */
 export interface MonthlyModelEntry {
     displayName: string;
+    rates?: ModelRates;
     tokens: number;
     cost: number;
     inp: number;

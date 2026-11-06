@@ -4,6 +4,8 @@ import { PollLock } from '../utils/pollLock';
 import { AccountQuota, AccountCard, LocalQuotaData, ServerInfo, ViewState, DeepUsageStats } from '../types';
 import { AccountManager } from './accountManager';
 import { buildAccountCards } from './accountCardBuilder';
+import { setLearnedModelLabels } from '../services/usage/aggregator';
+import { PLACEHOLDER_MAP } from '../services/usage/types';
 import { isAgyMode, readAgyIdentity } from '../services/agyAuth';
 import { ServerDiscoveryService } from '../services/serverDiscovery';
 import { AccountSwitchService } from '../services/accountSwitch';
@@ -75,7 +77,17 @@ export class QuotaManager {
     private static readonly IDENTITY_FOLLOW_INTERVAL_MS = 1_500;
     private static readonly IDENTITY_FOLLOW_MAX_MS = 30_000;
     /** Host-side polling interval — runs regardless of panel visibility */
-    private static readonly HOST_POLL_INTERVAL_MS = 60_000;
+    /**
+     * Refresh rates the panel offers. The picker used to set a timer inside
+     * the webview while this host timer, fixed at 60s, did the polling: 2m
+     * and 5m changed nothing, 30s only added a second timer, and the choice
+     * lapsed whenever the panel was collapsed. The host timer is now the only
+     * one and follows the picker.
+     */
+    static readonly POLL_INTERVALS_MS = [30_000, 60_000, 120_000, 300_000];
+    private static readonly DEFAULT_POLL_INTERVAL_MS = 60_000;
+    private static readonly POLL_INTERVAL_KEY = 'ag_pollIntervalMs';
+    private static readonly MODEL_LABELS_KEY = 'ag_learnedModelLabels';
     private currentUsageRange = '24h';
 
     private cachedServer: { info: ServerInfo | null; ts: number } | null = null;
@@ -122,16 +134,36 @@ export class QuotaManager {
         this.refresh();
 
         // Host-side periodic poll — keeps status bar and cache fresh even
-        // when the sidebar panel is collapsed (webview timer dies without
-        // retainContextWhenHidden). This is the authoritative poll;
-        // the webview timer provides supplementary UI-driven refreshes.
-        this.hostPollTimer = setInterval(() => this.refresh(), QuotaManager.HOST_POLL_INTERVAL_MS);
+        // when the sidebar panel is collapsed. The only refresh timer.
+        this.startPollTimer();
+        setLearnedModelLabels(context.globalState.get<Record<string, string>>(QuotaManager.MODEL_LABELS_KEY) || {});
         context.subscriptions.push({ dispose: () => { if (this.hostPollTimer) clearInterval(this.hostPollTimer); } });
         context.subscriptions.push({ dispose: () => { if (this.serverRetryTimer) clearTimeout(this.serverRetryTimer); } });
     }
 
     getSwitchService(): AccountSwitchService {
         return this.switchService;
+    }
+
+    getPollInterval(): number {
+        const ms = this.context.globalState.get<number>(QuotaManager.POLL_INTERVAL_KEY);
+        return ms && QuotaManager.POLL_INTERVALS_MS.includes(ms) ? ms : QuotaManager.DEFAULT_POLL_INTERVAL_MS;
+    }
+
+    /** Set from the panel's picker. Unknown values are refused, not clamped. */
+    setPollInterval(ms: number): void {
+        if (QuotaManager.POLL_INTERVALS_MS.includes(ms)) {
+            this.context.globalState.update(QuotaManager.POLL_INTERVAL_KEY, ms);
+            this.startPollTimer();
+            log.info(`Poll interval → ${ms / 1000}s`);
+        }
+        // Echo what is in effect, so the picker never shows a rate that is not.
+        this.viewProvider?.postMessage({ type: 'pollInterval', ms: this.getPollInterval() });
+    }
+
+    private startPollTimer(): void {
+        if (this.hostPollTimer) clearInterval(this.hostPollTimer);
+        this.hostPollTimer = setInterval(() => this.refresh(), this.getPollInterval());
     }
 
     setViewProvider(provider: QuotaViewProvider) {
@@ -957,6 +989,30 @@ export class QuotaManager {
 
     private updateStatusBar(data: LocalQuotaData): void {
         this.statusBar.update(data, this.getSelectedModels());
+        this.learnModelLabels(data);
+    }
+
+    /**
+     * Remember the label of every placeholder model id the server lists, so
+     * Usage Stats can name it after it is withdrawn from the list. Kept in
+     * globalState, which every window shares.
+     */
+    private learnModelLabels(data: LocalQuotaData): void {
+        const configs = data.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+        const known = this.context.globalState.get<Record<string, string>>(QuotaManager.MODEL_LABELS_KEY) || {};
+        let changed = false;
+        for (const c of configs as any[]) {
+            const id = c?.modelOrAlias?.model;
+            const label = c?.label;
+            if (typeof id !== 'string' || typeof label !== 'string' || !label) continue;
+            if (!/^MODEL_PLACEHOLDER_/.test(id) || PLACEHOLDER_MAP[id] || known[id] === label) continue;
+            known[id] = label;
+            changed = true;
+        }
+        if (changed) {
+            this.context.globalState.update(QuotaManager.MODEL_LABELS_KEY, known);
+            setLearnedModelLabels(known);
+        }
     }
 
     /** Diagnostic probe: log raw LS remainingFraction per model (only in diag mode) */
