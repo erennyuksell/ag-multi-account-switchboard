@@ -24,7 +24,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { execFile, spawn } from 'child_process';
+import { spawn } from 'child_process';
 
 export const AGY_TOKEN_FILE = path.join(os.homedir(), '.gemini', 'jetski-standalone-oauth-token');
 export const AGY_BINARY = path.join(os.homedir(), '.gemini', 'bin', process.platform === 'win32' ? 'agy.exe' : 'agy');
@@ -54,35 +54,132 @@ const KEYCHAIN_SERVICE = 'gemini';
 const KEYCHAIN_ACCOUNT = 'antigravity';
 const KEYRING_PREFIX = 'go-keyring-base64:';
 
-export function readKeychainJson(): Promise<Record<string, unknown> | null> {
-    if (process.platform !== 'darwin') return Promise.resolve(null);
-    return new Promise(resolve => {
-        execFile('/usr/bin/security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w'],
-            { timeout: 5_000 }, (err, stdout) => {
-                if (err) return resolve(null);
-                let v = stdout.trim();
-                if (v.startsWith(KEYRING_PREFIX)) v = Buffer.from(v.slice(KEYRING_PREFIX.length), 'base64').toString('utf8');
-                try { resolve(JSON.parse(v)); } catch { resolve(null); }
-            });
+/**
+ * The OS credential store holding the hub's account. agy uses
+ * zalando/go-keyring (module path read from the agy binary, 2026-11-06),
+ * whose layout per platform is:
+ *   macOS    Keychain generic password, service "gemini", account
+ *            "antigravity"; value "go-keyring-base64:" + base64(JSON)
+ *   Windows  Credential Manager generic credential "gemini:antigravity",
+ *            user "antigravity"; blob = the JSON's UTF-8 bytes
+ *   Linux    Secret Service item with attributes service=gemini,
+ *            username=antigravity; secret = the JSON
+ * Only macOS has been run against a real hub. Windows and Linux follow the
+ * library's source; switchAgy verifies the result and rolls back if the hub
+ * does not take it.
+ */
+export async function readKeyringRaw(): Promise<string | null> {
+    switch (process.platform) {
+        case 'darwin': {
+            const out = await run('/usr/bin/security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w']);
+            if (out === null) return null;
+            const v = out.trim();
+            return v.startsWith(KEYRING_PREFIX) ? Buffer.from(v.slice(KEYRING_PREFIX.length), 'base64').toString('utf8') : v;
+        }
+        case 'win32': {
+            const out = await runPowerShell(`${WIN_CRED_TYPE}\n$b = [AgCred]::Read('${WIN_TARGET}'); if ($b -ne $null) { [Console]::Out.Write($b) }`);
+            return out ? Buffer.from(out.trim(), 'base64').toString('utf8') : null;
+        }
+        case 'linux':
+            return await run('secret-tool', ['lookup', 'service', KEYCHAIN_SERVICE, 'username', KEYCHAIN_ACCOUNT]);
+        default:
+            return null;
+    }
+}
+
+/** Write a raw value back, e.g. to restore what readKeyringRaw returned. The secret goes over stdin, never argv. */
+export async function writeKeyringRaw(value: string): Promise<void> {
+    switch (process.platform) {
+        case 'darwin': {
+            // `security -i` takes the command on stdin; base64 plus a fixed prefix needs no quoting.
+            const encoded = KEYRING_PREFIX + Buffer.from(value, 'utf8').toString('base64');
+            await run('/usr/bin/security', ['-i'], `add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w ${encoded}\n`, true);
+            return;
+        }
+        case 'win32':
+            // Base64 on stdin so the bytes reach CredWrite exactly as UTF-8.
+            await runPowerShell(`${WIN_CRED_TYPE}\n[AgCred]::Write('${WIN_TARGET}', '${KEYCHAIN_ACCOUNT}', [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()))`,
+                Buffer.from(value, 'utf8').toString('base64'), true);
+            return;
+        case 'linux':
+            await run('secret-tool', ['store', '--label', `Password for '${KEYCHAIN_ACCOUNT}' on '${KEYCHAIN_SERVICE}'`,
+                'service', KEYCHAIN_SERVICE, 'username', KEYCHAIN_ACCOUNT], value, true);
+            return;
+        default:
+            throw new Error(`no credential store support on ${process.platform}`);
+    }
+}
+
+export async function readKeychainJson(): Promise<Record<string, unknown> | null> {
+    const raw = await readKeyringRaw().catch(() => null);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
+}
+
+export function writeKeychainJson(value: Record<string, unknown>): Promise<void> {
+    return writeKeyringRaw(JSON.stringify(value));
+}
+
+const WIN_TARGET = `${KEYCHAIN_SERVICE}:${KEYCHAIN_ACCOUNT}`;
+
+/** CredReadW / CredWriteW, as go-keyring's wincred backend calls them (generic, persist local machine). */
+const WIN_CRED_TYPE = `Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class AgCred {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct CREDENTIAL { public int Flags; public int Type; public string TargetName; public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten; public int CredentialBlobSize;
+    public IntPtr CredentialBlob; public int Persist; public int AttributeCount; public IntPtr Attributes;
+    public string TargetAlias; public string UserName; }
+  [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool CredRead(string target, int type, int flags, out IntPtr cred);
+  [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern bool CredWrite(ref CREDENTIAL cred, int flags);
+  [DllImport("advapi32.dll")] static extern void CredFree(IntPtr p);
+  public static string Read(string target) {
+    IntPtr p; if (!CredRead(target, 1, 0, out p)) return null;
+    try { var c = (CREDENTIAL)Marshal.PtrToStructure(p, typeof(CREDENTIAL));
+      var b = new byte[c.CredentialBlobSize]; Marshal.Copy(c.CredentialBlob, b, 0, b.Length);
+      return Convert.ToBase64String(b); } finally { CredFree(p); } }
+  public static void Write(string target, string user, byte[] blob) {
+    var c = new CREDENTIAL(); c.Type = 1; c.TargetName = target; c.UserName = user; c.Persist = 2;
+    c.CredentialBlobSize = blob.Length; c.CredentialBlob = Marshal.AllocHGlobal(blob.Length);
+    try { Marshal.Copy(blob, 0, c.CredentialBlob, blob.Length);
+      if (!CredWrite(ref c, 0)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
+    finally { Marshal.FreeHGlobal(c.CredentialBlob); } }
+}
+"@`;
+
+/**
+ * Run a command, optionally feeding stdin. Resolves stdout, or null on a
+ * non-zero exit; with `strict`, rejects instead (and on any stderr).
+ */
+function run(cmd: string, args: string[], stdin?: string, strict = false, stderrIsError = true): Promise<string | null> {
+    return new Promise((resolve, reject) => {
+        const p = spawn(cmd, args, { windowsHide: true });
+        let stdout = '', stderr = '';
+        const timer = setTimeout(() => p.kill(), 20_000);
+        p.stdout.on('data', d => { stdout += d; });
+        p.stderr.on('data', d => { stderr += d; });
+        p.on('error', e => { clearTimeout(timer); strict ? reject(e) : resolve(null); });
+        p.on('close', code => {
+            clearTimeout(timer);
+            if (code === 0 && !(strict && stderrIsError && stderr.trim())) return resolve(stdout);
+            strict ? reject(new Error(`${path.basename(cmd)} exited ${code}: ${stderr.trim()}`)) : resolve(null);
+        });
+        p.stdin.end(stdin ?? '');
     });
 }
 
 /**
- * Write through `security -i` so the secret goes over stdin, not argv where
- * any process listing could see it. The value is base64 plus a fixed prefix,
- * so it needs no quoting.
+ * PowerShell with the script passed encoded, leaving stdin free for the
+ * secret. Failures surface as a non-zero exit; stderr alone is not trusted,
+ * since PowerShell writes progress records there when output is redirected.
  */
-export function writeKeychainJson(value: Record<string, unknown>): Promise<void> {
-    if (process.platform !== 'darwin') return Promise.resolve();
-    const encoded = KEYRING_PREFIX + Buffer.from(JSON.stringify(value), 'utf8').toString('base64');
-    return new Promise((resolve, reject) => {
-        const p = spawn('/usr/bin/security', ['-i']);
-        let stderr = '';
-        p.stderr.on('data', d => { stderr += d; });
-        p.on('error', reject);
-        p.on('close', code => code === 0 && !stderr.trim() ? resolve() : reject(new Error(`security exited ${code}: ${stderr.trim()}`)));
-        p.stdin.end(`add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT} -w ${encoded}\n`);
-    });
+function runPowerShell(script: string, stdin?: string, strict = false): Promise<string | null> {
+    const full = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n${script}`;
+    const encoded = Buffer.from(full, 'utf16le').toString('base64');
+    return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], stdin, strict, false);
 }
 
 /** Account the keychain item names — what a restarted hub will come up on. */
@@ -144,4 +241,22 @@ export async function writeAgyToken(opts: {
     const tmp = `${AGY_TOKEN_FILE}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(next), { mode: 0o600 });
     fs.renameSync(tmp, AGY_TOKEN_FILE);
+}
+
+export interface AgyStoreSnapshot { keyring: string | null; file: string | null }
+
+/** Both stores as they are now, to put back if a switch must be undone. */
+export async function snapshotAgyStore(): Promise<AgyStoreSnapshot> {
+    let file: string | null = null;
+    try { file = fs.readFileSync(AGY_TOKEN_FILE, 'utf8'); } catch { /* none yet */ }
+    return { keyring: await readKeyringRaw().catch(() => null), file };
+}
+
+export async function restoreAgyStore(snap: AgyStoreSnapshot): Promise<void> {
+    if (snap.keyring !== null) await writeKeyringRaw(snap.keyring);
+    if (snap.file !== null) {
+        const tmp = `${AGY_TOKEN_FILE}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, snap.file, { mode: 0o600 });
+        fs.renameSync(tmp, AGY_TOKEN_FILE);
+    }
 }

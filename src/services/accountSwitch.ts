@@ -8,8 +8,8 @@ import {
 } from '../shared/protobuf';
 import { createLogger } from '../utils/logger';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
-import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity } from './agyAuth';
-import { agyState, findOwnHub } from './agyHub';
+import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity, snapshotAgyStore, restoreAgyStore } from './agyAuth';
+import { agyState, findOwnHub, hubCall, hubIdentity } from './agyHub';
 import { isLegacyAntigravity, buildSummary } from './ideBuild';
 import { dbExec, dbGet } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache, LsEndpoint } from '../utils/lsClient';
@@ -365,6 +365,8 @@ export class AccountSwitchService {
 
     private static readonly AGY_POLL_MS = 500;
     private static readonly AGY_MAX_WAIT_MS = 60_000;
+    /** Windows/Linux: how long this window's hub gets to take the account before it is put back. */
+    private static readonly AGY_VERIFY_MS = 10_000;
 
     /**
      * 2.6 switch: store the account where the hubs read it, then let every
@@ -398,9 +400,36 @@ export class AccountSwitchService {
             return { confirmed: true, alreadyActive: true };
         }
 
+        // The Windows and Linux store layouts follow go-keyring's source but
+        // have not been run against a real hub. Keep what is there now, and
+        // if this window's hub does not take the new account, put it back
+        // rather than leave a store the hubs might not be able to read.
+        const snapshot = process.platform === 'darwin' ? null : await snapshotAgyStore();
+
         const start = Date.now();
         await writeAgyToken({ email, accessToken, refreshToken, expiryTimestamp });
         log.info(`agy: stored ${email} (was ${stored || 'none'}); hubs [${before.map(h => h.email).join(', ')}]`);
+
+        if (snapshot) {
+            const own = await findOwnHub();
+            let now = '';
+            if (own) {
+                await hubCall(own, 'GetAuthStatus').catch(e => log.warn('agy: GetAuthStatus failed:', e?.message));
+                while (Date.now() - start < AccountSwitchService.AGY_VERIFY_MS) {
+                    now = (await hubIdentity(own).catch(() => '')).toLowerCase();
+                    if (now === target) break;
+                    await delay(AccountSwitchService.AGY_POLL_MS);
+                }
+            }
+            if (now !== target) {
+                log.warn(`agy: this window's hub ${own ? `stayed on ${now || '(no answer)'}` : 'was not found'} on ${buildSummary()} — restoring the previous account`);
+                await restoreAgyStore(snapshot).catch(e => log.error('agy: restore failed:', e?.message));
+                this.offerReport(`Switching accounts is not working on ${buildSummary()} yet. Nothing was changed.`,
+                    `This window's hub ${own ? `stayed on its account` : 'was not found'} after the account was written to the credential store.`);
+                return { confirmed: false };
+            }
+            log.info(`agy: this window's hub took ${email} in ${Date.now() - start}ms (${process.platform})`);
+        }
 
         // Keep USS in step for anything in the IDE still reading it. The hubs
         // ignore it, so failures here do not affect the switch.
@@ -442,16 +471,20 @@ export class AccountSwitchService {
         // builds it lands in 2-3s. The likeliest cause is an Antigravity or
         // agy update that changed how hubs take the account, so say so and
         // make the report carry the versions.
-        void vscode.window.showWarningMessage(
-            `Switching to ${email} has not reached every window after a minute. ${buildSummary()} may not be supported yet.`,
-            'Report issue',
-        ).then(choice => {
-            if (choice !== 'Report issue') return;
-            const body = `**Build:** ${buildSummary()}\n**Extension:** ${vscode.extensions.getExtension('erennyuksell.ag-multi-account-switchboard')?.packageJSON.version ?? '?'}\n\nA switch did not reach every window within 60 s.`;
-            void vscode.env.openExternal(vscode.Uri.parse(
-                `https://github.com/erennyuksell/ag-multi-account-switchboard/issues/new?title=${encodeURIComponent('Switch not confirmed on ' + buildSummary())}&body=${encodeURIComponent(body)}`));
-        });
+        this.offerReport(`Switching to ${email} has not reached every window after a minute. ${buildSummary()} may not be supported yet.`,
+            'A switch did not reach every window within 60 s.');
         return { confirmed: false };
+    }
+
+    /** Warning with a button that opens an issue prefilled with the build (no account data). */
+    private offerReport(message: string, detail: string): void {
+        void vscode.window.showWarningMessage(message, 'Report issue').then(choice => {
+            if (choice !== 'Report issue') return;
+            const version = vscode.extensions.getExtension('erennyuksell.ag-multi-account-switchboard')?.packageJSON.version ?? '?';
+            const body = `**Build:** ${buildSummary()}\n**Extension:** ${version}\n\n${detail}`;
+            void vscode.env.openExternal(vscode.Uri.parse(
+                `https://github.com/erennyuksell/ag-multi-account-switchboard/issues/new?title=${encodeURIComponent('Switch not working on ' + buildSummary())}&body=${encodeURIComponent(body)}`));
+        });
     }
 
     // ==================== Antigravity before 2.5 ====================

@@ -28,7 +28,7 @@ import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache 
 import { extractField, extractStringField } from '../shared/protobuf';
 import { LS_SERVICE_PATH } from '../constants';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
-import { isAgyMode, readAgyIdentity, readAgyKeychainIdentity, writeAgyToken, readKeychainJson, writeKeychainJson } from '../services/agyAuth';
+import { isAgyMode, readAgyIdentity, readAgyKeychainIdentity, writeAgyToken, readKeychainJson, writeKeychainJson, snapshotAgyStore, restoreAgyStore } from '../services/agyAuth';
 import { findOwnHub, hubCall, hubIdentity } from '../services/agyHub';
 import { ideVersion, isLegacyAntigravity } from '../services/ideBuild';
 import { createLogger } from '../utils/logger';
@@ -274,6 +274,22 @@ export class DevControl implements vscode.Disposable {
                     try { await new Promise(r => setTimeout(r, Number(cmd.args?.seconds || 60) * 1000)); }
                     finally { qm.refresh = original; }
                     result = { seconds: Number(cmd.args?.seconds || 60), calls: at };
+                    break;
+                }
+                case 'restoreProbe': {
+                    // The Windows/Linux rollback, run on this machine: snapshot,
+                    // write another account, restore, compare byte for byte.
+                    const email = String(cmd.args?.email || '');
+                    const tokens = await this.quotaManager.getTokensForEmail(email);
+                    if (!tokens) throw new Error(`no tokens for ${email}`);
+                    const snap = await snapshotAgyStore();
+                    const before = { keyring: await readAgyKeychainIdentity(), file: readAgyIdentity() };
+                    await writeAgyToken({ email, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiryTimestamp: tokens.expiry_timestamp });
+                    const during = { keyring: await readAgyKeychainIdentity(), file: readAgyIdentity() };
+                    await restoreAgyStore(snap);
+                    const after = await snapshotAgyStore();
+                    result = { before, during, after: { keyring: await readAgyKeychainIdentity(), file: readAgyIdentity() },
+                        keyringBytesEqual: after.keyring === snap.keyring, fileBytesEqual: after.file === snap.file };
                     break;
                 }
                 case 'tabs': {

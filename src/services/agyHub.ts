@@ -65,7 +65,11 @@ export const agyState = { switching: false, hostRestartPending: false };
 /** The hub spawned by this extension host, if it is running. */
 export async function findOwnHub(): Promise<HubEndpoint | null> {
     try {
-        const { stdout } = await execAsync('ps -A -ww -o pid,ppid,args | grep "agy --hub" | grep -v grep', { timeout: 5_000 });
+        // Same "pid ppid args" lines on every platform.
+        const cmd = process.platform === 'win32'
+            ? `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'agy.exe' } | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }"`
+            : 'ps -A -ww -o pid,ppid,args | grep "agy --hub" | grep -v grep';
+        const { stdout } = await execAsync(cmd, { timeout: 10_000 });
         for (const line of stdout.split('\n')) {
             const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
             if (!m || Number(m[2]) !== process.pid) continue;

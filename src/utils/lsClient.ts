@@ -20,7 +20,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
-    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
+    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
     PROCESS_EXEC_TIMEOUT_MS, WMIC_EXEC_TIMEOUT_MS, LSOF_EXEC_TIMEOUT_MS,
     LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
 } from '../constants';
@@ -169,7 +169,7 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
         let lines: string[];
         if (isWindows) {
             // Emit "PID <args>" so the same parser works on both platforms.
-            const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' } | ForEach-Object { ($_.ProcessId.ToString() + ' ' + $_.CommandLine) }"`;
+            const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' -or $_.CommandLine -like '*${WIN_HUB_MARK}*' } | ForEach-Object { ($_.ProcessId.ToString() + ' ' + $_.CommandLine) }"`;
             try {
                 const { stdout } = await execAsync(ps, { timeout: PROCESS_EXEC_TIMEOUT_MS });
                 lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);

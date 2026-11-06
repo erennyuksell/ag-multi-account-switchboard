@@ -230,6 +230,11 @@ export const LS_PROCESS_GREP = isMac
  * LanguageServerService RPCs, so discovery treats both as servers.
  */
 export const HUB_PROCESS_MARK = 'agy --hub';
+/**
+ * Windows command lines name the binary agy.exe, so 'agy --hub' does not
+ * match there; every hub carries this flag.
+ */
+export const WIN_HUB_MARK = '--hub-port';
 /** Extended-regex alternative for `grep -E` covering both generations. */
 export const SERVER_PROCESS_GREP_E = `${LS_PROCESS_GREP}|${HUB_PROCESS_MARK}`;
 
@@ -257,6 +262,10 @@ export function workspaceIdFromArgs(line: string): string | undefined {
     if (ws) return ws;
     const dir = line.match(/--add-dir[\s=]+(\S+)/)?.[1];
     if (!dir) return undefined;
+    // Windows: R:\scraper → file_r_3A_scraper, the form the IDE uses there
+    // (seen in a 2.5.5 report on #10: the drive letter lowercased, ':' as _3A_).
+    const drive = dir.match(/^([A-Za-z]):[\\/](.*)$/);
+    if (drive) return `file_${drive[1].toLowerCase()}_3A_` + drive[2].replace(/[\\/]/g, '_').replace(/-/g, '_');
     return 'file_' + dir.replace(/\\/g, '/').replace(/\//g, '_').replace(/^_/, '').replace(/-/g, '_');
 }
 

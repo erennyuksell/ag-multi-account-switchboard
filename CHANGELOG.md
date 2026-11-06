@@ -2,6 +2,15 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
+## [3.3.1] — 2026-11-06
+
+### Added — Account switching on Antigravity 2.6 for Windows and Linux
+
+- **The account is written where 2.6 reads it on every platform.** agy stores it with zalando/go-keyring: Windows Credential Manager (generic credential `gemini:antigravity`) and the Linux Secret Service (`service=gemini`, `username=antigravity`, through `secret-tool`). 3.3.0 wrote only the macOS Keychain, so on Windows and Linux a switch never reached the hubs, and the panel still showed the new account. The Linux writer follows [#12](https://github.com/erennyuksell/ag-multi-account-switchboard/pull/12) by [@s1ddhants1](https://github.com/s1ddhants1).
+- **Untested on real Windows and Linux machines, so it checks itself.** After writing, the extension asks this window's hub to reload the account. If the hub has not moved within 10 s, the previous account is written back and the switch reports that it is not working on this build yet, with a prefilled issue. Nothing is left half-switched.
+- **Checked as far as this macOS machine allows.** The Windows credential script compiles under PowerShell 7.6 and stops only where it loads Windows' `advapi32.dll`; the Windows process queries parse. The store snapshot and restore were run on macOS and restore the stored bytes exactly. The end-to-end switch check still passes 7/7 on macOS.
+- **Hubs are found on Windows.** Discovery only looked for `language_server_win`, so on 2.6 the panel's local data, Usage Stats and Token Budget found no server. It now also finds `agy.exe` hubs, and maps their folders to the IDE's workspace ids (`R:\scraper` → `file_r_3A_scraper`).
+
 ## [3.3.0] — 2026-11-06
 
 > Compatibility release for **Antigravity 2.5.x and 2.6.x**. 2.5 renamed every install location and changed how the language server takes an account; 2.6 replaced the language server with one agent hub per window and moved account storage out of the IDE. Older builds stay supported: the install layout, the server generation and the Antigravity version are detected at runtime.
