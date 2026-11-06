@@ -2,7 +2,7 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
-## [3.3.0] — Unreleased
+## [3.3.0] — 2026-11-06
 
 > Compatibility release for **Antigravity 2.5.x and 2.6.x**. 2.5 renamed every install location and changed how the language server takes an account; 2.6 replaced the language server with one agent hub per window and moved account storage out of the IDE. Older builds stay supported: the install layout, the server generation and the Antigravity version are detected at runtime.
 
@@ -20,9 +20,10 @@ On 2.6 the account lives in the OS credential store. Only the macOS Keychain is 
 
 ### Fixed — Account switching on 2.6 (agent hubs)
 
-- **Switching did nothing on 2.6.** The hubs do not read the account from the IDE's shared state (USS) at all. They read a stored OAuth token — macOS Keychain item `gemini` / `antigravity`, with `~/.gemini/jetski-standalone-oauth-token` as fallback — and only when they start. A switch now writes both, and every window restarts its own hub onto the new account.
-- **Hub restarts stay inside the IDE's crash budget.** A hub is restarted through its own `Restart` RPC; the IDE treats that as a crash and allows three recoveries per window per ten minutes. The extension uses at most two and falls back to restarting the window's extension host after that, which has no such limit.
-- **Measured:** 4–6 s from click until every hub and every window's panel is on the new account (7 of 7 end-to-end checks, including two windows switching 1.5 s apart and a switch past the restart budget).
+- **Switching did nothing on 2.6.** The hubs do not read the account from the IDE's shared state (USS) at all. They read a stored OAuth token: macOS Keychain item `gemini` / `antigravity`, with `~/.gemini/jetski-standalone-oauth-token` as fallback. A switch now writes both, and every window asks its own hub to reload it with `GetAuthStatus` (found in [#12](https://github.com/erennyuksell/ag-multi-account-switchboard/pull/12) by [@s1ddhants1](https://github.com/s1ddhants1)). The hub moves to the new account in place: no restart, the running agent is not interrupted.
+- **Restart as fallback, inside the IDE's crash budget.** If a hub has not moved 5 s after `GetAuthStatus`, it is restarted through its own `Restart` RPC; the IDE treats that as a crash and allows three recoveries per window per ten minutes. The extension uses at most two and falls back to restarting the window's extension host after that, which has no such limit.
+- **Hubs left behind by closed windows are ignored.** A hub can outlive its window and keep answering, adopted by the OS. Nothing restarts such a hub, so counting it held every switch until the 60 s timeout, and it could pass for the live hub of the same folder.
+- **Measured:** about 2–3 s from click until every hub and every window's panel is on the new account, with no hub process restarted (7 of 7 end-to-end checks in three consecutive runs, including two windows switching 300 ms apart).
 
 ### Fixed — Account switching on 2.5 ([#10](https://github.com/erennyuksell/ag-multi-account-switchboard/issues/10))
 
@@ -45,6 +46,7 @@ On 2.6 the account lives in the OS credential store. Only the macOS Keychain is 
 - **"Connecting to Antigravity…" could sit for a minute on startup**, waiting for the slowest tracked account. Accounts render immediately; each account's refresh has a 12 s deadline and keeps its last reading if it overruns.
 - **Old or missing readings looked like live data.** Cards show `LOADING` before the first fetch and `Xm AGO` when a refresh could not update them.
 - **The ACTIVE badge followed the request, not the IDE.** It now follows the account the IDE is actually on; a pending switch shows `SWITCHING` on its target.
+- **The refresh-rate picker did nothing.** It set a timer inside the sidebar while a separate 60 s timer in the extension did the polling: `2m` and `5m` changed nothing, `30s` only added a second timer, and the choice lapsed whenever the sidebar was collapsed. The picker now sets the extension's timer, the only one, and the choice is remembered. Measured: 30 s → refreshes at 30/60/90 s; 2m → one refresh in 130 s.
 - **The model list in an account card could not be scrolled** ([#11](https://github.com/erennyuksell/ag-multi-account-switchboard/issues/11)). Expanded lists were capped at 900 px with the overflow hidden, which cut off the last models of a tracked account (13+ rows). They are now capped relative to the panel height and scroll. The same applied to Token Budget's skill, MCP tool and workspace lists.
 
 ### Fixed — Usage Stats and Token Budget
@@ -52,7 +54,12 @@ On 2.6 the account lives in the OS credential store. Only the macOS Keychain is 
 - **Install layout detection.** 2.5 moved data to `~/.gemini/antigravity-ide` and the app to `Antigravity IDE`; 2.6 kept the app name but moved data back to `~/.gemini/antigravity`. The app and the data directory are now resolved separately, from whichever install was written to most recently. Override with `AG_PANEL_PROFILE` if detection picks wrong.
 - **Usage Stats stopped counting on 2.6** (measured: 2 calls shown for a day with 500). Changed conversations are detected by step count, and both former sources went blank on 2.6. The conversation list, titles and step counts are now read from 2.6's own index, `conversation_summaries.db`.
 - **Token Budget's workspace section was empty on 2.6.** The hubs return nothing for the workspace rules/skills/workflows query; those are now read from `.agents/` and `.agent/` on disk when the server returns nothing.
-- **Conversation Guard is off on 2.6.** It compared against an index 2.6 no longer maintains, so it reported conversations as missing and offered a fix that would rewrite a table 2.6 does not read.
+- **Days are local, not UTC.** The year grid keyed its cells with `toISOString()` while walking local dates, so east of UTC every cell sat one day early (a Monday's usage drawn under Tuesday), and daily and monthly totals were cut at UTC midnight while the weekday and hourly charts used local time. All of them now use the local date. Found in the [wellthewell fork](https://github.com/wellthewell/ag-multi-account-switchboard-fork).
+- **Live prices now apply.** The LiteLLM catalog is keyed by model id but was asked with display names, and matched none of the models in use, so every cost came from the built-in keyword table. Costs are now resolved by model id in the extension host and sent to both the sidebar and the dashboard, so the two cannot disagree. On the development machine the totals barely moved ($4,755.35 → $4,755.41), since the built-in table is current; the difference shows when prices change.
+- **Unknown models are no longer billed at Sonnet rates.** A model with no known price is counted in tokens and left out of cost.
+- **Conversations moved by the 2.6 upgrade were not counted.** Usage Stats found conversations through their `brain/` folders, and the upgrade moved conversations without them; a hub creates the folder only when it opens the conversation. On the development machine 8 of 15 conversations were missing (241 calls). Conversations are now also found from the files in `conversations/`.
+- **Unnamed models get their real names.** `MODEL_PLACEHOLDER_M<n>` ids the built-in map does not cover are named from the server's own model list (e.g. M319 → "Gemini 3.8 Flash (Medium)") and remembered after the model is withdrawn.
+- **Conversation Guard works on 2.6.** It compared against an index 2.6 no longer maintains, so it reported conversations as missing and offered a fix that would rewrite a table 2.6 does not read. It now compares the conversation files (`.db`, and `.pb` carried over from older builds) with `conversation_summaries.db`. The fix restarts the window's agent: a starting hub restores missing index rows from the conversation files itself (measured on a copy of the data with one row deleted: restored, every field equal to the original). The extension writes nothing to the index.
 
 ### Changed — Quota view
 

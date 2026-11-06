@@ -148,7 +148,7 @@ The extension reads from the servers the Antigravity IDE runs locally. Which one
 
 Both serve the same RPCs, so quota, token budget and context window code is shared. Server discovery uses PID-based process scanning with `lsof` port resolution (macOS/Linux) or `PowerShell`/`netstat` (Windows), filtered to the current workspace.
 
-**Switching accounts** writes the new account where that IDE version reads it, then makes every window's server pick it up: on 2.5 by changing the email in USS (the IDE restarts the server) and re-broadcasting the credentials once it is back; on 2.6 by restarting each window's hub, within the IDE's crash-recovery budget. A switch is confirmed only when every window's server reports the new account. Builds before 2.5 keep the 3.2.1 switch, which shipped on them; the build is read from the app's `product.json`, since every generation reports the same VS Code version to Open VSX.
+**Switching accounts** writes the new account where that IDE version reads it, then makes every window's server pick it up: on 2.5 by changing the email in USS (the IDE restarts the server) and re-broadcasting the credentials once it is back; on 2.6 by asking each window's hub to reload the stored token (`GetAuthStatus`), with a restart inside the IDE's crash-recovery budget as fallback. A switch is confirmed only when every window's server reports the new account. Builds before 2.5 keep the 3.2.1 switch, which shipped on them; the build is read from the app's `product.json`, since every generation reports the same VS Code version to Open VSX.
 
 ---
 
@@ -230,7 +230,7 @@ Both serve the same RPCs, so quota, token budget and context window code is shar
 | **Account switch not reflected** | A switch normally lands in 4–6 s in every window. On Antigravity 2.6 under Linux or Windows switching is not supported yet. Otherwise click ↺, and check the `AG Panel` output channel |
 | **Context window empty** | The Dual-LS discovery may need a moment. Click Refresh or wait for auto-sync |
 | **Windows: token budget not showing** | Ensure LS is running. The extension uses PowerShell for process discovery |
-| **Missing conversations** | (2.0–2.5 only; 2.6 maintains its own index) The Conversation Guard auto-detects this. Click "Fix Now" in the warning banner, or run `AG Switchboard: Fix Missing Conversations` from the command palette |
+| **Missing conversations** | The Conversation Guard auto-detects this. Click "Fix Now" in the warning banner, or run `AG Switchboard: Fix Missing Conversations` from the command palette. Up to 2.5 it closes and relaunches the IDE to rebuild the index; on 2.6 it restarts the window's agent, which restores the index itself |
 
 ---
 
