@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, workspaceIdFromArgs, withoutOrphanHubs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
+import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
 
@@ -150,8 +150,8 @@ export class ServerDiscoveryService {
     private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
         // Emit "PID|||CommandLine" per process so we can capture the real PID.
         // Triple-pipe separator is safe — never appears in process command lines.
-        const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' } | ForEach-Object { ($_.ProcessId.ToString() + '|||' + $_.CommandLine) }"`;
-        const wmicFallback = `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%'" get ProcessId,CommandLine /format:csv 2>nul`;
+        const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' -or $_.CommandLine -like '*${WIN_HUB_MARK}*' } | ForEach-Object { ($_.ProcessId.ToString() + '|||' + $_.CommandLine) }"`;
+        const wmicFallback = `wmic process where "CommandLine like '%${LS_PROCESS_GREP}%' or CommandLine like '%${WIN_HUB_MARK}%'" get ProcessId,CommandLine /format:csv 2>nul`;
 
         let rawLines: string[] = [];
 
@@ -193,7 +193,7 @@ export class ServerDiscoveryService {
                 }
             }
             const csrf = cmdLine.match(CSRF_TOKEN_RE)?.[1];
-            const wsId = cmdLine.match(/--workspace_id[\s=]+(\S+)/)?.[1];
+            const wsId = workspaceIdFromArgs(cmdLine);
             const httpsPortMatch = cmdLine.match(/--https_server_port[\s=]+(\d+)/);
             if (csrf) {
                 log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} httpsPort=${httpsPortMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
