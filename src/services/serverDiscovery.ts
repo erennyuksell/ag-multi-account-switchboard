@@ -49,7 +49,7 @@ export class ServerDiscoveryService {
             }
 
             for (const cand of candidates) {
-                const ports = await this.getListeningPorts(cand.pid);
+                const ports = await this.portsOf(cand);
                 log.diag(`discover: pid=${cand.pid} → ports: [${ports.join(', ')}]`);
                 if (ports.length === 0) {
                     log.warn(`discover: pid=${cand.pid} has no listening TCP ports — skipping`);
@@ -113,7 +113,7 @@ export class ServerDiscoveryService {
             let firstReachableGlobal: ServerInfo | null = null;
 
             for (const cand of globalCandidates) {
-                const ports = await this.getListeningPorts(cand.pid);
+                const ports = await this.portsOf(cand);
                 if (ports.length === 0) continue;
 
                 for (const port of ports) {
@@ -138,8 +138,19 @@ export class ServerDiscoveryService {
         return workspaceServer ?? null;
     }
 
+    /**
+     * Ports to probe for a candidate. A 2.6 hub names its RPC port
+     * (--hub-port, plain HTTP), so there is nothing to scan; scanning needs
+     * netstat on Windows, which is what failed in #17. That port must not be
+     * reported as httpsPort: RpcDirectClient speaks HTTPS to httpsPort, and
+     * did so against the hub's HTTP port, leaving the panel without local data.
+     */
+    private async portsOf(cand: { pid: string; hubPort?: number }): Promise<number[]> {
+        return cand.hubPort ? [cand.hubPort] : this.getListeningPorts(cand.pid);
+    }
+
     /** macOS / Linux: use ps to find candidates */
-    private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
+    private async findCandidatesUnix(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number; hubPort?: number }[]> {
         const { stdout } = await execAsync(
             `ps -A -ww -o pid,ppid,args | grep -E "${SERVER_PROCESS_GREP_E}" | grep -v grep`
         );
@@ -147,7 +158,7 @@ export class ServerDiscoveryService {
     }
 
     /** Windows: use PowerShell + wmic fallback to find candidates (with PID) */
-    private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[]> {
+    private async findCandidatesWindows(): Promise<{ pid: string; csrfToken: string; wsId?: string; httpsPort?: number; hubPort?: number }[]> {
         // Emit "PID|||CommandLine" per process so we can capture the real PID.
         // Triple-pipe separator is safe — never appears in process command lines.
         const ps = `powershell -NoProfile -Command "Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like '*${LS_PROCESS_GREP}*' -or $_.CommandLine -like '*${WIN_HUB_MARK}*' } | ForEach-Object { ($_.ProcessId.ToString() + '|||' + $_.CommandLine) }"`;
@@ -194,17 +205,20 @@ export class ServerDiscoveryService {
             }
             const csrf = cmdLine.match(CSRF_TOKEN_RE)?.[1];
             const wsId = workspaceIdFromArgs(cmdLine);
-            const portMatch = cmdLine.match(/--(?:https_server_port|hub-port)[\s=]+(\d+)/);
+            const httpsPort = cmdLine.match(/--https_server_port[\s=]+(\d+)/)?.[1];
+            const hubPort = cmdLine.match(/--hub-port[\s=]+(\d+)/)?.[1];
             if (csrf) {
-                log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} port=${portMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
+                log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} httpsPort=${httpsPort ?? 'none'} hubPort=${hubPort ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
             }
-            return csrf ? [{ pid, csrfToken: csrf, wsId, httpsPort: portMatch ? parseInt(portMatch[1], 10) : undefined }] : [];
+            return csrf ? [{ pid, csrfToken: csrf, wsId,
+                httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined,
+                hubPort: hubPort ? parseInt(hubPort, 10) : undefined }] : [];
         });
     }
 
     /** Parse `ps` stdout into candidates */
-    private parsePsOutput(stdout: string): { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] {
-        const candidates: { pid: string; csrfToken: string; wsId?: string; httpsPort?: number }[] = [];
+    private parsePsOutput(stdout: string): { pid: string; csrfToken: string; wsId?: string; httpsPort?: number; hubPort?: number }[] {
+        const candidates: { pid: string; csrfToken: string; wsId?: string; httpsPort?: number; hubPort?: number }[] = [];
         for (const line of stdout.split('\n')) {
             if (!line.trim()) continue;
             const pidMatch = line.trim().match(/^(\d+)\s/);
@@ -212,12 +226,14 @@ export class ServerDiscoveryService {
             const tokenMatch = line.match(CSRF_TOKEN_RE);
             if (!tokenMatch) continue;
             const wsId = workspaceIdFromArgs(line);
-            const portMatch = line.match(/--(?:https_server_port|hub-port)[\s=]+(\d+)/);
+            const httpsPort = line.match(/--https_server_port[\s=]+(\d+)/)?.[1];
+            const hubPort = line.match(/--hub-port[\s=]+(\d+)/)?.[1];
             candidates.push({
                 pid: pidMatch[1],
                 csrfToken: tokenMatch[1],
                 wsId,
-                httpsPort: portMatch ? parseInt(portMatch[1], 10) : undefined,
+                httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined,
+                hubPort: hubPort ? parseInt(hubPort, 10) : undefined,
             });
         }
         return candidates;
