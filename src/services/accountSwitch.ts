@@ -411,14 +411,33 @@ export class AccountSwitchService {
         log.info(`agy: stored ${email} (was ${stored || 'none'}); hubs [${before.map(h => h.email).join(', ')}]`);
 
         if (snapshot) {
-            const own = await findOwnHub();
+            let own = await findOwnHub();
             let now = '';
             if (own) {
                 await hubCall(own, 'GetAuthStatus').catch(e => log.warn('agy: GetAuthStatus failed:', e?.message));
-                while (Date.now() - start < AccountSwitchService.AGY_VERIFY_MS) {
+                const t0 = Date.now();
+                while (Date.now() - t0 < 4_000) {
                     now = (await hubIdentity(own).catch(() => '')).toLowerCase();
                     if (now === target) break;
                     await delay(AccountSwitchService.AGY_POLL_MS);
+                }
+
+                // If GetAuthStatus didn't switch the running hub (e.g. agy 1.5.3 or Windows where
+                // in-process reload is not triggered by GetAuthStatus), trigger Restart RPC.
+                // The IDE respawns the hub cleanly on the newly stored credentials.
+                if (now !== target) {
+                    log.info(`agy: hub stayed on ${now || 'none'} after GetAuthStatus — requesting Restart RPC`);
+                    await hubCall(own, 'Restart').catch(() => { /* exits mid-reply */ });
+                    const tRestart = Date.now();
+                    while (Date.now() - tRestart < 8_000) {
+                        await delay(AccountSwitchService.AGY_POLL_MS);
+                        const freshOwn = await findOwnHub();
+                        if (freshOwn && freshOwn.pid !== own.pid) {
+                            own = freshOwn;
+                            now = (await hubIdentity(own).catch(() => '')).toLowerCase();
+                            if (now === target) break;
+                        }
+                    }
                 }
             }
             if (now !== target) {
@@ -441,27 +460,42 @@ export class AccountSwitchService {
 
         agyState.switching = true;
         try {
-        const ownPid = (await findOwnHub())?.pid;
-        while (Date.now() - start < AccountSwitchService.AGY_MAX_WAIT_MS) {
-            if (generation !== this.switchGeneration) return { confirmed: false, superseded: true };
-            // Another window switched after us: the store names someone else.
-            if (readAgyIdentity().toLowerCase() !== target) {
-                log.info(`agy: switch to ${email} superseded by ${readAgyIdentity()} from another window`);
-                return { confirmed: false, superseded: true };
+            const ownPid = (await findOwnHub())?.pid;
+            let noOtherHubsCount = 0;
+            while (Date.now() - start < AccountSwitchService.AGY_MAX_WAIT_MS) {
+                if (generation !== this.switchGeneration) return { confirmed: false, superseded: true };
+                // Another window switched after us: the store names someone else.
+                if (readAgyIdentity().toLowerCase() !== target) {
+                    log.info(`agy: switch to ${email} superseded by ${readAgyIdentity()} from another window`);
+                    return { confirmed: false, superseded: true };
+                }
+                await delay(AccountSwitchService.AGY_POLL_MS);
+                const hubs = await probe();
+                // This window's hub moves only once the extension host restarts,
+                // which waits for us — so do not wait for it.
+                const relevant = agyState.hostRestartPending ? hubs.filter(h => h.ep.pid !== ownPid) : hubs;
+                if (relevant.length > 0 && relevant.every(h => h.email === target)) {
+                    log.info(`agy: every hub on ${email} after ${Date.now() - start}ms`);
+                    await this.pushUserStatusToUSS(uss, hubs[0].status).catch(() => { /* cosmetic */ });
+                    this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+                    vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+                    return { confirmed: true };
+                }
+
+                // If own hub is already verified on target, and no other hubs exist across consecutive probes
+                // (e.g. single window setup, or other hubs have already exited)
+                if (relevant.length === 0 && (!before.length || before.every(h => h.ep.pid === ownPid))) {
+                    noOtherHubsCount++;
+                    if (noOtherHubsCount >= 8) { // ~2 seconds of stability
+                        log.info(`agy: single hub verified on ${email} after ${Date.now() - start}ms`);
+                        this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
+                        vscode.window.showInformationMessage(`✅ Switched to ${email}`);
+                        return { confirmed: true };
+                    }
+                } else {
+                    noOtherHubsCount = 0;
+                }
             }
-            await delay(AccountSwitchService.AGY_POLL_MS);
-            const hubs = await probe();
-            // This window's hub moves only once the extension host restarts,
-            // which waits for us — so do not wait for it.
-            const relevant = agyState.hostRestartPending ? hubs.filter(h => h.ep.pid !== ownPid) : hubs;
-            if (relevant.length > 0 && relevant.every(h => h.email === target)) {
-                log.info(`agy: every hub on ${email} after ${Date.now() - start}ms`);
-                await this.pushUserStatusToUSS(uss, hubs[0].status).catch(() => { /* cosmetic */ });
-                this.scheduleTokenRenewal(refreshToken, expiryTimestamp, email);
-                vscode.window.showInformationMessage(`✅ Switched to ${email}`);
-                return { confirmed: true };
-            }
-        }
         } finally {
             agyState.switching = false;
         }

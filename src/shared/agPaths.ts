@@ -248,8 +248,14 @@ export const SERVER_PROCESS_GREP_E = `${LS_PROCESS_GREP}|${HUB_PROCESS_MARK}`;
  * for the live hub of the same folder.
  */
 export function withoutOrphanHubs(lines: string[]): string[] {
-    return lines.filter(line =>
-        !line.includes(HUB_PROCESS_MARK) || line.trim().match(/^\d+\s+(\d+)\s/)?.[1] !== '1');
+    return lines.filter(line => {
+        const isHub = line.includes(HUB_PROCESS_MARK) || line.includes(WIN_HUB_MARK);
+        if (!isHub) return true;
+        // On macOS/Linux ps -A -ww -o pid,ppid,args puts ppid in column 2.
+        // A ppid of 1 indicates an orphaned process adopted by init/launchd.
+        const ppid = line.trim().match(/^\d+\s+(\d+)\s/)?.[1];
+        return ppid !== '1';
+    });
 }
 
 /**

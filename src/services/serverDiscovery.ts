@@ -194,11 +194,11 @@ export class ServerDiscoveryService {
             }
             const csrf = cmdLine.match(CSRF_TOKEN_RE)?.[1];
             const wsId = workspaceIdFromArgs(cmdLine);
-            const httpsPortMatch = cmdLine.match(/--https_server_port[\s=]+(\d+)/);
+            const portMatch = cmdLine.match(/--(?:https_server_port|hub-port)[\s=]+(\d+)/);
             if (csrf) {
-                log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} httpsPort=${httpsPortMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
+                log.info(`findCandidatesWindows: candidate pid=${pid} wsId=${wsId ?? 'global'} port=${portMatch?.[1] ?? 'none'} csrf=${csrf.substring(0, 8)}...`);
             }
-            return csrf ? [{ pid, csrfToken: csrf, wsId, httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined }] : [];
+            return csrf ? [{ pid, csrfToken: csrf, wsId, httpsPort: portMatch ? parseInt(portMatch[1], 10) : undefined }] : [];
         });
     }
 
@@ -212,12 +212,12 @@ export class ServerDiscoveryService {
             const tokenMatch = line.match(CSRF_TOKEN_RE);
             if (!tokenMatch) continue;
             const wsId = workspaceIdFromArgs(line);
-            const httpsPortMatch = line.match(/--https_server_port\s+(\d+)/);
+            const portMatch = line.match(/--(?:https_server_port|hub-port)[\s=]+(\d+)/);
             candidates.push({
                 pid: pidMatch[1],
                 csrfToken: tokenMatch[1],
                 wsId,
-                httpsPort: httpsPortMatch ? parseInt(httpsPortMatch[1], 10) : undefined,
+                httpsPort: portMatch ? parseInt(portMatch[1], 10) : undefined,
             });
         }
         return candidates;

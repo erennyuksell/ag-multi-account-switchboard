@@ -101,7 +101,7 @@ async function getListeningPorts(pid: string): Promise<number[]> {
 }
 
 /** One LS process as seen in `ps` / `Get-WmiObject` output. */
-interface LsProcess { pid: string; csrf: string; wsId?: string; httpsPort?: number }
+interface LsProcess { pid: string; csrf: string; wsId?: string; httpsPort?: number; hubPort?: number }
 
 /** Parse "pid args" lines into LS process records. */
 function parseLsProcessLines(lines: string[]): LsProcess[] {
@@ -111,7 +111,14 @@ function parseLsProcessLines(lines: string[]): LsProcess[] {
         const pid = line.trim().match(/^(\d+)\s/)?.[1] ?? '0';
         const wsId = workspaceIdFromArgs(line);
         const httpsPort = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
-        return [{ pid, csrf, wsId, httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined }];
+        const hubPort = line.match(/--hub-port[=\s]+(\d+)/)?.[1];
+        return [{
+            pid,
+            csrf,
+            wsId,
+            httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined,
+            hubPort: hubPort ? parseInt(hubPort, 10) : undefined,
+        }];
     });
 }
 
@@ -191,7 +198,7 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
         // Global first — see doc comment.
         procs.sort((a, b) => Number(!!a.wsId) - Number(!!b.wsId));
 
-        const signature = procs.map(p => `${p.pid}:${p.httpsPort ?? ''}`).join('|');
+        const signature = procs.map(p => `${p.pid}:${p.httpsPort ?? p.hubPort ?? ''}`).join('|');
         if (_endpointCache && _endpointCache.signature === signature
             && Date.now() - _endpointCache.ts < ENDPOINT_CACHE_TTL_MS) {
             return _endpointCache.endpoints;
@@ -203,12 +210,14 @@ export async function findLSEndpoints(): Promise<LsEndpoint[]> {
         const perProcess = await Promise.all(procs.map(async (proc): Promise<LsEndpoint | null> => {
             const base = { csrf: proc.csrf, wsId: proc.wsId, isGlobal: !proc.wsId, pid: proc.pid };
 
-            // Candidates in priority order: the advertised HTTPS port first,
-            // then every other listening socket over https and http. The socket
-            // scan is what finds the global LS, which advertises no port at all.
+            // Candidates in priority order:
+            // 1. Advertised hub port over plain HTTP (Antigravity 2.6+)
+            // 2. Advertised HTTPS port (Antigravity <= 2.5)
+            // 3. Any other listening socket over https and http (socket scan finds global LS)
             const candidates: LsEndpoint[] = [];
+            if (proc.hubPort) candidates.push({ ...base, port: proc.hubPort, protocol: 'http' });
             if (proc.httpsPort) candidates.push({ ...base, port: proc.httpsPort, protocol: 'https' });
-            if (proc.pid !== '0') {
+            if (proc.pid !== '0' && !proc.hubPort) {
                 for (const port of await getListeningPorts(proc.pid)) {
                     if (port === proc.httpsPort) continue; // already queued
                     candidates.push({ ...base, port, protocol: 'https' });
@@ -277,7 +286,7 @@ export function callLSEndpoint(
     return new Promise((resolve, reject) => {
         const req = transport.request(
             {
-                hostname: 'localhost',
+                hostname: '127.0.0.1',
                 port: ls.port,
                 path: endpoint,
                 method: 'POST',

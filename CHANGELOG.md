@@ -2,6 +2,16 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
+## [3.3.2] — 2026-11-12
+
+### Fixed — Antigravity 2.6 Account Switching & Hub Discovery on Windows
+
+- **Fallback to Restart RPC on Windows (#15):** When `GetAuthStatus` does not immediately trigger an in-process keyring reload (e.g. on Windows with older `agy` versions like 1.5.3), the switch flow now cleanly triggers a `Restart` RPC on the window's hub instead of timing out and rolling back the credential store. The hub restarts in ~3–4 s and comes up on the target account from the credential store.
+- **Hub discovery on Windows and loopback resolution (#17):**
+  - Discovery now directly reads the `--hub-port` argument for 2.6+ agent hubs on HTTP, avoiding unnecessary port scanning or failed netstat sweeps.
+  - Switched internal RPC connections from `localhost` to `127.0.0.1`, preventing IPv6 `::1` connection errors and delays on Windows with Node.js 18+.
+  - Fixed a deadlock in the multi-window switch wait loop: if the current window's hub has verified the target account and no other hubs exist, the switch completes immediately instead of waiting for 60 seconds.
+
 ## [3.3.1] — 2026-11-06
 
 ### Added — Account switching on Antigravity 2.6 for Windows and Linux
