@@ -483,8 +483,10 @@ export class AccountSwitchService {
                 }
 
                 // If own hub is already verified on target, and no other hubs exist across consecutive probes
-                // (e.g. single window setup, or other hubs have already exited)
-                if (relevant.length === 0 && (!before.length || before.every(h => h.ep.pid === ownPid))) {
+                // (e.g. single window setup, or other hubs have already exited). Only the
+                // Windows/Linux path above verifies its own hub; on macOS an empty probe
+                // means the hubs are still restarting, not that the switch landed.
+                if (snapshot && relevant.length === 0 && (!before.length || before.every(h => h.ep.pid === ownPid))) {
                     noOtherHubsCount++;
                     if (noOtherHubsCount >= 8) { // ~2 seconds of stability
                         log.info(`agy: single hub verified on ${email} after ${Date.now() - start}ms`);

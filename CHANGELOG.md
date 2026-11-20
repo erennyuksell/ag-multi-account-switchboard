@@ -12,6 +12,11 @@ All notable changes to **AG Multi-Account Switchboard** are documented here.
   - Switched internal RPC connections from `localhost` to `127.0.0.1`, preventing IPv6 `::1` connection errors and delays on Windows with Node.js 18+.
   - Fixed a deadlock in the multi-window switch wait loop: if the current window's hub has verified the target account and no other hubs exist, the switch completes immediately instead of waiting for 60 seconds.
 
+### Fixed — Panel data on 2.6 (regression in the #17 change)
+
+- **The panel lost its window's local data on every platform.** Hub discovery stored the hub's plain-HTTP port in the field the direct RPC client reads as an HTTPS port, so it spoke HTTPS to an HTTP port and every call failed. The hub port is now kept separately and probed over HTTP. Measured on macOS: the end-to-end check went from 3/7 to 7/7.
+- **A switch is no longer confirmed when no hub answers.** The single-hub shortcut confirmed a switch whenever the probe found no hubs. It now applies only on Windows and Linux, where the window's own hub has already been verified; on macOS an empty probe means the hubs are still restarting.
+
 ## [3.3.1] — 2026-11-06
 
 ### Added — Account switching on Antigravity 2.6 for Windows and Linux
