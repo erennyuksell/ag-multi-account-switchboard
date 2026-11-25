@@ -258,6 +258,44 @@ export function withoutOrphanHubs(lines: string[]): string[] {
     });
 }
 
+const CSRF_ARG_RE = /--csrf_token[\s=]+([\w-]+)/;
+
+/**
+ * CSRF token of a server process, from its `pid args` line.
+ *
+ * Language servers and hubs on agy before 1.5.2 carry it as --csrf_token.
+ * From agy 1.5.2 the IDE leaves it off the command line and hands it to the
+ * hub in ANTIGRAVITY_SERVER_CSRF_TOKEN (agy extension.js,
+ * MIN_ENV_CSRF_TOKEN_CLI_VERSION, read 2026-11-25 on Antigravity 2.8.0). The
+ * environment of another process is not readable on Windows, but the hub
+ * publishes its token in its own discovery file,
+ * ~/.gemini/<app_data_dir>/daemon/hub_<port>.json
+ * ({pid, httpPort, httpsPort, lsVersion, csrfToken}). Files of hubs that are
+ * gone stay in that directory, so one counts only when its pid and port are
+ * the live process's.
+ */
+export function csrfFromArgs(line: string, pid: string): string | undefined {
+    return line.match(CSRF_ARG_RE)?.[1] ?? readHubDiscovery(line, pid).csrf;
+}
+
+export type HubDiscoveryStatus = 'no hub port' | 'missing' | 'unreadable' | 'pid differs' | 'port differs' | 'no token' | 'ok';
+
+/** The hub's discovery file, checked against the live process. */
+export function readHubDiscovery(line: string, pid: string): { status: HubDiscoveryStatus; csrf?: string } {
+    const port = Number(line.match(/--hub-port[\s=]+(\d+)/)?.[1]);
+    if (!port || !/^\d+$/.test(pid) || pid === '0') return { status: 'no hub port' };
+    const dataDir = line.match(/--app_data_dir[\s=]+([\w.-]+)/)?.[1] ?? 'antigravity';
+    const file = path.join(os.homedir(), '.gemini', dataDir, 'daemon', `hub_${port}.json`);
+    let raw: string;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { return { status: 'missing' }; } // hub still starting
+    let d: any;
+    try { d = JSON.parse(raw); } catch { return { status: 'unreadable' }; } // being written
+    if (Number(d?.pid) !== Number(pid)) return { status: 'pid differs' };
+    if (Number(d?.httpPort) !== port) return { status: 'port differs' };
+    const csrf = d?.csrfToken;
+    return typeof csrf === 'string' && /^[\w-]+$/.test(csrf) ? { status: 'ok', csrf } : { status: 'no token' };
+}
+
 /**
  * Workspace id of a server process, in the IDE's `file_Users_x_repo` form.
  * Language servers carry it as --workspace_id; hubs only name the folder

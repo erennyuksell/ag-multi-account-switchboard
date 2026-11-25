@@ -139,10 +139,7 @@ export const AG_CMD_AUTH_REFRESH = 'antigravity.handleAuthRefresh';
 import * as vscode from 'vscode';
 
 // Platform-aware paths — re-exported from shared SSOT (vscode-free)
-export { isMac, isLinux, isWindows, STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs } from './shared/agPaths';
-
-/** Unified CSRF token extraction regex — SSOT for process discovery */
-export const CSRF_TOKEN_RE = /--csrf_token[\s=]+([\w-]+)/;
+export { isMac, isLinux, isWindows, STATE_DB_PATH, LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, csrfFromArgs } from './shared/agPaths';
 
 /**
  * Configuration-gated diagnostic file logging.

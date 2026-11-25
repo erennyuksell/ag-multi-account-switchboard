@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { ServerInfo } from '../types';
-import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, CSRF_TOKEN_RE, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
+import { LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, csrfFromArgs, isWindows, CASCADE_PROBE_TIMEOUT_MS, PROCESS_EXEC_TIMEOUT_MS } from '../constants';
 import { getWindowsProcessLines, callLsJson } from '../utils/lsClient';
 import { createLogger } from '../utils/logger';
 
@@ -203,7 +203,7 @@ export class ServerDiscoveryService {
                     cmdLine = line.substring(sepIdx + 3);
                 }
             }
-            const csrf = cmdLine.match(CSRF_TOKEN_RE)?.[1];
+            const csrf = csrfFromArgs(cmdLine, pid);
             const wsId = workspaceIdFromArgs(cmdLine);
             const httpsPort = cmdLine.match(/--https_server_port[\s=]+(\d+)/)?.[1];
             const hubPort = cmdLine.match(/--hub-port[\s=]+(\d+)/)?.[1];
@@ -223,14 +223,14 @@ export class ServerDiscoveryService {
             if (!line.trim()) continue;
             const pidMatch = line.trim().match(/^(\d+)\s/);
             if (!pidMatch) continue;
-            const tokenMatch = line.match(CSRF_TOKEN_RE);
-            if (!tokenMatch) continue;
+            const csrf = csrfFromArgs(line, pidMatch[1]);
+            if (!csrf) continue;
             const wsId = workspaceIdFromArgs(line);
             const httpsPort = line.match(/--https_server_port[\s=]+(\d+)/)?.[1];
             const hubPort = line.match(/--hub-port[\s=]+(\d+)/)?.[1];
             candidates.push({
                 pid: pidMatch[1],
-                csrfToken: tokenMatch[1],
+                csrfToken: csrf,
                 wsId,
                 httpsPort: httpsPort ? parseInt(httpsPort, 10) : undefined,
                 hubPort: hubPort ? parseInt(hubPort, 10) : undefined,

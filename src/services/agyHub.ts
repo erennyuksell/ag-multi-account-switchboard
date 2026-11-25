@@ -38,7 +38,8 @@ import * as http from 'http';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { AGY_TOKEN_FILE, readAgyIdentity, readAgyKeychainIdentity } from './agyAuth';
-import { LS_SERVICE_PATH } from '../constants';
+import { LS_SERVICE_PATH, csrfFromArgs } from '../constants';
+import { readHubDiscovery } from '../shared/agPaths';
 import { createLogger } from '../utils/logger';
 
 const execAsync = promisify(exec);
@@ -62,23 +63,49 @@ export interface HubEndpoint { pid: string; port: number; csrf: string }
  */
 export const agyState = { switching: false, hostRestartPending: false };
 
-/** The hub spawned by this extension host, if it is running. */
-export async function findOwnHub(): Promise<HubEndpoint | null> {
+interface AgyProcess { pid: string; ppid: number; args: string }
+
+/** agy processes as "pid ppid args", the same on every platform. */
+async function listAgyProcesses(): Promise<AgyProcess[]> {
     try {
-        // Same "pid ppid args" lines on every platform.
         const cmd = process.platform === 'win32'
             ? `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'agy.exe' } | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CommandLine }"`
             : 'ps -A -ww -o pid,ppid,args | grep "agy --hub" | grep -v grep';
         const { stdout } = await execAsync(cmd, { timeout: 10_000 });
-        for (const line of stdout.split('\n')) {
+        return stdout.split('\n').flatMap(line => {
             const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
-            if (!m || Number(m[2]) !== process.pid) continue;
-            const port = m[3].match(/--hub-port[=\s]+(\d+)/)?.[1];
-            const csrf = m[3].match(/--csrf_token[=\s]+([\w-]+)/)?.[1];
-            if (port && csrf) return { pid: m[1], port: Number(port), csrf };
-        }
-    } catch { /* no hub running */ }
+            return m ? [{ pid: m[1], ppid: Number(m[2]), args: m[3] }] : [];
+        });
+    } catch { return []; }
+}
+
+const hubPortOf = (args: string) => Number(args.match(/--hub-port[=\s]+(\d+)/)?.[1]) || 0;
+
+/** The hub spawned by this extension host, if it is running. */
+export async function findOwnHub(): Promise<HubEndpoint | null> {
+    for (const p of await listAgyProcesses()) {
+        if (p.ppid !== process.pid) continue;
+        const port = hubPortOf(p.args);
+        const csrf = csrfFromArgs(p.args, p.pid);
+        if (port && csrf) return { pid: p.pid, port, csrf };
+    }
     return null;
+}
+
+/**
+ * Why findOwnHub came back empty, for bug reports. Holds no secret: only
+ * counts and whether each piece findOwnHub needs was there.
+ */
+export async function describeOwnHub(): Promise<string> {
+    const procs = await listAgyProcesses();
+    const own = procs.filter(p => p.ppid === process.pid);
+    const hub = own.find(p => hubPortOf(p.args));
+    if (!hub) {
+        return `agy processes: ${procs.length}, children of this window: ${own.length}, none with --hub-port`;
+    }
+    return `agy processes: ${procs.length}, this window's hub: --hub-port yes, `
+        + `--csrf_token argument ${/--csrf_token[=\s]/.test(hub.args) ? 'yes' : 'no'}, `
+        + `discovery file ${readHubDiscovery(hub.args, hub.pid).status}`;
 }
 
 export function hubCall(hub: HubEndpoint, method: string, timeoutMs = 3_000): Promise<string> {

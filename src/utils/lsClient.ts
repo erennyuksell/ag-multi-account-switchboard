@@ -20,7 +20,7 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import {
-    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, CSRF_TOKEN_RE, isWindows,
+    LS_CERT_PATHS, LS_PROCESS_GREP, SERVER_PROCESS_GREP_E, WIN_HUB_MARK, workspaceIdFromArgs, withoutOrphanHubs, LS_SERVICE_PATH, csrfFromArgs, isWindows,
     PROCESS_EXEC_TIMEOUT_MS, WMIC_EXEC_TIMEOUT_MS, LSOF_EXEC_TIMEOUT_MS,
     LS_REQUEST_TIMEOUT_MS, DEFAULT_LS_TIMEOUT_MS,
 } from '../constants';
@@ -106,9 +106,9 @@ interface LsProcess { pid: string; csrf: string; wsId?: string; httpsPort?: numb
 /** Parse "pid args" lines into LS process records. */
 function parseLsProcessLines(lines: string[]): LsProcess[] {
     return lines.flatMap(line => {
-        const csrf = line.match(CSRF_TOKEN_RE)?.[1];
-        if (!csrf) return [];
         const pid = line.trim().match(/^(\d+)\s/)?.[1] ?? '0';
+        const csrf = csrfFromArgs(line, pid);
+        if (!csrf) return [];
         const wsId = workspaceIdFromArgs(line);
         const httpsPort = line.match(/--https_server_port[=\s]+(\d+)/)?.[1];
         const hubPort = line.match(/--hub-port[=\s]+(\d+)/)?.[1];
