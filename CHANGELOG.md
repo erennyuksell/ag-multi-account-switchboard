@@ -2,7 +2,7 @@
 
 All notable changes to **AG Multi-Account Switchboard** are documented here.
 
-## [Unreleased]
+## [3.3.3] — 2026-11-25
 
 ### Fixed — Hubs started by agy 1.5.2 and later are found again (#22, #23, #25 to #36)
 
