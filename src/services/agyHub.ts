@@ -39,6 +39,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { AGY_TOKEN_FILE, readAgyIdentity, readAgyKeychainIdentity } from './agyAuth';
 import { LS_SERVICE_PATH, csrfFromArgs } from '../constants';
+import { readHubDiscovery } from '../shared/agPaths';
 import { createLogger } from '../utils/logger';
 
 const execAsync = promisify(exec);
@@ -104,7 +105,7 @@ export async function describeOwnHub(): Promise<string> {
     }
     return `agy processes: ${procs.length}, this window's hub: --hub-port yes, `
         + `--csrf_token argument ${/--csrf_token[=\s]/.test(hub.args) ? 'yes' : 'no'}, `
-        + `token from discovery file ${csrfFromArgs(hub.args, hub.pid) ? 'yes' : 'no'}`;
+        + `discovery file ${readHubDiscovery(hub.args, hub.pid).status}`;
 }
 
 export function hubCall(hub: HubEndpoint, method: string, timeoutMs = 3_000): Promise<string> {

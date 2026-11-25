@@ -6,9 +6,9 @@ All notable changes to **AG Multi-Account Switchboard** are documented here.
 
 ### Fixed — Hubs started by agy 1.5.2 and later are found again (#22, #23, #25 to #36)
 
-- **The window's hub was "not found" on Antigravity 2.7, 2.8 and 2.9 on Windows.** From agy 1.5.2 the IDE no longer puts `--csrf_token` on the hub's command line; it passes the token in the `ANTIGRAVITY_SERVER_CSRF_TOKEN` environment variable instead (read in the IDE's agy extension, `MIN_ENV_CSRF_TOKEN_CLI_VERSION`). Every lookup required that argument, so the hub was skipped, the switch rolled back, and the panel found no server.
+- **The window's hub was "not found" on Antigravity 2.7, 2.8 and 2.9 on Windows.** Since 2.7, when agy is 1.5.2 or newer, the IDE no longer puts `--csrf_token` on the hub's command line; it passes the token in the `ANTIGRAVITY_SERVER_CSRF_TOKEN` environment variable instead (read in the IDE's agy extension, `MIN_ENV_CSRF_TOKEN_CLI_VERSION`). Every lookup required that argument, so the hub was skipped, the switch rolled back, and the panel found no server.
 - **The token now comes from the hub's own discovery file** when the argument is absent: `~/.gemini/<app_data_dir>/daemon/hub_<port>.json`, which agy writes on start. A file counts only when its `pid` and `httpPort` match the running process, because files of exited hubs stay in that directory.
-- **Reports now say which step failed.** When the hub is not found, the prefilled issue lists how many agy processes were seen, whether this window has one, and whether its token came from the argument or the discovery file. No token is included.
+- **Reports now say which step failed.** When the hub is not found, the prefilled issue lists how many agy processes were seen, whether this window has one, whether it carries `--csrf_token`, and what was wrong with the discovery file (missing, unreadable, different pid or port). No token is included.
 - **Checked on macOS with Antigravity 2.8.0 and agy 1.5.16**, whose hub also starts without `--csrf_token`: the switch reached the hub in place (same pid) in about 3 s, in both directions, and the panel followed. Not yet run on Windows.
 
 ## [3.3.2] — 2026-11-12
