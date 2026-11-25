@@ -9,7 +9,7 @@ import {
 import { createLogger } from '../utils/logger';
 import { tokenFingerprint } from '../utils/tokenFingerprint';
 import { isAgyMode, writeAgyToken, readAgyKeychainIdentity, readAgyIdentity, snapshotAgyStore, restoreAgyStore } from './agyAuth';
-import { agyState, findOwnHub, hubCall, hubIdentity } from './agyHub';
+import { agyState, describeOwnHub, findOwnHub, hubCall, hubIdentity } from './agyHub';
 import { isLegacyAntigravity, buildSummary } from './ideBuild';
 import { dbExec, dbGet } from '../shared/db';
 import { findLSEndpoints, loadLSCert, callLSEndpoint, invalidateLsEndpointCache, LsEndpoint } from '../utils/lsClient';
@@ -443,8 +443,9 @@ export class AccountSwitchService {
             if (now !== target) {
                 log.warn(`agy: this window's hub ${own ? `stayed on ${now || '(no answer)'}` : 'was not found'} on ${buildSummary()} — restoring the previous account`);
                 await restoreAgyStore(snapshot).catch(e => log.error('agy: restore failed:', e?.message));
+                const why = own ? '' : `\n\n${await describeOwnHub()}`;
                 this.offerReport(`Switching accounts is not working on ${buildSummary()} yet. Nothing was changed.`,
-                    `This window's hub ${own ? `stayed on its account` : 'was not found'} after the account was written to the credential store.`);
+                    `This window's hub ${own ? `stayed on its account` : 'was not found'} after the account was written to the credential store.${why}`);
                 return { confirmed: false };
             }
             log.info(`agy: this window's hub took ${email} in ${Date.now() - start}ms (${process.platform})`);
